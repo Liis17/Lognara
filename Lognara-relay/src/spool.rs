@@ -124,6 +124,11 @@ impl Spool {
         std::mem::take(&mut self.dropped)
     }
 
+    /// Учитывает события, которые невозможно отправить из-за лимитов core.
+    pub fn record_dropped(&mut self, events: u64) {
+        self.dropped = self.dropped.saturating_add(events);
+    }
+
     async fn pop(&mut self) -> Option<Entry> {
         let entry = self.files.pop_front()?;
         self.bytes -= entry.size;

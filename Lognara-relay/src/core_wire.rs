@@ -91,11 +91,182 @@ pub fn encode(batch: &CoreBatch) -> Vec<u8> {
     zstd::encode_all(packed.as_slice(), ZSTD_LEVEL).expect("in-memory zstd encoding")
 }
 
+/// Готовые тела не перекодируются при повторной отправке: их байты служат ключом core.
+pub struct EncodedBatch {
+    pub body: Vec<u8>,
+    pub events: usize,
+}
+
+/// Делит пачку до выполнения обоих лимитов. Непомещающееся одиночное событие
+/// учитывается как потеря relay; остальные события сохраняют порядок и идентификаторы.
+pub fn encode_split(
+    batch: CoreBatch,
+    body_limit: usize,
+    decoded_limit: usize,
+) -> (Vec<EncodedBatch>, u64) {
+    let mut pending = vec![batch];
+    let mut encoded = Vec::new();
+    let mut dropped = 0u64;
+    while let Some(mut batch) = pending.pop() {
+        let events = batch.groups.iter().map(|group| group.events.len()).sum();
+        let mut packed = LimitedWriter {
+            bytes: Vec::new(),
+            limit: decoded_limit,
+        };
+        if batch
+            .serialize(&mut rmp_serde::Serializer::new(&mut packed).with_struct_map())
+            .is_ok()
+        {
+            let mut compressed = LimitedWriter {
+                bytes: Vec::new(),
+                limit: body_limit,
+            };
+            if zstd::stream::copy_encode(&packed.bytes[..], &mut compressed, ZSTD_LEVEL).is_ok() {
+                encoded.push(EncodedBatch {
+                    body: compressed.bytes,
+                    events,
+                });
+                continue;
+            }
+        }
+        // Метаданные и счётчики передаются ровно в одной из дочерних пачек.
+        let right = if batch.groups.len() > 1 {
+            let middle = batch.groups.len() / 2;
+            Some(CoreBatch {
+                dropped: 0,
+                groups: batch.groups.split_off(middle),
+            })
+        } else if let Some(group) = batch.groups.first_mut()
+            && group.events.len() > 1
+        {
+            let middle = group.events.len() / 2;
+            Some(CoreBatch {
+                dropped: 0,
+                groups: vec![Group {
+                    source: group.source.clone(),
+                    dropped: 0,
+                    events: group.events.split_off(middle),
+                }],
+            })
+        } else {
+            None
+        };
+        if let Some(right) = right {
+            pending.push(right);
+            pending.push(batch);
+        } else {
+            tracing::error!(
+                events,
+                "single event or source metadata exceeds core byte limits"
+            );
+            dropped = dropped
+                .saturating_add(events as u64)
+                .saturating_add(batch.dropped);
+        }
+    }
+    (encoded, dropped)
+}
+
+struct LimitedWriter {
+    bytes: Vec<u8>,
+    limit: usize,
+}
+
+impl std::io::Write for LimitedWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
+            return Err(std::io::Error::other("encoded batch exceeds byte limit"));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn split_respects_both_limits_preserves_ids_order_and_counters() {
+        let mut seed = 7u64;
+        let events: Vec<_> = (0..12)
+            .map(|_| {
+                let message = (0..500)
+                    .map(|_| {
+                        seed ^= seed << 13;
+                        seed ^= seed >> 7;
+                        seed ^= seed << 17;
+                        char::from(b'a' + (seed % 26) as u8)
+                    })
+                    .collect();
+                crate::normalize::event(crate::agent_wire::Record {
+                    received_at: 123,
+                    payload: crate::agent_wire::Payload::Text(message),
+                })
+            })
+            .collect();
+        let source = Source {
+            environment: None,
+            server: "srv".into(),
+            backend: "backend".into(),
+            service: "api".into(),
+            service_instance: None,
+        };
+        let batch = CoreBatch {
+            dropped: 9,
+            groups: vec![
+                Group {
+                    source: source.clone(),
+                    dropped: 3,
+                    events: events[..6].to_vec(),
+                },
+                Group {
+                    source,
+                    dropped: 5,
+                    events: events[6..].to_vec(),
+                },
+            ],
+        };
+        for (body_limit, decoded_limit) in [(800, 100_000), (100_000, 1200)] {
+            let (parts, dropped) = encode_split(batch.clone(), body_limit, decoded_limit);
+            assert_eq!(dropped, 0);
+            assert!(parts.len() > 1);
+            let mut restored = Vec::new();
+            let mut relay_dropped = 0;
+            let mut agent_dropped = 0;
+            for part in parts {
+                assert!(part.body.len() <= body_limit);
+                let packed = zstd::decode_all(&part.body[..]).unwrap();
+                assert!(packed.len() <= decoded_limit);
+                let decoded: CoreBatch = rmp_serde::from_slice(&packed).unwrap();
+                assert_eq!(
+                    part.events,
+                    decoded
+                        .groups
+                        .iter()
+                        .map(|group| group.events.len())
+                        .sum::<usize>()
+                );
+                relay_dropped += decoded.dropped;
+                for group in decoded.groups {
+                    agent_dropped += group.dropped;
+                    restored.extend(group.events);
+                }
+            }
+            assert_eq!(restored, events);
+            assert_eq!(relay_dropped, 9);
+            assert_eq!(agent_dropped, 8);
+        }
+        let (parts, dropped) = encode_split(batch, 1, 1);
+        assert!(parts.is_empty());
+        assert_eq!(dropped, 21);
+    }
 
     #[test]
     fn encoded_batch_decodes_back() {

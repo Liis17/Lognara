@@ -37,6 +37,7 @@ struct FakeCore {
     batches: mpsc::UnboundedReceiver<CoreBatch>,
     requests: Arc<AtomicUsize>,
     status: Arc<Mutex<StatusCode>>,
+    bodies: Arc<Mutex<Vec<Bytes>>>,
 }
 
 #[derive(Clone)]
@@ -44,6 +45,7 @@ struct CoreState {
     batches: mpsc::UnboundedSender<CoreBatch>,
     requests: Arc<AtomicUsize>,
     status: Arc<Mutex<StatusCode>>,
+    bodies: Arc<Mutex<Vec<Bytes>>>,
 }
 
 impl FakeCore {
@@ -69,9 +71,11 @@ async fn fake_core() -> FakeCore {
         batches,
         requests: Arc::default(),
         status: Arc::new(Mutex::new(StatusCode::OK)),
+        bodies: Arc::default(),
     };
     let requests = state.requests.clone();
     let status = state.status.clone();
+    let bodies = state.bodies.clone();
     let app = Router::new()
         .route("/v1/batches", post(receive))
         .with_state(state);
@@ -85,12 +89,14 @@ async fn fake_core() -> FakeCore {
         batches: receiver,
         requests,
         status,
+        bodies,
     }
 }
 
 async fn receive(State(state): State<CoreState>, headers: HeaderMap, body: Bytes) -> StatusCode {
     // Статус читается до учёта запроса, чтобы тест мог сменить его, дождавшись счётчика.
     let status = *state.status.lock().unwrap();
+    state.bodies.lock().unwrap().push(body.clone());
     state.requests.fetch_add(1, Ordering::SeqCst);
     if status != StatusCode::OK {
         return status;
@@ -135,6 +141,8 @@ fn config(core: &FakeCore, spool_dir: &Path) -> Config {
         listen_addr: "127.0.0.1:0".parse().unwrap(),
         spool_dir: spool_dir.to_owned(),
         spool_max_bytes: u64::MAX,
+        core_max_body_bytes: 64 << 20,
+        core_max_decoded_bytes: 256 << 20,
     }
 }
 
@@ -348,6 +356,55 @@ async fn keeps_events_in_spool_on_shutdown_when_core_is_down() {
     assert_eq!(saved.len(), 1);
     let batch = decode(&saved.oldest().await.unwrap());
     assert_eq!(messages(&batch.groups[0]), ["late"]);
+}
+
+#[tokio::test]
+async fn split_batches_survive_spool_restart_with_identical_retry_bytes() {
+    let mut core = fake_core().await;
+    core.respond(StatusCode::SERVICE_UNAVAILABLE);
+    let spool = tempfile::tempdir().unwrap();
+    let mut cfg = config(&core, spool.path());
+    cfg.core_max_decoded_bytes = 900;
+    let relay = start_relay(cfg.clone()).await;
+    let messages: Vec<_> = (0..6)
+        .map(|id| format!("{id} {}", "x".repeat(350)))
+        .collect();
+    let refs: Vec<_> = messages.iter().map(String::as_str).collect();
+    assert_eq!(
+        send(&relay, &agent_batch("api", &refs)).await,
+        StatusCode::ACCEPTED
+    );
+    eventually(|| spooled(spool.path()) == 6).await;
+    relay.stop().await;
+    let failed_body = core.bodies.lock().unwrap()[0].clone();
+    let mut saved = Spool::open(spool.path(), u64::MAX).await.unwrap();
+    assert_eq!(saved.oldest().await.unwrap().as_slice(), &failed_body[..]);
+    drop(saved);
+    core.respond(StatusCode::OK);
+    let restarted = start_relay(cfg).await;
+    let mut restored = vec![];
+    for _ in 0..6 {
+        let batch = core.next_batch().await;
+        assert!(rmp_serde::to_vec_named(&batch).unwrap().len() <= 900);
+        restored.extend(
+            batch
+                .groups
+                .into_iter()
+                .flat_map(|group| group.events)
+                .map(|event| event.message),
+        );
+    }
+    assert_eq!(restored, messages);
+    assert!(
+        core.bodies
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|body| **body == failed_body)
+            .count()
+            >= 2
+    );
+    restarted.stop().await;
 }
 
 #[tokio::test]

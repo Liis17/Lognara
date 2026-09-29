@@ -1,5 +1,6 @@
 //! Отправка накопленных событий в lognara-core. Пока core недоступен, пачки ждут в spool.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,8 +26,10 @@ pub struct Sender {
     core: Core,
     flush_interval: Duration,
     shutdown: CancellationToken,
-    /// Пачка из памяти, которая ещё не доставлена и не сохранена в spool.
-    pending: Option<Pending>,
+    /// Уже закодированные части пачки, ещё не доставленные и не сохранённые в spool.
+    pending: VecDeque<Pending>,
+    body_limit: usize,
+    decoded_limit: usize,
 }
 
 struct Pending {
@@ -55,7 +58,9 @@ impl Sender {
             },
             flush_interval: config.flush_interval,
             shutdown,
-            pending: None,
+            pending: VecDeque::new(),
+            body_limit: config.core_max_body_bytes,
+            decoded_limit: config.core_max_decoded_bytes,
         }
     }
 
@@ -80,6 +85,7 @@ impl Sender {
             warn!("timed out delivering batches to core");
         }
         // Если ожидание прервано, недоставленная пачка и остаток памяти сохраняются на диск.
+        self.save_pending().await;
         self.seal(true);
         self.save_pending().await;
         if !self.spool.is_empty() {
@@ -104,11 +110,13 @@ impl Sender {
         }
 
         self.seal(partial);
-        if let Some(pending) = &self.pending
+        while let Some(pending) = self.pending.front()
             && self.spool.is_empty()
-            && self.core.deliver(pending.body.clone()).await
         {
-            self.pending = None;
+            if !self.core.deliver(pending.body.clone()).await {
+                break;
+            }
+            self.pending.pop_front();
         }
         // Core недоступен или в spool остались старые пачки: новая ждёт своей очереди.
         self.save_pending().await;
@@ -116,25 +124,29 @@ impl Sender {
 
     /// Собирает пачку из памяти, если прежняя уже доставлена или сохранена.
     fn seal(&mut self, partial: bool) {
-        if self.pending.is_some() {
+        if !self.pending.is_empty() {
             return;
         }
-        self.pending = self.buffer.take(partial).map(|(groups, events)| {
+        if let Some((groups, _)) = self.buffer.take(partial) {
             let batch = CoreBatch {
                 dropped: self.spool.take_dropped(),
                 groups,
             };
-            Pending {
-                body: core_wire::encode(&batch).into(),
-                events,
-            }
-        });
+            let (batches, dropped) =
+                core_wire::encode_split(batch, self.body_limit, self.decoded_limit);
+            self.spool.record_dropped(dropped);
+            self.pending
+                .extend(batches.into_iter().map(|batch| Pending {
+                    body: batch.body.into(),
+                    events: batch.events,
+                }));
+        }
     }
 
     async fn save_pending(&mut self) {
-        if let Some(pending) = &self.pending {
+        while let Some(pending) = self.pending.front() {
             self.spool.push(&pending.body, pending.events as u64).await;
-            self.pending = None;
+            self.pending.pop_front();
         }
     }
 }

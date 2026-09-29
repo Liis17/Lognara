@@ -30,6 +30,9 @@ pub struct Config {
     pub spool_dir: PathBuf,
     /// Лимит spool; при переполнении удаляются самые старые пачки.
     pub spool_max_bytes: u64,
+    /// Должны быть не больше соответствующих лимитов core.
+    pub core_max_body_bytes: usize,
+    pub core_max_decoded_bytes: usize,
 }
 
 #[derive(Debug, PartialEq)]
@@ -108,6 +111,8 @@ impl Config {
                 .unwrap_or_else(|| DEFAULT_SPOOL_DIR.to_owned())
                 .into(),
             spool_max_bytes: spool_max_mb.saturating_mul(1024 * 1024),
+            core_max_body_bytes: positive(&get, "LOGNARA_CORE_MAX_BODY_BYTES", 64 << 20)?,
+            core_max_decoded_bytes: positive(&get, "LOGNARA_CORE_MAX_DECODED_BYTES", 256 << 20)?,
         })
     }
 }
