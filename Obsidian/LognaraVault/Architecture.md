@@ -27,7 +27,7 @@ Parent: [[Index]]
 | `Lognara-agent/src/main.rs` | Точка входа агента. Параметры задаются переменными `LOGNARA_*`. |
 | `Lognara-relay/`, `Lognara-core/` | Пустые каталоги будущих сервисов. |
 | `README.md` | Содержит только заголовок `Lognara`. |
-| `.gitignore` | Исключения для сборок Cargo (`target`), резервных файлов rustfmt, PDB, Cargo Mutants, `default.profraw`, `.DS_Store`. |
+| `.gitignore` | Исключает сборки Cargo (`target`) и артефакты агента в корневом `/build/`, резервные файлы rustfmt, PDB, Cargo Mutants, `default.profraw`, `.DS_Store`. |
 | `LICENSE` | Текст лицензии MIT. |
 
 Каждый сервис собирается отдельным crate, общего Cargo workspace нет.
