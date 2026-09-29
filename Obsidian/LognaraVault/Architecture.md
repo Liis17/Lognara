@@ -6,7 +6,7 @@ Parent: [[Index]]
 
 | Область | Текущее состояние |
 |---------|-------------------|
-| Язык и runtime | Rust (edition 2024) и tokio подтверждены для `Lognara-agent/` и `Lognara-relay/`. Стек core пока не подтверждён: его каталог пуст. |
+| Язык и runtime | Rust (edition 2024) и tokio подтверждены для `Lognara-agent/` и `Lognara-relay/`. Core также использует Rust 2024 и tokio; MSRV 1.94. |
 | Зависимости | `Lognara-agent/Cargo.toml`: axum, reqwest, tokio, tokio-util, serde, serde_json, rmp-serde, serde_bytes, zstd, tracing. Подробности в [[Agent/LognaraAgent]]. `Lognara-relay/Cargo.toml`: те же, reqwest с rustls, а также uuid, time, base64, bytes. Подробности в [[Relay/LognaraRelay]]. |
 | Лицензия | MIT, см. `LICENSE`. |
 
@@ -16,7 +16,7 @@ Parent: [[Index]]
 |-----------|---------|-----------|
 | [[Agent/LognaraAgent]] | `Lognara-agent/` | Реализован приём логов, буфер в памяти и отправка в relay. |
 | [[Relay/LognaraRelay]] | `Lognara-relay/` | Реализованы приём пачек агентов, разбор в события, группировка по источнику, отправка в core и spool на диске. Структура в [[Relay/LognaraRelay-ProjectMap]]. |
-| lognara-core | `Lognara-core/` | Каталог пуст. Центральный сервер. |
+| [[Core/LognaraCore]] | `Lognara-core/` | Создаются хранилище и API; готов бинарный контракт и конфигурация. |
 
 Корневые файлы описаны в [[Repository/RootFiles]].
 
@@ -26,7 +26,7 @@ Parent: [[Index]]
 |------|------|
 | `Lognara-agent/src/main.rs` | Точка входа агента. Параметры задаются переменными `LOGNARA_*`. |
 | `Lognara-relay/src/main.rs` | Точка входа relay. Параметры задаются переменными `LOGNARA_*`, spool хранится в `LOGNARA_SPOOL_DIR`. |
-| `Lognara-core/` | Пустой каталог будущего сервиса. |
+| `Lognara-core/src/main.rs` | Точка входа core; отдельный crate, конфигурация `LOGNARA_*`. |
 | `README.md` | Содержит только заголовок `Lognara`. |
 | `.gitignore` | Исключает сборки Cargo (`target`) и артефакты агента в корневом `/build/`, резервные файлы rustfmt, PDB, Cargo Mutants, `default.profraw`, `.DS_Store`. |
 | `LICENSE` | Текст лицензии MIT. |
@@ -57,3 +57,7 @@ Parent: [[Index]]
 3. Для крупного компонента (более 10 файлов или сложная структура типов) создай `-ProjectMap.md`.
 4. Обнови эту заметку при изменении стека, точек входа или сквозных потоков.
 5. Changelog в vault не веди — историю изменений хранит git.
+
+## Хранилище core
+
+[[Core/LognaraCore]] использует WAL, Arrow/Parquet + ZSTD, Tantivy, DataFusion и SQLite-каталог. Приём совместим с relay, время в наносекундах.

@@ -1,0 +1,52 @@
+[package]
+name = "lognara-core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT"
+description = "Центральное хранилище, поиск и аналитика логов Lognara"
+publish = false
+
+[dependencies]
+anyhow = "1"
+axum = "0.8"
+base64 = "0.22"
+bytes = "1"
+crc32fast = "1"
+datafusion = { version = "55.1", default-features = false, features = ["parquet", "datetime_expressions"] }
+fs2 = "0.4"
+futures = "0.3"
+hex = "0.4"
+hmac = "0.12"
+lru = "0.16"
+parquet = { version = "59.2", default-features = false, features = ["arrow", "zstd"] }
+rmp-serde = "1"
+rusqlite = { version = "0.40", default-features = false, features = ["bundled", "cache", "libsqlite3-sys"] }
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
+serde_json = "1"
+sha2 = "0.10"
+subtle = "2"
+tantivy = { version = "0.26.2", default-features = false, features = ["mmap", "lz4-compression"] }
+thiserror = "2"
+time = { version = "0.3", features = ["parsing", "formatting"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync", "fs", "io-util"] }
+tokio-util = "0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v7", "v4", "serde"] }
+zstd = "0.13"
+
+[dev-dependencies]
+lognara-relay = { path = "../Lognara-relay" }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+
+[profile.dev]
+debug = 0
+incremental = false
+
+[profile.test]
+debug = 0
+incremental = false
