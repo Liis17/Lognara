@@ -1,5 +1,6 @@
 //! Lognara Core: надёжный приём пачек relay, хранение и запросы.
 
+pub mod analytics;
 pub mod api;
 pub mod catalog;
 pub mod columns;

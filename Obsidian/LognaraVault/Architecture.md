@@ -16,7 +16,7 @@ Parent: [[Index]]
 |-----------|---------|-----------|
 | [[Agent/LognaraAgent]] | `Lognara-agent/` | Реализован приём логов, буфер в памяти и отправка в relay. |
 | [[Relay/LognaraRelay]] | `Lognara-relay/` | Реализованы приём пачек агентов, разбор в события, группировка по источнику, отправка в core и spool на диске. Структура в [[Relay/LognaraRelay-ProjectMap]]. |
-| [[Core/LognaraCore]] | `Lognara-core/` | Создаются хранилище и API; готовы HTTP, WAL, дедупликация, Arrow/Parquet, SQLite-каталог и индексы. |
+| [[Core/LognaraCore]] | `Lognara-core/` | Реализованы HTTP-приём, WAL, Arrow/Parquet, каталог SQLite, поиск Tantivy, аналитика DataFusion и retention. |
 
 Корневые файлы описаны в [[Repository/RootFiles]].
 
@@ -39,7 +39,7 @@ Parent: [[Index]]
 2. Агент добавляет время приёма, держит записи в памяти и отправляет пачку, как только набрано `LOGNARA_BATCH_SIZE` записей или прошёл `LOGNARA_FLUSH_INTERVAL_MS`.
 3. Пачка (MessagePack + zstd, идентификация источника: service, server, backend, environment, service_instance) уходит в lognara-relay на той же машине.
 4. Relay разбирает записи в события, группирует их по источнику и раз в `LOGNARA_FLUSH_INTERVAL_MS` (или сразу по `LOGNARA_BATCH_SIZE` событий) отправляет пачку MessagePack + zstd в lognara-core с Bearer-токеном.
-5. Пока core недоступен, пачки relay ждут в spool на volume и затем уходят от старых к новым. Сам core ещё не реализован.
+5. Пока core недоступен, пачки relay ждут в spool на volume и затем уходят от старых к новым. Core подтверждает пачку после fsync WAL, затем публикует поиск и аналитику по открытым и закрытым сегментам.
 
 Формат пачки агента описан в разделе «Контракт с relay» заметки [[Agent/LognaraAgent]], формат пачки для core — в разделе «Контракт с core» заметки [[Relay/LognaraRelay]].
 

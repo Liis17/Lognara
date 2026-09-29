@@ -14,6 +14,7 @@ Parent: [[Core/LognaraCore]]
 | storage | Материализация, снимки, seal, retention |
 | index | Индексация и ограниченный кеш читателей |
 | query | Проверка фильтров, top-k, чтение строк, HMAC-курсоры |
+| analytics | Типизированные агрегаты DataFusion, общий memory pool |
 | metrics | Счётчики и gauges Prometheus |
 | tests | Контракт, HTTP, WAL, Parquet, восстановление |
 | examples/relay_fixture | Fixture через настоящий encoder relay |

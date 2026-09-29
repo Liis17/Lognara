@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use crate::{
+    analytics::{self, GroupRequest, HistogramRequest},
     journal::{IngestError, Journal},
     query::{self, QueryError, SearchRequest},
     storage::Core,
@@ -27,12 +28,65 @@ pub fn router(core: Arc<Core>) -> Router {
     let queries = Router::new()
         .route("/v1/logs/search", post(search))
         .route("/v1/traces/{trace_id}", get(trace))
+        .route("/v1/stats/histogram", post(histogram))
+        .route("/v1/stats/group-by", post(group_by))
         .route_layer(middleware::from_fn_with_state(
             token_hash(&core.journal.config.query_token),
             authorize,
         ))
         .with_state(core.clone());
     ingest_router(core.journal.clone()).merge(queries)
+}
+
+async fn histogram(
+    State(core): State<Arc<Core>>,
+    request: Result<Json<HistogramRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    match request {
+        Ok(Json(request)) => run_analytics(&core, analytics::histogram(&core, request)).await,
+        Err(error) => QueryError::Invalid(error.body_text()).into_response(),
+    }
+}
+
+async fn group_by(
+    State(core): State<Arc<Core>>,
+    request: Result<Json<GroupRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    match request {
+        Ok(Json(request)) => run_analytics(&core, analytics::group_by(&core, request)).await,
+        Err(error) => QueryError::Invalid(error.body_text()).into_response(),
+    }
+}
+
+async fn run_analytics<T: serde::Serialize>(
+    core: &Core,
+    future: impl std::future::Future<Output = Result<T, QueryError>>,
+) -> Response {
+    if !core.journal.ready() {
+        return unavailable();
+    }
+    let Ok(_permit) = core.analytics_slots.clone().try_acquire_owned() else {
+        return QueryError::Busy.into_response();
+    };
+    let started = Instant::now();
+    core.journal.metrics.queries.fetch_add(1, Ordering::Relaxed);
+    let result = tokio::time::timeout(core.journal.config.query_timeout, future)
+        .await
+        .unwrap_or(Err(QueryError::Timeout));
+    core.journal
+        .metrics
+        .query_duration_us
+        .fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
+    match result {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => {
+            core.journal
+                .metrics
+                .query_errors
+                .fetch_add(1, Ordering::Relaxed);
+            error.into_response()
+        }
+    }
 }
 
 pub fn ingest_router(journal: Arc<Journal>) -> Router {

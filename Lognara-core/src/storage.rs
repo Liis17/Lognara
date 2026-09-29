@@ -54,12 +54,23 @@ pub struct Core {
     pub(crate) cursor_key: [u8; 32],
     pub search_slots: Arc<Semaphore>,
     pub analytics_slots: Arc<Semaphore>,
+    pub query_runtime: Arc<datafusion::execution::runtime_env::RuntimeEnv>,
     worker: Mutex<Option<JoinHandle<Result<()>>>>,
 }
 
 impl Core {
     /// Blocking startup: готовность наступает только после восстановления WAL.
     pub fn open(config: Config) -> Result<Arc<Self>> {
+        let query_runtime = datafusion::execution::runtime_env::RuntimeEnvBuilder::new()
+            .with_memory_pool(Arc::new(
+                datafusion::execution::memory_pool::GreedyMemoryPool::new(
+                    config.query_memory_bytes,
+                ),
+            ))
+            .with_metadata_cache_limit(32 << 20)
+            .with_file_statistics_cache_limit(16 << 20)
+            .with_object_list_cache_limit(8 << 20)
+            .build_arc()?;
         let journal = Journal::open(config)?;
         let mut key = [0; 32];
         key[..16].copy_from_slice(Uuid::new_v4().as_bytes());
@@ -75,6 +86,7 @@ impl Core {
             cursor_key: key,
             search_slots: Arc::new(Semaphore::new(4)),
             analytics_slots: Arc::new(Semaphore::new(2)),
+            query_runtime,
             worker: Mutex::new(None),
         });
         let mut worker = Materializer::recover(core.clone())?;
@@ -172,11 +184,17 @@ impl Materializer {
                 sync_dir(path.parent().unwrap())?;
             }
         }
-        let watermark = closed
-            .iter()
-            .map(|segment| segment.meta.last_sequence)
-            .max()
-            .unwrap_or(0);
+        let wal = core.journal.wal.lock().unwrap();
+        let watermark = wal.after(position).map_or(wal.next_ids().1 - 1, |receipt| {
+            receipt.first_sequence
+                + if receipt.batch_id == position.batch_id {
+                    position.offset
+                } else {
+                    0
+                }
+                - 1
+        });
+        drop(wal);
         Ok(Self {
             core,
             closed,
