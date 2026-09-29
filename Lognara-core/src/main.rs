@@ -1,4 +1,4 @@
-use lognara_core::{api, config::Config, journal::Journal};
+use lognara_core::{api, config::Config, storage::Core};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -9,15 +9,13 @@ async fn main() -> anyhow::Result<()> {
         .init();
     let config = Config::from_env()?;
     let addr = config.listen_addr;
-    let journal = tokio::task::spawn_blocking(move || Journal::open(config)).await??;
+    let core = tokio::task::spawn_blocking(move || Core::open(config)).await??;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(address = %listener.local_addr()?, "core listening");
-    axum::serve(listener, api::router(journal.clone()))
+    axum::serve(listener, api::router(core.journal.clone()))
         .with_graceful_shutdown(shutdown())
         .await?;
-    journal
-        .stopping
-        .store(true, std::sync::atomic::Ordering::Release);
+    tokio::task::spawn_blocking(move || core.shutdown()).await??;
     Ok(())
 }
 

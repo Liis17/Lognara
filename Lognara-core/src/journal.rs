@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{Notify, Semaphore};
 
 use crate::{
+    catalog::Catalog,
     config::Config,
     metrics::Metrics,
     model::now_nanos,
@@ -24,6 +25,7 @@ use crate::{
 pub struct Journal {
     pub config: Config,
     pub(crate) wal: Mutex<Wal>,
+    pub(crate) catalog: Mutex<Catalog>,
     pub healthy: AtomicBool,
     pub stopping: AtomicBool,
     pub wake: Notify,
@@ -43,8 +45,12 @@ pub enum IngestError {
 }
 
 impl Journal {
-    pub fn open(config: Config) -> Result<Arc<Self>> {
+    pub fn open(mut config: Config) -> Result<Arc<Self>> {
         fs::create_dir_all(&config.data_dir)?;
+        config.data_dir = fs::canonicalize(&config.data_dir)?;
+        if let Some(parent) = config.data_dir.parent() {
+            crate::wal::sync_dir(parent)?;
+        }
         let lock = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -53,7 +59,10 @@ impl Journal {
             .open(config.data_dir.join("core.lock"))?;
         lock.try_lock_exclusive()
             .map_err(|_| anyhow::anyhow!("data directory is already in use"))?;
-        let wal = Wal::open(&config.data_dir.join("wal"), 1, 1)?;
+        let catalog = Catalog::open(&config.data_dir.join("catalog.sqlite"))?;
+        let (checkpoint, next_batch, next_sequence) = catalog.progress()?;
+        let mut wal = Wal::open(&config.data_dir.join("wal"), next_batch, next_sequence)?;
+        wal.prune(checkpoint)?;
         let metrics = Arc::new(Metrics::default());
         metrics.wal_bytes.store(wal.bytes(), Ordering::Relaxed);
         let slots = (config.ingest_memory_bytes
@@ -62,6 +71,7 @@ impl Journal {
         Ok(Arc::new(Self {
             config,
             wal: Mutex::new(wal),
+            catalog: Mutex::new(catalog),
             healthy: AtomicBool::new(true),
             stopping: AtomicBool::new(false),
             wake: Notify::new(),
@@ -94,6 +104,20 @@ impl Journal {
                 .duplicate_batches
                 .fetch_add(1, Ordering::Relaxed);
             return Ok(receipt.clone());
+        }
+        match self.catalog.lock().unwrap().receipt(&hash) {
+            Ok(Some(receipt)) => {
+                self.metrics
+                    .duplicate_batches
+                    .fetch_add(1, Ordering::Relaxed);
+                return Ok(receipt);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::error!(%error, "catalog lookup failed");
+                self.healthy.store(false, Ordering::Release);
+                return Err(IngestError::Unavailable);
+            }
         }
         if wal.bytes().saturating_add(body.len() as u64 + 84) > self.config.wal_max_bytes
             || fs2::available_space(&self.config.data_dir).unwrap_or(0)

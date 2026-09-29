@@ -16,7 +16,7 @@ Parent: [[Index]]
 |-----------|---------|-----------|
 | [[Agent/LognaraAgent]] | `Lognara-agent/` | Реализован приём логов, буфер в памяти и отправка в relay. |
 | [[Relay/LognaraRelay]] | `Lognara-relay/` | Реализованы приём пачек агентов, разбор в события, группировка по источнику, отправка в core и spool на диске. Структура в [[Relay/LognaraRelay-ProjectMap]]. |
-| [[Core/LognaraCore]] | `Lognara-core/` | Создаются хранилище и API; готовы контракт, HTTP, WAL и дедупликация. |
+| [[Core/LognaraCore]] | `Lognara-core/` | Создаются хранилище и API; готовы HTTP, WAL, дедупликация, Arrow/Parquet, SQLite-каталог и индексы. |
 
 Корневые файлы описаны в [[Repository/RootFiles]].
 

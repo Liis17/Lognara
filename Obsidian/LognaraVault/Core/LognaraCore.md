@@ -5,7 +5,7 @@ Parent: [[Index]]
 ## Назначение и состояние
 
 Центральный Rust-crate `Lognara-core/`, edition 2024, MSRV 1.94. Принимает контракт [[Relay/LognaraRelay]], хранит события и предоставляет API поиска и аналитики.
-Реализованы конфигурация, HTTP-приём, бинарная модель, WAL, дедупликация пачек, восстановление и JSON-представление. Перенос в сегменты и запросы добавляются следующими этапами.
+Реализованы конфигурация, HTTP-приём, бинарная модель, WAL, дедупликация пачек, восстановление и JSON-представление. Реализованы материализация в Arrow/Parquet, каталог SQLite, согласованные снимки и индексы; HTTP-запросы добавляются следующим этапом.
 
 ## Контракт
 
@@ -39,3 +39,20 @@ WAL хранит одну версионированную запись на ф�
 | `Journal::open(config: Config): Result<Arc<Journal>>` | Захватывает блокировку и восстанавливает журнал. |
 | `Journal::accept(body: &[u8]): Result<Receipt>` | Дедуплицирует, проверяет лимиты, подтверждает после fsync. |
 | `api::router(journal: Arc<Journal>): Router` | Приём, health, авторизованные метрики. |
+
+## Сегменты
+
+Открытый сегмент хранит Arrow-батчи и Tantivy без STORED-копий. Пороги: 250000 строк / 256 MiB Arrow / 300 секунд. Снимок публикуется после commit + reload. При seal сначала долговечно записываются Parquet, индекс и meta.json, затем SQLite FULL-транзакция регистрирует сегмент, receipts и позицию внутри пачки; после неё WAL можно удалить. Незарегистрированные каталоги при старте удаляются, данные восстанавливаются из WAL. Индекс восстанавливается из Parquet по запросу, повреждённый сегмент не скрывается.
+
+| Метод | Назначение |
+|---|---|
+| `Core::open(config: Config): Result<Arc<Core>>` | Восстанавливает хранилище, запускает материализацию. |
+| `Core::snapshot(): Arc<Snapshot>` | Даёт согласованное представление Arrow и закрытых сегментов. |
+| `Core::shutdown(): Result<()>` | Дорабатывает WAL, закрывает открытый сегмент. |
+| `columns::encode(rows: &[StoredEvent]): Result<RecordBatch>` | Строит Arrow по фиксированной схеме. |
+| `columns::decode(batch: &RecordBatch): Result<Vec<StoredEvent>>` | Восстанавливает события, включая attributes. |
+| `columns::read_rows(path: &Path, ids: &[usize]): Result<Vec<StoredEvent>>` | Читает выбранные строки Parquet через RowSelection. |
+| `Catalog::publish(segment, checkpoint, receipts, next_ids): Result<()>` | Атомарно фиксирует материализацию и дедупликацию. |
+| `IndexCache::searcher(segment: &Path, rows: usize): Result<Searcher>` | Открывает или восстанавливает индекс; LRU ограничен. |
+
+Структура файлов: [[Core/LognaraCore-ProjectMap]].
