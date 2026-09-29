@@ -91,4 +91,5 @@ enum Payload { Text(String), Json(String), Binary(Vec<u8>) }
 ## Зависимости
 
 - Использует: `tokio`, `tokio-util`, `axum`, `reqwest` (без TLS), `serde`, `serde_json` (`raw_value`), `rmp-serde`, `serde_bytes`, `zstd`, `tracing`, `tracing-subscriber`.
+- Отправляет пачки в: [[Relay/LognaraRelay]].
 - Используется в: [[Architecture]].

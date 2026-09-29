@@ -6,8 +6,8 @@ Parent: [[Index]]
 
 | Область | Текущее состояние |
 |---------|-------------------|
-| Язык и runtime | Rust (edition 2024) и tokio подтверждены для `Lognara-agent/`. Стек relay и core пока не подтверждён: их каталоги пусты. |
-| Зависимости | `Lognara-agent/Cargo.toml`: axum, reqwest, tokio, tokio-util, serde, serde_json, rmp-serde, serde_bytes, zstd, tracing. Подробности в [[Agent/LognaraAgent]]. |
+| Язык и runtime | Rust (edition 2024) и tokio подтверждены для `Lognara-agent/` и `Lognara-relay/`. Стек core пока не подтверждён: его каталог пуст. |
+| Зависимости | `Lognara-agent/Cargo.toml`: axum, reqwest, tokio, tokio-util, serde, serde_json, rmp-serde, serde_bytes, zstd, tracing. Подробности в [[Agent/LognaraAgent]]. `Lognara-relay/Cargo.toml`: те же, reqwest с rustls, а также uuid, time, base64, bytes. Подробности в [[Relay/LognaraRelay]]. |
 | Лицензия | MIT, см. `LICENSE`. |
 
 ## Компоненты и сервисы
@@ -15,7 +15,7 @@ Parent: [[Index]]
 | Компонент | Каталог | Состояние |
 |-----------|---------|-----------|
 | [[Agent/LognaraAgent]] | `Lognara-agent/` | Реализован приём логов, буфер в памяти и отправка в relay. |
-| lognara-relay | `Lognara-relay/` | Каталог пуст. Должен принимать пачки агентов, структурировать их в `LogEvent` и отправлять в core. |
+| [[Relay/LognaraRelay]] | `Lognara-relay/` | Реализованы приём пачек агентов, разбор в события, группировка по источнику, отправка в core и spool на диске. Структура в [[Relay/LognaraRelay-ProjectMap]]. |
 | lognara-core | `Lognara-core/` | Каталог пуст. Центральный сервер. |
 
 Корневые файлы описаны в [[Repository/RootFiles]].
@@ -25,7 +25,8 @@ Parent: [[Index]]
 | Путь | Роль |
 |------|------|
 | `Lognara-agent/src/main.rs` | Точка входа агента. Параметры задаются переменными `LOGNARA_*`. |
-| `Lognara-relay/`, `Lognara-core/` | Пустые каталоги будущих сервисов. |
+| `Lognara-relay/src/main.rs` | Точка входа relay. Параметры задаются переменными `LOGNARA_*`, spool хранится в `LOGNARA_SPOOL_DIR`. |
+| `Lognara-core/` | Пустой каталог будущего сервиса. |
 | `README.md` | Содержит только заголовок `Lognara`. |
 | `.gitignore` | Исключает сборки Cargo (`target`) и артефакты агента в корневом `/build/`, резервные файлы rustfmt, PDB, Cargo Mutants, `default.profraw`, `.DS_Store`. |
 | `LICENSE` | Текст лицензии MIT. |
@@ -37,13 +38,15 @@ Parent: [[Index]]
 1. Приложение (или библиотека lognara) отправляет лог на `POST http://127.0.0.1:7400/v1/logs` агента в своём контейнере: text, JSON или бинарные данные.
 2. Агент добавляет время приёма, держит записи в памяти и отправляет пачку, как только набрано `LOGNARA_BATCH_SIZE` записей или прошёл `LOGNARA_FLUSH_INTERVAL_MS`.
 3. Пачка (MessagePack + zstd, идентификация источника: service, server, backend, environment, service_instance) уходит в lognara-relay на той же машине.
-4. Relay разбирает записи в `LogEvent` и отправляет в lognara-core. Этот шаг ещё не реализован.
+4. Relay разбирает записи в события, группирует их по источнику и раз в `LOGNARA_FLUSH_INTERVAL_MS` (или сразу по `LOGNARA_BATCH_SIZE` событий) отправляет пачку MessagePack + zstd в lognara-core с Bearer-токеном.
+5. Пока core недоступен, пачки relay ждут в spool на volume и затем уходят от старых к новым. Сам core ещё не реализован.
 
-Формат пачки описан в разделе «Контракт с relay» заметки [[Agent/LognaraAgent]].
+Формат пачки агента описан в разделе «Контракт с relay» заметки [[Agent/LognaraAgent]], формат пачки для core — в разделе «Контракт с core» заметки [[Relay/LognaraRelay]].
 
 ## Паттерны
 
-- Модули агента разделены по стадиям конвейера: config, ingest, buffer, wire, sender.
+- Модули агента и relay разделены по стадиям конвейера: config, ingest, buffer, wire, sender; у relay добавлены normalize и spool.
+- Сервисы не делят код: relay держит копию контракта агента, совместимость проверяет фикстура, закодированная агентом.
 - Конфигурация читается только из переменных окружения с префиксом `LOGNARA_`, с проверкой при старте.
 - Остановка идёт через `CancellationToken`: сначала прекращается приём, затем выполняется финальная отправка.
 
