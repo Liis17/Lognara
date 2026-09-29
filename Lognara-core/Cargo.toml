@@ -7,6 +7,9 @@ license = "MIT"
 description = "Центральное хранилище, поиск и аналитика логов Lognara"
 publish = false
 
+[features]
+crash-tests = []
+
 [dependencies]
 anyhow = "1"
 axum = "0.8"
