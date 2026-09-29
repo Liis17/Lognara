@@ -56,7 +56,7 @@ fn retry_after_restart_keeps_original_sequence_and_deduplicates_concurrent_deliv
 async fn http_auth_precedes_decode_and_ack_is_durable() {
     let dir = tempfile::tempdir().unwrap();
     let journal = Journal::open(config(dir.path())).unwrap();
-    let router = api::router(journal.clone());
+    let router = api::ingest_router(journal.clone());
     let request = |token: &str, body: &[u8]| {
         Request::builder()
             .method("POST")

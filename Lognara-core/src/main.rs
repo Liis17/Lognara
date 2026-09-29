@@ -12,7 +12,7 @@ async fn main() -> anyhow::Result<()> {
     let core = tokio::task::spawn_blocking(move || Core::open(config)).await??;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(address = %listener.local_addr()?, "core listening");
-    axum::serve(listener, api::router(core.journal.clone()))
+    axum::serve(listener, api::router(core.clone()))
         .with_graceful_shutdown(shutdown())
         .await?;
     tokio::task::spawn_blocking(move || core.shutdown()).await??;

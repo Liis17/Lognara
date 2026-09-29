@@ -1,13 +1,13 @@
 //! HTTP boundary: auth precedes body buffering and decompression.
 use std::{
     sync::{Arc, atomic::Ordering},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use axum::{
-    Router,
+    Json, Router,
     body::to_bytes,
-    extract::{Request, State},
+    extract::{Path, Query, Request, State},
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -18,10 +18,24 @@ use subtle::ConstantTimeEq;
 
 use crate::{
     journal::{IngestError, Journal},
+    query::{self, QueryError, SearchRequest},
+    storage::Core,
     wire::DecodeError,
 };
 
-pub fn router(journal: Arc<Journal>) -> Router {
+pub fn router(core: Arc<Core>) -> Router {
+    let queries = Router::new()
+        .route("/v1/logs/search", post(search))
+        .route("/v1/traces/{trace_id}", get(trace))
+        .route_layer(middleware::from_fn_with_state(
+            token_hash(&core.journal.config.query_token),
+            authorize,
+        ))
+        .with_state(core.clone());
+    ingest_router(core.journal.clone()).merge(queries)
+}
+
+pub fn ingest_router(journal: Arc<Journal>) -> Router {
     let ingest = Router::new()
         .route("/v1/batches", post(ingest))
         .route_layer(middleware::from_fn_with_state(
@@ -41,6 +55,99 @@ pub fn router(journal: Arc<Journal>) -> Router {
         .route("/health/live", get(|| async { StatusCode::OK }))
         .route("/health/ready", get(ready))
         .with_state(journal)
+}
+
+async fn search(
+    State(core): State<Arc<Core>>,
+    request: Result<Json<SearchRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    match request {
+        Ok(Json(request)) => run_search(core, request, false).await,
+        Err(error) => QueryError::Invalid(error.body_text()).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TraceParams {
+    from: String,
+    to: String,
+    #[serde(default = "query::default_limit")]
+    limit: usize,
+    cursor: Option<String>,
+}
+
+async fn trace(
+    State(core): State<Arc<Core>>,
+    Path(trace_id): Path<String>,
+    Query(params): Query<TraceParams>,
+) -> Response {
+    run_search(
+        core,
+        SearchRequest {
+            from: params.from,
+            to: params.to,
+            filters: std::collections::BTreeMap::from([("trace_id".into(), vec![trace_id])]),
+            text: None,
+            limit: params.limit,
+            cursor: params.cursor,
+        },
+        true,
+    )
+    .await
+}
+
+async fn run_search(core: Arc<Core>, request: SearchRequest, ascending: bool) -> Response {
+    if !core.journal.ready() {
+        return unavailable();
+    }
+    let Ok(permit) = core.search_slots.clone().try_acquire_owned() else {
+        return QueryError::Busy.into_response();
+    };
+    let started = Instant::now();
+    let timeout = core.journal.config.query_timeout;
+    let worker = core.clone();
+    let task = tokio::task::spawn_blocking(move || {
+        // Permit остаётся у blocking task даже после таймаута HTTP.
+        let _permit = permit;
+        query::search(&worker, request, ascending, started + timeout)
+    });
+    core.journal.metrics.queries.fetch_add(1, Ordering::Relaxed);
+    let result = match tokio::time::timeout(timeout, task).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => Err(QueryError::Storage(error.into())),
+        Err(_) => Err(QueryError::Timeout),
+    };
+    core.journal
+        .metrics
+        .query_duration_us
+        .fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
+    match result {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => {
+            core.journal
+                .metrics
+                .query_errors
+                .fetch_add(1, Ordering::Relaxed);
+            error.into_response()
+        }
+    }
+}
+
+impl IntoResponse for QueryError {
+    fn into_response(self) -> Response {
+        let status = match &self {
+            Self::Invalid(_) => StatusCode::BAD_REQUEST,
+            Self::Gone => StatusCode::GONE,
+            Self::Timeout => StatusCode::GATEWAY_TIMEOUT,
+            Self::Busy => StatusCode::SERVICE_UNAVAILABLE,
+            Self::Storage(error) => {
+                tracing::error!(%error, "query failed");
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+        };
+        (status, Json(serde_json::json!({"error": self.to_string()}))).into_response()
+    }
 }
 
 fn token_hash(token: &str) -> [u8; 32] {

@@ -24,3 +24,18 @@ Core принимает UUID независимо от версии. JSON API о
 cd Lognara-core
 cargo run --example relay_fixture -- tests/fixtures/relay-batch.bin
 ```
+
+## Поиск
+
+`POST /v1/logs/search`, JSON, query-токен:
+
+```json
+{"from":"2026-09-29T10:00:00Z","to":"2026-09-29T11:00:00Z","filters":{"service":["api"],"level":["error"]},"text":{"query":"connection refused","mode":"phrase"},"limit":100}
+```
+
+Ответ: `events`, `next_cursor`, `as_of`. `from <= timestamp < to`, обязательные RFC3339 границы. Фильтры: id, environment, server, backend, service, service_instance, action, level, trace_id, span_id, parent_span_id, request_id. Значения — массивы (OR внутри, AND между полями).
+Текст: `all` (по умолчанию) или `phrase`, Unicode, lowercase, без стемминга. Limit 1..1000, по умолчанию 100. Для следующей страницы повторить запрос с `cursor`; limit можно менять. Новые записи в этот обход не включаются. Курсор подписан, живёт 10 минут и становится недействителен после рестарта или retention (`410`).
+
+`GET /v1/traces/{32 hex}?from=...&to=...&limit=100&cursor=...` возвращает такие же события в порядке возрастания времени. Это события trace, не реконструкция длительностей span. Поиск сортирует по убыванию времени; ничьи разрешает внутренний номер события.
+
+Ошибки JSON/фильтров — `400`, истёкший курсор — `410`, занятая ёмкость или ошибка хранилища — `503`, таймаут — `504`. Неподдерживаемые поля не игнорируются.

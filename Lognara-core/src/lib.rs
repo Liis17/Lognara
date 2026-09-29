@@ -8,6 +8,7 @@ pub mod index;
 pub mod journal;
 pub mod metrics;
 pub mod model;
+pub mod query;
 pub mod storage;
 pub mod wal;
 pub mod wire;

@@ -5,7 +5,7 @@ Parent: [[Index]]
 ## Назначение и состояние
 
 Центральный Rust-crate `Lognara-core/`, edition 2024, MSRV 1.94. Принимает контракт [[Relay/LognaraRelay]], хранит события и предоставляет API поиска и аналитики.
-Реализованы конфигурация, HTTP-приём, бинарная модель, WAL, дедупликация пачек, восстановление и JSON-представление. Реализованы материализация в Arrow/Parquet, каталог SQLite, согласованные снимки и индексы; HTTP-запросы добавляются следующим этапом.
+Реализованы конфигурация, HTTP-приём, бинарная модель, WAL, дедупликация пачек, восстановление и JSON-представление. Реализованы материализация в Arrow/Parquet, каталог SQLite, согласованные снимки и индексы; доступны HTTP-поиск и trace lookup.
 
 ## Контракт
 
@@ -38,7 +38,7 @@ WAL хранит одну версионированную запись на ф�
 | `Wal::prune(checkpoint: Position): Result<()>` | Удаляет только полностью материализованные пачки. |
 | `Journal::open(config: Config): Result<Arc<Journal>>` | Захватывает блокировку и восстанавливает журнал. |
 | `Journal::accept(body: &[u8]): Result<Receipt>` | Дедуплицирует, проверяет лимиты, подтверждает после fsync. |
-| `api::router(journal: Arc<Journal>): Router` | Приём, health, авторизованные метрики. |
+| `~~api::router(journal: Arc<Journal>)~~ (удалён: 2026-09-29)` | Приём, health, авторизованные метрики. |
 
 ## Сегменты
 
@@ -56,3 +56,14 @@ WAL хранит одну версионированную запись на ф�
 | `IndexCache::searcher(segment: &Path, rows: usize): Result<Searcher>` | Открывает или восстанавливает индекс; LRU ограничен. |
 
 Структура файлов: [[Core/LognaraCore-ProjectMap]].
+
+## Поиск
+
+`POST /v1/logs/search`: from/to RFC3339, filters с массивами значений, text (all/phrase), limit, cursor. `GET /v1/traces/{trace_id}`: те же границы, ASC. Сортировка timestamp + sequence. Tantivy выдаёт ограниченный top-k каждого сегмента, глобальный буфер тоже ограничен limit+1. Полные события читаются из Arrow или выбранных строк Parquet. HMAC-курсор фиксирует watermark, параметры и поколение retention; TTL 10 минут, после рестарта 410.
+
+| Метод | Назначение |
+|---|---|
+| `api::router(core: Arc<Core>): Router` | Собирает HTTP приёма и чтения с отдельными токенами. |
+| `api::ingest_router(journal: Arc<Journal>): Router` | Приём, health и метрики. |
+| `PreparedFilter::new(from, to, filters): Result<PreparedFilter>` | Проверяет диапазон и допустимые фильтры. |
+| `query::search(core, request, ascending, deadline): Result<SearchResponse>` | Ищет в согласованном снимке, возвращает события и курсор. |
