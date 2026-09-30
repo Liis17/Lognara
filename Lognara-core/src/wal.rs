@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 
 const MAGIC: &[u8; 8] = b"LGWAL001";
 const HEADER: usize = 80;
+pub const MAX_PENDING_BATCHES: usize = 65_536;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Position {
@@ -159,6 +160,7 @@ impl Wal {
         file.write_all(&header)?;
         file.write_all(body)?;
         file.write_all(&checksum.finalize().to_le_bytes())?;
+        failpoint("wal_before_sync");
         file.sync_all()?;
         failpoint("wal_before_rename");
         fs::rename(&temp, &path)?;
@@ -218,6 +220,9 @@ impl Wal {
 
     pub fn bytes(&self) -> u64 {
         self.bytes
+    }
+    pub fn pending_batches(&self) -> usize {
+        self.entries.len()
     }
     pub fn next_ids(&self) -> (u64, u64) {
         (self.next_batch, self.next_sequence)
@@ -290,7 +295,8 @@ pub fn sync_dir(path: &Path) -> std::io::Result<()> {
 pub(crate) fn failpoint(name: &str) {
     #[cfg(feature = "crash-tests")]
     if std::env::var("LOGNARA_CRASH_AT").as_deref() == Ok(name) {
-        std::process::abort();
+        // exit не запускает Rust-деструкторы; не создаёт многогигабайтные core dumps.
+        std::process::exit(86);
     }
     let _ = name;
 }

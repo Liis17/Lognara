@@ -33,6 +33,7 @@ pub struct Config {
     /// Должны быть не больше соответствующих лимитов core.
     pub core_max_body_bytes: usize,
     pub core_max_decoded_bytes: usize,
+    pub core_max_model_bytes: usize,
 }
 
 #[derive(Debug, PartialEq)]
@@ -113,6 +114,11 @@ impl Config {
             spool_max_bytes: spool_max_mb.saturating_mul(1024 * 1024),
             core_max_body_bytes: positive(&get, "LOGNARA_CORE_MAX_BODY_BYTES", 64 << 20)?,
             core_max_decoded_bytes: positive(&get, "LOGNARA_CORE_MAX_DECODED_BYTES", 256 << 20)?,
+            core_max_model_bytes: positive(
+                &get,
+                "LOGNARA_CORE_MAX_MODEL_BYTES",
+                crate::wire_budget::DEFAULT_MODEL_BYTES,
+            )?,
         })
     }
 }

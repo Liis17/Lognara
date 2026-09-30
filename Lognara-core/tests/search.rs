@@ -175,3 +175,31 @@ fn text_filters_trace_sort_and_exclusive_time_bound_work_in_memory_and_parquet()
     ));
     core.shutdown().unwrap();
 }
+
+#[test]
+fn search_memory_budget_rejects_large_pages_in_arrow_and_parquet() {
+    for segment_rows in [2, 100] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = config(dir.path());
+        cfg.segment_rows = segment_rows;
+        cfg.search_memory_bytes = 100_000;
+        let core = Core::open(cfg).unwrap();
+        let message = "word ".repeat(1000);
+        core.journal
+            .accept(&batch(&[&message, &message, &message]))
+            .unwrap();
+        wait(&core, 3);
+        let mut req = request();
+        req.limit = 3;
+        assert!(matches!(
+            search(&core, req.clone(), false),
+            Err(QueryError::Storage(_))
+        ));
+        req.limit = 1;
+        assert_eq!(
+            search(&core, req, false).unwrap().events[0].message,
+            message
+        );
+        core.shutdown().unwrap();
+    }
+}

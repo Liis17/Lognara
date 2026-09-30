@@ -30,6 +30,7 @@ pub struct Sender {
     pending: VecDeque<Pending>,
     body_limit: usize,
     decoded_limit: usize,
+    model_limit: usize,
 }
 
 struct Pending {
@@ -61,6 +62,7 @@ impl Sender {
             pending: VecDeque::new(),
             body_limit: config.core_max_body_bytes,
             decoded_limit: config.core_max_decoded_bytes,
+            model_limit: config.core_max_model_bytes,
         }
     }
 
@@ -132,8 +134,12 @@ impl Sender {
                 dropped: self.spool.take_dropped(),
                 groups,
             };
-            let (batches, dropped) =
-                core_wire::encode_split(batch, self.body_limit, self.decoded_limit);
+            let (batches, dropped) = core_wire::encode_split(
+                batch,
+                self.body_limit,
+                self.decoded_limit,
+                self.model_limit,
+            );
             self.spool.record_dropped(dropped);
             self.pending
                 .extend(batches.into_iter().map(|batch| Pending {

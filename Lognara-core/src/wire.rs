@@ -84,6 +84,14 @@ pub struct SpanId(#[serde(with = "serde_bytes")] pub [u8; 8]);
 
 /// Распаковывает одну пачку с ограничением памяти и глубины MessagePack.
 pub fn decode(body: &[u8], limit: usize) -> Result<CoreBatch, DecodeError> {
+    decode_with_budget(body, limit, crate::wire_budget::DEFAULT_MODEL_BYTES)
+}
+
+pub fn decode_with_budget(
+    body: &[u8],
+    limit: usize,
+    model_limit: usize,
+) -> Result<CoreBatch, DecodeError> {
     use std::io::Read;
     let decoder = zstd::stream::read::Decoder::new(body).map_err(|_| DecodeError::Invalid)?;
     let mut packed = Vec::new();
@@ -94,12 +102,13 @@ pub fn decode(body: &[u8], limit: usize) -> Result<CoreBatch, DecodeError> {
     if packed.len() > limit {
         return Err(DecodeError::TooLarge);
     }
-    let mut decoder = rmp_serde::Deserializer::new(std::io::Cursor::new(&packed));
+    crate::wire_budget::validate(&packed, model_limit).map_err(|error| match error {
+        crate::wire_budget::BudgetError::Invalid => DecodeError::Invalid,
+        crate::wire_budget::BudgetError::TooLarge => DecodeError::TooLarge,
+    })?;
+    let mut decoder = rmp_serde::Deserializer::from_read_ref(&packed);
     decoder.set_max_depth(64);
     let batch = CoreBatch::deserialize(&mut decoder).map_err(|_| DecodeError::Invalid)?;
-    if decoder.position() != packed.len() as u64 {
-        return Err(DecodeError::Invalid);
-    }
     Ok(batch)
 }
 

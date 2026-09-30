@@ -11,7 +11,7 @@ use std::{
 use anyhow::Result;
 use fs2::FileExt;
 use sha2::{Digest, Sha256};
-use tokio::sync::{Notify, Semaphore};
+use tokio::sync::Semaphore;
 
 use crate::{
     catalog::Catalog,
@@ -28,8 +28,8 @@ pub struct Journal {
     pub(crate) catalog: Mutex<Catalog>,
     pub healthy: AtomicBool,
     pub stopping: AtomicBool,
-    pub wake: Notify,
     pub ingest_slots: Arc<Semaphore>,
+    pub ingest_waiters: Arc<Semaphore>,
     pub metrics: Arc<Metrics>,
     _lock: File,
 }
@@ -65,17 +65,15 @@ impl Journal {
         wal.prune(checkpoint)?;
         let metrics = Arc::new(Metrics::default());
         metrics.wal_bytes.store(wal.bytes(), Ordering::Relaxed);
-        let slots = (config.ingest_memory_bytes
-            / (config.max_body_bytes + config.max_decoded_bytes))
-            .max(1);
+        let slots = (config.ingest_memory_bytes / config.ingest_request_bytes()).max(1);
         Ok(Arc::new(Self {
             config,
             wal: Mutex::new(wal),
             catalog: Mutex::new(catalog),
             healthy: AtomicBool::new(true),
             stopping: AtomicBool::new(false),
-            wake: Notify::new(),
             ingest_slots: Arc::new(Semaphore::new(slots)),
+            ingest_waiters: Arc::new(Semaphore::new(64)),
             metrics,
             _lock: lock,
         }))
@@ -119,7 +117,8 @@ impl Journal {
                 return Err(IngestError::Unavailable);
             }
         }
-        if wal.bytes().saturating_add(body.len() as u64 + 84) > self.config.wal_max_bytes
+        if wal.pending_batches() >= crate::wal::MAX_PENDING_BATCHES
+            || wal.bytes().saturating_add(body.len() as u64 + 84) > self.config.wal_max_bytes
             || fs2::available_space(&self.config.data_dir).unwrap_or(0)
                 < self
                     .config
@@ -128,7 +127,11 @@ impl Journal {
         {
             return Err(IngestError::Unavailable);
         }
-        let batch = wire::decode(body, self.config.max_decoded_bytes)?;
+        let batch = wire::decode_with_budget(
+            body,
+            self.config.max_decoded_bytes,
+            self.config.max_model_bytes,
+        )?;
         let count = batch.event_count() as u64;
         let agents_dropped = batch
             .groups
@@ -156,7 +159,6 @@ impl Journal {
         self.metrics
             .ack_duration_us
             .fetch_add(start.elapsed().as_micros() as u64, Ordering::Relaxed);
-        self.wake.notify_one();
         Ok(entry)
     }
 }

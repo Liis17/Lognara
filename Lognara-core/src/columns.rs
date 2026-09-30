@@ -232,6 +232,7 @@ pub fn write_parquet(path: &Path, batches: &[RecordBatch]) -> Result<()> {
     let mut writer = ArrowWriter::try_new(file.try_clone()?, schema(), Some(props))?;
     for batch in batches {
         writer.write(batch)?;
+        crate::wal::failpoint("segment_during_parquet");
     }
     writer.close()?;
     file.sync_all()?;
@@ -251,6 +252,34 @@ pub fn read_all(path: &Path) -> Result<Vec<RecordBatch>> {
 
 /// row_ids строго возрастают; RowSelection пропускает ненужные row groups и страницы.
 pub fn read_rows(path: &Path, row_ids: &[usize]) -> Result<Vec<StoredEvent>> {
+    let mut unlimited = usize::MAX;
+    read_rows_with_budget(path, row_ids, &mut unlimited)
+}
+
+/// Бюджет включает модель и JSON-ответ. Проверка до разбора attributes в Value.
+pub fn charge_row(batch: &RecordBatch, row: usize, remaining: &mut usize) -> Result<()> {
+    let mut bytes = 2048usize;
+    for (field, array) in batch.schema().fields().iter().zip(batch.columns()) {
+        if let Some(array) = array.as_any().downcast_ref::<StringArray>()
+            && !array.is_null(row)
+        {
+            // JSON-дерево из коротких scalar/keys дороже текста. 64x покрывает
+            // Value/container capacity; 8x для строк — escaping и буфер ответа.
+            let factor = if field.name() == "attributes" { 64 } else { 8 };
+            bytes = bytes.saturating_add(array.value(row).len().saturating_mul(factor));
+        }
+    }
+    *remaining = remaining
+        .checked_sub(bytes)
+        .ok_or_else(|| anyhow!("search result exceeds memory budget; reduce page size"))?;
+    Ok(())
+}
+
+pub fn read_rows_with_budget(
+    path: &Path,
+    row_ids: &[usize],
+    remaining: &mut usize,
+) -> Result<Vec<StoredEvent>> {
     if row_ids.is_empty() {
         return Ok(vec![]);
     }
@@ -269,10 +298,12 @@ pub fn read_rows(path: &Path, row_ids: &[usize]) -> Result<Vec<StoredEvent>> {
     let mut rows = Vec::with_capacity(row_ids.len());
     for batch in builder
         .with_row_selection(selection)
-        .with_batch_size(1024)
+        .with_batch_size(1)
         .build()?
     {
-        rows.extend(decode(&batch?)?);
+        let batch = batch?;
+        charge_row(&batch, 0, remaining)?;
+        rows.extend(decode(&batch)?);
     }
     ensure!(rows.len() == row_ids.len(), "Parquet row count mismatch");
     Ok(rows)

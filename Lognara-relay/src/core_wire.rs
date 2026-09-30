@@ -103,6 +103,7 @@ pub fn encode_split(
     batch: CoreBatch,
     body_limit: usize,
     decoded_limit: usize,
+    model_limit: usize,
 ) -> (Vec<EncodedBatch>, u64) {
     let mut pending = vec![batch];
     let mut encoded = Vec::new();
@@ -116,6 +117,7 @@ pub fn encode_split(
         if batch
             .serialize(&mut rmp_serde::Serializer::new(&mut packed).with_struct_map())
             .is_ok()
+            && crate::wire_budget::validate(&packed.bytes, model_limit).is_ok()
         {
             let mut compressed = LimitedWriter {
                 bytes: Vec::new(),
@@ -234,7 +236,8 @@ mod tests {
             ],
         };
         for (body_limit, decoded_limit) in [(800, 100_000), (100_000, 1200)] {
-            let (parts, dropped) = encode_split(batch.clone(), body_limit, decoded_limit);
+            let (parts, dropped) =
+                encode_split(batch.clone(), body_limit, decoded_limit, usize::MAX);
             assert_eq!(dropped, 0);
             assert!(parts.len() > 1);
             let mut restored = Vec::new();
@@ -263,7 +266,7 @@ mod tests {
             assert_eq!(relay_dropped, 9);
             assert_eq!(agent_dropped, 8);
         }
-        let (parts, dropped) = encode_split(batch, 1, 1);
+        let (parts, dropped) = encode_split(batch, 1, 1, usize::MAX);
         assert!(parts.is_empty());
         assert_eq!(dropped, 21);
     }

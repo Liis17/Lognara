@@ -2170,6 +2170,7 @@ dependencies = [
  "futures",
  "hex",
  "hmac",
+ "http-body-util",
  "lognara-relay",
  "lru",
  "parquet",

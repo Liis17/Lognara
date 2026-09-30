@@ -1,6 +1,6 @@
 # Lognara — База знаний
 
-Lognara — система сбора логов: агент в контейнере приложения, relay на машине и центральный core. Сейчас на Rust реализованы агент (`Lognara-agent/`) и relay (`Lognara-relay/`), для core создаётся хранилище и API (`Lognara-core/`).
+Lognara — система сбора логов: агент в контейнере приложения, relay на машине и центральный core. На Rust реализованы агент (`Lognara-agent/`), relay (`Lognara-relay/`) и хранилище с API (`Lognara-core/`).
 
 ## Навигация
 

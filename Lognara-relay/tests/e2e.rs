@@ -143,6 +143,7 @@ fn config(core: &FakeCore, spool_dir: &Path) -> Config {
         spool_max_bytes: u64::MAX,
         core_max_body_bytes: 64 << 20,
         core_max_decoded_bytes: 256 << 20,
+        core_max_model_bytes: 256 << 20,
     }
 }
 

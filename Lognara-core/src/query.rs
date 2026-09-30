@@ -247,7 +247,12 @@ pub fn search(
     )?;
     let has_more = hits.len() > request.limit;
     let hits: Vec<_> = hits.into_iter().take(request.limit).collect();
-    let events = hydrate(&snapshot, &hits, deadline)?;
+    let events = hydrate(
+        &snapshot,
+        &hits,
+        deadline,
+        core.journal.config.search_memory_bytes,
+    )?;
     let as_of = cursor
         .as_ref()
         .map_or(snapshot.published_at, |cursor| cursor.as_of);
@@ -473,6 +478,7 @@ fn hydrate(
     snapshot: &Snapshot,
     hits: &[Hit],
     deadline: Instant,
+    mut remaining: usize,
 ) -> Result<Vec<StoredEvent>, QueryError> {
     let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for hit in hits {
@@ -484,7 +490,11 @@ fn hydrate(
         ids.sort_unstable();
         ids.dedup();
         let rows = if source < snapshot.closed.len() {
-            columns::read_rows(&snapshot.closed[source].path.join("logs.parquet"), &ids)?
+            columns::read_rows_with_budget(
+                &snapshot.closed[source].path.join("logs.parquet"),
+                &ids,
+                &mut remaining,
+            )?
         } else {
             let mut offset = 0;
             let mut rows = vec![];
@@ -493,6 +503,7 @@ fn hydrate(
                     .iter()
                     .filter(|&&id| id >= offset && id < offset + batch.num_rows())
                 {
+                    columns::charge_row(batch, id - offset, &mut remaining)?;
                     rows.extend(columns::decode(&batch.slice(id - offset, 1))?);
                 }
                 offset += batch.num_rows();

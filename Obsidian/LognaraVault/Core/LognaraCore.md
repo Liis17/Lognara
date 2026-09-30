@@ -11,7 +11,7 @@ Parent: [[Index]]
 
 MessagePack с именованными полями + ZSTD; `CoreBatch = dropped + groups`, группа = источник + dropped + события.
 Время — Unix наносекунды; `ingested_at` принадлежит агенту. Идентификаторы сохраняются без изменения.
-Внешний JSON — RFC3339, UUID/hex строки. Дедупликация планируется по байтам пачки, а не отдельным LogId.
+Внешний JSON — RFC3339, UUID/hex строки. Дедупликация реализована по байтам пачки, а не отдельным LogId. Relay делит новые исходящие пачки по согласованным лимитам 64/256 MiB и сохраняет байты при повторе.
 
 ## Методы
 
@@ -20,6 +20,9 @@ MessagePack с именованными полями + ZSTD; `CoreBatch = droppe
 | `Config::from_env(): Result<Config>` | Проверяет переменные `LOGNARA_*`; секреты не печатает. |
 | `Config::from_lookup(lookup): Result<Config>` | Собирает конфиг из источника значений. |
 | `wire::decode(body: &[u8], limit: usize): Result<CoreBatch>` | Ограничивает распаковку и глубину MessagePack, отклоняет хвост после пачки. |
+| `wire::decode_with_budget(body: &[u8], limit: usize, model_limit: usize): Result<CoreBatch>` | До serde проверяет размер модели, исключая увеличение памяти на вложенных attributes. |
+| `wire_budget::validate(bytes: &[u8], budget: usize): Result<()>` | Без аллокаций проверяет MessagePack и резервирует 128 байт/узел плюс длины string/bin. |
+| `Config::ingest_request_bytes(): usize` | Резерв body + две decoded capacity + модель для admission. |
 | `CoreBatch::into_events(first_sequence: u64, received_at: i64): Iterator<StoredEvent>` | Объединяет источник и события, назначает внутренние номера. |
 | `LogEvent::from(row: StoredEvent): LogEvent` | Преобразует бинарные поля в JSON API. |
 
@@ -31,11 +34,14 @@ Tokio, Axum, serde/MessagePack/ZSTD; Parquet 59.2 совместим с Arrow и
 
 WAL хранит одну версионированную запись на файл: заголовок, исходные сжатые байты, CRC32 и SHA-256. Запись *.tmp, fsync, rename в *.wal, fsync каталога, затем 204. Незавершённые *.tmp удаляются, повреждённые опубликованные *.wal останавливают запуск. Один writer и блокировка каталога исключают гонки. HTTP резервирует память до чтения тела.
 
+По умолчанию ingest budget 1 GiB, model budget 256 MiB; паритет проверки с relay закреплён тестом. До 64 запросов ждут слот максимум секунду, затем 503. Транспортная ошибка чтения тела даёт 503, именно превышение размера — 413. Метаданные очереди дополнительно ограничены 65536 WAL-пачками. Worker опрашивает WAL каждые 20 мс.
+
 | Метод | Назначение |
 |---|---|
 | `Wal::open(dir: &Path, next_batch: u64, next_sequence: u64): Result<Wal>` | Проверяет WAL и восстанавливает номера. |
 | `Wal::append(body: &[u8], events: u64, received_at: i64): Result<Receipt>` | Долговечно публикует запись. |
 | `Wal::prune(checkpoint: Position): Result<()>` | Удаляет только полностью материализованные пачки. |
+| `Wal::pending_batches(): usize` | Число пачек для ограничения памяти метаданных очереди. |
 | `Journal::open(config: Config): Result<Arc<Journal>>` | Захватывает блокировку и восстанавливает журнал. |
 | `Journal::accept(body: &[u8]): Result<Receipt>` | Дедуплицирует, проверяет лимиты, подтверждает после fsync. |
 | `~~api::router(journal: Arc<Journal>)~~ (удалён: 2026-09-29)` | Приём, health, авторизованные метрики. |
@@ -52,6 +58,8 @@ WAL хранит одну версионированную запись на ф�
 | `columns::encode(rows: &[StoredEvent]): Result<RecordBatch>` | Строит Arrow по фиксированной схеме. |
 | `columns::decode(batch: &RecordBatch): Result<Vec<StoredEvent>>` | Восстанавливает события, включая attributes. |
 | `columns::read_rows(path: &Path, ids: &[usize]): Result<Vec<StoredEvent>>` | Читает выбранные строки Parquet через RowSelection. |
+| `columns::read_rows_with_budget(path, ids, remaining): Result<Vec<StoredEvent>>` | Читает выбранные строки по одной, проверяя бюджет до разбора attributes. |
+| `columns::charge_row(batch, row, remaining): Result<()>` | Резервирует память модели и JSON-ответа для строки Arrow/Parquet. |
 | `Catalog::publish(segment, checkpoint, receipts, next_ids): Result<()>` | Атомарно фиксирует материализацию и дедупликацию. |
 | `IndexCache::searcher(segment: &Path, rows: usize): Result<Searcher>` | Открывает или восстанавливает индекс; LRU ограничен. |
 
@@ -60,6 +68,8 @@ WAL хранит одну версионированную запись на ф�
 ## Поиск
 
 `POST /v1/logs/search`: from/to RFC3339, filters с массивами значений, text (all/phrase), limit, cursor. `GET /v1/traces/{trace_id}`: те же границы, ASC. Сортировка timestamp + sequence. Tantivy выдаёт ограниченный top-k каждого сегмента, глобальный буфер тоже ограничен limit+1. Полные события читаются из Arrow или выбранных строк Parquet. HMAC-курсор фиксирует watermark, параметры и поколение retention; TTL 10 минут, после рестарта 410.
+
+Модель и JSON-ответ страницы ограничены `LOGNARA_SEARCH_MEMORY_BYTES` (128 MiB на поиск): проверка перед десериализацией каждой строки, общий бюджет всех сегментов, 503 при превышении без частичного ответа. Search permit удерживается до завершения сериализации ответа, а при HTTP-таймауте остаётся у выполняющегося blocking task.
 
 | Метод | Назначение |
 |---|---|
@@ -78,3 +88,18 @@ Retention смотрит max core_received_at, исключает expired сег
 |---|---|
 | `analytics::histogram(core, request): Result<HistogramResponse>` | Считает временные корзины через типизированные выражения DataFusion. |
 | `analytics::group_by(core, request): Result<GroupResponse>` | Считает группы по разрешённым измерениям. |
+
+## Эксплуатация и проверки
+
+`Lognara-core/docs/operations.md` описывает все переменные, запуск за TLS-прокси, остановку, резервную копию всего каталога и восстановление. SIGTERM/SIGINT прекращает HTTP, дорабатывает WAL и закрывает открытый сегмент. Метрики Prometheus защищены query-токеном; health доступен без токена.
+
+`tests/crashes.rs` запускает настоящий бинарник с feature `crash-tests`: завершение до rename WAL, после fsync, записи Parquet, до/после SQLite-транзакции, после очистки WAL; отдельно SIGKILL после 204. В production feature выключен. `tests/e2e.rs` запускает настоящий relay и core, проверяет API чтения и доступ.
+
+Аварийные проверки также включают остановку до fsync, во время записи Parquet и после пометки retention `deleting`. Двухосевое ревью и исправления описаны в `docs/review.md`: бюджет модели/поиска, классификация транспортных ошибок и ожидание конкурентных повторов.
+
+Стенд `examples/load.rs` генерирует поток и измеряет HTTP ACK, поиск, гистограмму и выборочную видимость от ACK. `scripts/benchmark.py` запускает release-процессы, снимает RSS/CPU/диск/WAL, сохраняет JSON и логи, выполняет graceful shutdown. Настройки и ограничения измерений — `docs/benchmark.md`. Цель 10000/с на 4 CPU / 8 GiB требует проверки именно на этом оборудовании.
+
+| Метод | Назначение |
+|---|---|
+| `Metrics::render(): String` | Сериализует низкокардинальные счётчики/gauges Prometheus. |
+| `main::shutdown()` | Ждёт SIGINT или SIGTERM. |

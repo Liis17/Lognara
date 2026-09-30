@@ -163,14 +163,14 @@ async fn run_search(core: Arc<Core>, request: SearchRequest, ascending: bool) ->
     let worker = core.clone();
     let task = tokio::task::spawn_blocking(move || {
         // Permit остаётся у blocking task даже после таймаута HTTP.
-        let _permit = permit;
-        query::search(&worker, request, ascending, started + timeout)
+        let result = query::search(&worker, request, ascending, started + timeout);
+        (result, permit)
     });
     core.journal.metrics.queries.fetch_add(1, Ordering::Relaxed);
-    let result = match tokio::time::timeout(timeout, task).await {
-        Ok(Ok(result)) => result,
-        Ok(Err(error)) => Err(QueryError::Storage(error.into())),
-        Err(_) => Err(QueryError::Timeout),
+    let (result, _permit) = match tokio::time::timeout(timeout, task).await {
+        Ok(Ok((result, permit))) => (result, Some(permit)),
+        Ok(Err(error)) => (Err(QueryError::Storage(error.into())), None),
+        Err(_) => (Err(QueryError::Timeout), None),
     };
     core.journal
         .metrics
@@ -240,7 +240,17 @@ async fn ingest(State(journal): State<Arc<Journal>>, request: Request) -> Respon
     if !journal.ready() {
         return unavailable();
     }
-    let Ok(permit) = journal.ingest_slots.clone().try_acquire_owned() else {
+    // Короткое ограниченное ожидание позволяет конкурентному повтору дождаться
+    // первой записи. Тела ожидающих запросов ещё не читаются в память приложения.
+    let Ok(_waiting) = journal.ingest_waiters.clone().try_acquire_owned() else {
+        return unavailable();
+    };
+    let Ok(Ok(permit)) = tokio::time::timeout(
+        Duration::from_secs(1),
+        journal.ingest_slots.clone().acquire_owned(),
+    )
+    .await
+    else {
         return unavailable();
     };
     let body = match tokio::time::timeout(
@@ -250,8 +260,16 @@ async fn ingest(State(journal): State<Arc<Journal>>, request: Request) -> Respon
     .await
     {
         Ok(Ok(body)) => body,
-        Ok(Err(_)) => {
-            return (StatusCode::PAYLOAD_TOO_LARGE, "request body exceeds limit").into_response();
+        Ok(Err(error)) => {
+            use std::error::Error;
+            if error
+                .source()
+                .is_some_and(|source| source.is::<http_body_util::LengthLimitError>())
+            {
+                return (StatusCode::PAYLOAD_TOO_LARGE, "request body exceeds limit")
+                    .into_response();
+            }
+            return unavailable();
         }
         Err(_) => return StatusCode::REQUEST_TIMEOUT.into_response(),
     };

@@ -24,6 +24,78 @@ fn config(dir: &std::path::Path) -> Config {
 
 const FIXTURE: &[u8] = include_bytes!("fixtures/relay-batch.bin");
 
+fn request(body: Body) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri("/v1/batches")
+        .header("authorization", "Bearer ingest")
+        .header("content-type", "application/msgpack")
+        .header("content-encoding", "zstd")
+        .body(body)
+        .unwrap()
+}
+
+#[tokio::test]
+async fn concurrent_http_retries_wait_and_body_transport_errors_remain_retryable() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal = Journal::open(config(dir.path())).unwrap();
+    let router = api::ingest_router(journal.clone());
+    let blocked = journal.ingest_slots.clone().acquire_owned().await.unwrap();
+    let mut requests = vec![];
+    for _ in 0..8 {
+        let router = router.clone();
+        requests.push(tokio::spawn(async move {
+            router
+                .oneshot(request(Body::from(FIXTURE)))
+                .await
+                .unwrap()
+                .status()
+        }));
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    assert!(requests.iter().all(|task| !task.is_finished()));
+    drop(blocked);
+    for task in requests {
+        assert_eq!(task.await.unwrap(), StatusCode::NO_CONTENT);
+    }
+    assert_eq!(
+        journal
+            .metrics
+            .accepted_batches
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+    assert_eq!(
+        journal
+            .metrics
+            .duplicate_batches
+            .load(std::sync::atomic::Ordering::Relaxed),
+        7
+    );
+
+    let broken = Body::from_stream(futures::stream::iter([Err::<bytes::Bytes, _>(
+        std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset"),
+    )]));
+    assert_eq!(
+        router.oneshot(request(broken)).await.unwrap().status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    drop(journal);
+
+    let small = tempfile::tempdir().unwrap();
+    let mut cfg = config(small.path());
+    cfg.max_body_bytes = 10;
+    let router = api::ingest_router(Journal::open(cfg).unwrap());
+    assert_eq!(
+        router
+            .oneshot(request(Body::from(FIXTURE)))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+}
+
 #[test]
 fn retry_after_restart_keeps_original_sequence_and_deduplicates_concurrent_delivery() {
     let dir = tempfile::tempdir().unwrap();

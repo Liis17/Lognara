@@ -14,6 +14,7 @@ Lognara-relay/
 │   ├── config.rs           параметры LOGNARA_*
 │   ├── agent_wire.rs       контракт агента: Batch, Record, Payload, decode()
 │   ├── core_wire.rs        контракт с core: CoreBatch, Group, Source, Event, encode()
+│   ├── wire_budget.rs      no-alloc оценка памяти MessagePack, идентичная core
 │   ├── normalize.rs        разбор Record в Event
 │   ├── ingest.rs           HTTP-приём POST /v1/batches
 │   ├── buffer.rs           группы событий в памяти

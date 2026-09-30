@@ -59,6 +59,40 @@ fn rejects_invalid_data_and_trailing_messagepack() {
 }
 
 #[test]
+fn relay_splits_amplifying_attributes_to_the_same_model_budget_as_core() {
+    let mut batch: lognara_relay::core_wire::CoreBatch = rmp_serde::from_slice(
+        &zstd::decode_all(&include_bytes!("fixtures/relay-batch.bin")[..]).unwrap(),
+    )
+    .unwrap();
+    let mut event = batch.groups[0].events[0].clone();
+    event.attributes.insert(
+        "array".into(),
+        serde_json::json!(vec![serde_json::Value::Null; 4096]),
+    );
+    batch.groups[0].events = vec![event; 4];
+    let body = lognara_relay::core_wire::encode(&batch);
+    assert!(matches!(
+        wire::decode_with_budget(&body, 1 << 20, 1 << 20),
+        Err(DecodeError::TooLarge)
+    ));
+    let (parts, dropped) = lognara_relay::core_wire::encode_split(batch, 1 << 20, 1 << 20, 1 << 20);
+    assert_eq!(dropped, 0);
+    assert_eq!(parts.len(), 4);
+    for part in parts {
+        assert_eq!(
+            wire::decode_with_budget(&part.body, 1 << 20, 1 << 20)
+                .unwrap()
+                .event_count(),
+            1
+        );
+    }
+    assert_eq!(
+        include_str!("../src/wire_budget.rs"),
+        include_str!("../../Lognara-relay/src/wire_budget.rs")
+    );
+}
+
+#[test]
 fn configuration_requires_separate_tokens_and_valid_limits() {
     assert!(Config::from_lookup(|_| None).is_err());
     let lookup = |key: &str| match key {

@@ -55,18 +55,17 @@ pub fn schema() -> Schema {
 }
 
 fn configure(index: &Index) {
-    index.tokenizers().register(
-        "log_text",
-        TextAnalyzer::builder(SimpleTokenizer::default())
-            .filter(LowerCaser)
-            .build(),
-    );
+    index.tokenizers().register("log_text", text_analyzer());
+}
+
+fn text_analyzer() -> TextAnalyzer {
+    TextAnalyzer::builder(SimpleTokenizer::default())
+        .filter(LowerCaser)
+        .build()
 }
 
 pub fn tokens(text: &str) -> Vec<String> {
-    let mut analyzer = TextAnalyzer::builder(SimpleTokenizer::default())
-        .filter(LowerCaser)
-        .build();
+    let mut analyzer = text_analyzer();
     let mut stream = analyzer.token_stream(text);
     let mut tokens = vec![];
     while stream.advance() {

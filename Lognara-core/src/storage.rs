@@ -245,7 +245,11 @@ impl Materializer {
         let Some((receipt, body)) = next else {
             return Ok(false);
         };
-        let batch = wire::decode(&body, self.core.journal.config.max_decoded_bytes)?;
+        let batch = wire::decode_with_budget(
+            &body,
+            self.core.journal.config.max_decoded_bytes,
+            self.core.journal.config.max_model_bytes,
+        )?;
         ensure!(
             batch.event_count() as u64 == receipt.events,
             "WAL event count mismatch"

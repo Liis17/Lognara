@@ -10,6 +10,7 @@ pub mod spool;
 mod buffer;
 mod ingest;
 mod sender;
+mod wire_budget;
 
 use std::io;
 use std::sync::Arc;

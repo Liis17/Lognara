@@ -6,7 +6,7 @@ Parent: [[Core/LognaraCore]]
 |---|---|
 | main, lib | Запуск и сборка сервиса |
 | config | Проверяемые переменные окружения |
-| wire, model | Бинарный контракт и JSON-представление |
+| wire, wire_budget, model | Бинарный контракт, бюджет десериализации без аллокаций и JSON-представление |
 | api | Авторизация и HTTP |
 | journal, wal | Долговечный приём и дедупликация |
 | catalog | SQLite: сегменты, receipts, checkpoint |
@@ -16,7 +16,12 @@ Parent: [[Core/LognaraCore]]
 | query | Проверка фильтров, top-k, чтение строк, HMAC-курсоры |
 | analytics | Типизированные агрегаты DataFusion, общий memory pool |
 | metrics | Счётчики и gauges Prometheus |
-| tests | Контракт, HTTP, WAL, Parquet, восстановление |
+| tests | Контракт, HTTP, WAL, Parquet, поиск, аналитика, retention, аварийные subprocess и настоящий relay |
 | examples/relay_fixture | Fixture через настоящий encoder relay |
+| examples/load | Нагрузочный HTTP-клиент и выборочная проверка свежести от ACK |
+| scripts/benchmark.py | Запуск release-стенда, сбор RSS/CPU/диска/метрик |
+| docs/operations.md | Конфигурация, TLS-прокси, восстановление и мониторинг |
+| docs/benchmark.md | Воспроизведение нагрузочного сценария и критерии |
+| docs/review.md | Две оси ревью, исправления и границы проверки |
 
 Поток: API → Journal → WAL → материализатор → Arrow + Tantivy → Parquet + каталог. Запросы используют согласованный Snapshot.

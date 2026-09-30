@@ -13,3 +13,4 @@ pub mod query;
 pub mod storage;
 pub mod wal;
 pub mod wire;
+mod wire_budget;

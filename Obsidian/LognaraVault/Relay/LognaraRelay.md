@@ -26,6 +26,7 @@ Rust-процесс, один на машину. Принимает пачки �
 | `LOGNARA_SPOOL_MAX_MB` | нет | `1024` | лимит spool на диске |
 | `LOGNARA_CORE_MAX_BODY_BYTES` | нет | `67108864` | максимум сжатой исходящей пачки, не больше лимита core |
 | `LOGNARA_CORE_MAX_DECODED_BYTES` | нет | `268435456` | максимум MessagePack до сжатия, не больше лимита core |
+| `LOGNARA_CORE_MAX_MODEL_BYTES` | нет | `268435456` | бюджет модели: 128 байт на узел MessagePack плюс string/bin |
 
 Пример docker-compose (Dockerfile пока нет):
 
@@ -104,7 +105,7 @@ struct LogId(Uuid); struct TraceId([u8; 16]); struct SpanId([u8; 8]);  // bin 16
 | `agent_wire::decode(body: &[u8], limit: u64): Result<Batch, DecodeError>` | Распаковывает zstd не больше `limit` байт и разбирает пачку агента. |
 | `normalize::event(record: Record): Event` | Превращает запись агента в событие по правилам разбора. |
 | `core_wire::encode(batch: &CoreBatch): Vec<u8>` | MessagePack + zstd. |
-| `core_wire::encode_split(batch: CoreBatch, body_limit: usize, decoded_limit: usize): (Vec<EncodedBatch>, u64)` | Делит по байтовым лимитам, возвращает готовые тела и число неотправляемых событий. |
+| `core_wire::encode_split(batch: CoreBatch, body_limit: usize, decoded_limit: usize, model_limit: usize): (Vec<EncodedBatch>, u64)` | Делит по байтовым лимитам и бюджету модели, возвращает готовые тела и число неотправляемых событий. |
 | `ingest::router(buffer: Arc<Buffer>): Router` | Роутер с `POST /v1/batches`. |
 | `Buffer::push(source: Source, dropped: u64, events: Vec<Event>): Result<(), Full>` | Добавляет события в группу источника; `Full`, если не помещаются в лимит. |
 | `Buffer::take(partial: bool): Option<(Vec<Group>, usize)>` | Забирает все группы и число событий; без `partial` только набранную пачку. |
