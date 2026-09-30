@@ -8,7 +8,7 @@ Parent: [[Index]]
 
 ## Файлы
 
-- `README.md` — содержит только заголовок `Lognara`; назначение проекта пока не описано.
+- `README.md` — описание проекта на русском: назначение, схема потока логов (Mermaid), возможности компонентов, быстрый старт, порты и параметры `LOGNARA_*`, HTTP API core, эксплуатация, разработка, структура репозитория, статус и ограничения. Детали core вынесены в `Lognara-core/README.md` и `Lognara-core/docs/`.
 - `.gitignore` — содержит исключения для Cargo, артефактов сборки агента в `/build/`, rustfmt, PDB, Cargo Mutants, RustRover, `default.profraw` и `.DS_Store`.
 - `LICENSE` — лицензия MIT с указанием copyright 2026 Li_is.
 

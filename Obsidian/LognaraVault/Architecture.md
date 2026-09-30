@@ -27,7 +27,7 @@ Parent: [[Index]]
 | `Lognara-agent/src/main.rs` | Точка входа агента. Параметры задаются переменными `LOGNARA_*`. |
 | `Lognara-relay/src/main.rs` | Точка входа relay. Параметры задаются переменными `LOGNARA_*`, spool хранится в `LOGNARA_SPOOL_DIR`. |
 | `Lognara-core/src/main.rs` | Точка входа core; отдельный crate, конфигурация `LOGNARA_*`. |
-| `README.md` | Содержит только заголовок `Lognara`. |
+| `README.md` | Обзор проекта: схема потока, быстрый старт, порты и параметры, API core, статус. |
 | `.gitignore` | Исключает сборки Cargo (`target`) и артефакты агента в корневом `/build/`, резервные файлы rustfmt, PDB, Cargo Mutants, `default.profraw`, `.DS_Store`. |
 | `LICENSE` | Текст лицензии MIT. |
 
