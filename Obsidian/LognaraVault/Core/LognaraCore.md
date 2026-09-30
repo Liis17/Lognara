@@ -99,6 +99,8 @@ Retention смотрит max core_received_at, исключает expired сег
 
 Стенд `examples/load.rs` генерирует поток и измеряет HTTP ACK, поиск, гистограмму и выборочную видимость от ACK. `scripts/benchmark.py` запускает release-процессы, снимает RSS/CPU/диск/WAL, сохраняет JSON и логи, выполняет graceful shutdown. Настройки и ограничения измерений — `docs/benchmark.md`. Цель 10000/с на 4 CPU / 8 GiB требует проверки именно на этом оборудовании.
 
+Контрольная проверка: 18 001 000 событий за 1800 секунд без ошибок, p99 ACK 21,02 мс, p99 видимости 1,276 с, пик измеренного RSS 426,5 MiB. После рестарта все события доступны аналитике и поиску; 73 сегмента, 8,40 GiB, WAL пуст. Фактический стенд macOS 10 CPU / 16 GiB; целевая приёмка на 4 CPU / 8 GiB не выполнена. Подробности и числовой JSON: `docs/benchmark-results.md`, `docs/benchmark-results.json`. Тесты: 25 core и 40 relay, fmt/clippy прошли.
+
 | Метод | Назначение |
 |---|---|
 | `Metrics::render(): String` | Сериализует низкокардинальные счётчики/gauges Prometheus. |

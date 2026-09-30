@@ -22,6 +22,7 @@ Parent: [[Core/LognaraCore]]
 | scripts/benchmark.py | Запуск release-стенда, сбор RSS/CPU/диска/метрик |
 | docs/operations.md | Конфигурация, TLS-прокси, восстановление и мониторинг |
 | docs/benchmark.md | Воспроизведение нагрузочного сценария и критерии |
+| docs/benchmark-results.md, .json | Фактические результаты 30 минут и проверки после рестарта |
 | docs/review.md | Две оси ревью, исправления и границы проверки |
 
 Поток: API → Journal → WAL → материализатор → Arrow + Tantivy → Parquet + каталог. Запросы используют согласованный Snapshot.

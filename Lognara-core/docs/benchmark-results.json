@@ -1,0 +1,85 @@
+{
+  "host": {
+    "platform": "macOS-27.0-arm64-arm-64bit-Mach-O",
+    "cpu_count": 10,
+    "rate": 10000,
+    "seconds": 1800,
+    "started_at": "2026-09-30T06:28:36Z",
+    "commit": "c3f353839b48afb44d86dfa4ab57888e33dc4378",
+    "config_overrides": {},
+    "memory_bytes": 17179869184
+  },
+  "load": {
+    "target_rate": 10000,
+    "requested_seconds": 1800,
+    "ingest_seconds": 1800.016812417,
+    "offered_events": 18001000,
+    "accepted_events": 18001000,
+    "accepted_per_second": 10000.462148922312,
+    "errors": 0,
+    "wire_uncompressed_bytes": 16601074738,
+    "wire_compressed_bytes": 8250453163,
+    "average_wire_event_bytes": 922.2306948502861,
+    "ack": {
+      "samples": 18001,
+      "p50_us": 13807,
+      "p95_us": 16442,
+      "p99_us": 21019,
+      "max_us": 41401
+    },
+    "search": {
+      "samples": 1801,
+      "p50_us": 4837,
+      "p95_us": 8604,
+      "p99_us": 39469,
+      "max_us": 44478
+    },
+    "histogram": {
+      "samples": 361,
+      "p50_us": 94595,
+      "p95_us": 109971,
+      "p99_us": 113990,
+      "max_us": 122981
+    },
+    "visibility": {
+      "samples": 1701,
+      "p50_us": 581548,
+      "p95_us": 1057123,
+      "p99_us": 1276072,
+      "max_us": 1683209
+    }
+  },
+  "storage": {
+    "data_bytes": 9016176461,
+    "wal_bytes": 0,
+    "server_exit_code": 0,
+    "parquet_bytes": 8000696427,
+    "index_bytes": 1013106972,
+    "bytes_per_event": 500.870866118549
+  },
+  "restart": {
+    "events_after_restart": 18001000,
+    "catalog_rows": 18001000,
+    "segments": 73,
+    "latest_messages": [
+      "benchmark request 18000999 completed",
+      "benchmark request 18000998 completed"
+    ]
+  },
+  "resources": {
+    "samples": 358,
+    "max_rss_bytes": 447168512,
+    "last_rss_bytes": 440451072,
+    "max_wal_bytes": 117353410,
+    "mean_cpu_percent": 20.937430167597764,
+    "max_cpu_percent": 102.1,
+    "min_disk_free_bytes": 11169341440
+  },
+  "binary_sha256": "1955d495109db9a64ab0af5db6d6e66efde64da688096bd34311e3e971e2fa1a",
+  "disk_io": {
+    "scope": "whole host disk0; first cumulative sample excluded",
+    "samples": 359,
+    "mean_reported_mb_per_second": 15.889470752089137,
+    "max_reported_mb_per_second": 81.53
+  }
+}
