@@ -41,6 +41,7 @@ impl Sender {
             relay: Relay {
                 client,
                 url: config.relay_url.clone(),
+                token: config.relay_token.clone(),
             },
             template: Batch {
                 service: config.service.clone(),
@@ -118,6 +119,7 @@ impl Sender {
 struct Relay {
     client: Client,
     url: Url,
+    token: String,
 }
 
 impl Relay {
@@ -150,6 +152,7 @@ impl Relay {
         let response = self
             .client
             .post(self.url.clone())
+            .bearer_auth(&self.token)
             .header(CONTENT_TYPE, "application/msgpack")
             .header(CONTENT_ENCODING, "zstd")
             .body(body)

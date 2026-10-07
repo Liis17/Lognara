@@ -61,6 +61,7 @@ async fn fake_relay(failures: &[StatusCode]) -> FakeRelay {
 }
 
 async fn receive(State(state): State<RelayState>, headers: HeaderMap, body: Bytes) -> StatusCode {
+    assert_eq!(headers["authorization"], "Bearer relay-secret");
     state.requests.fetch_add(1, Ordering::SeqCst);
     if let Some(status) = state.failures.lock().unwrap().pop_front() {
         return status;
@@ -94,6 +95,7 @@ async fn start_agent(relay_url: Url, batch_size: usize, flush_interval: Duration
         max_buffer: 10_000,
         listen_addr: "127.0.0.1:0".parse().unwrap(),
         relay_url,
+        relay_token: "relay-secret".into(),
     };
     let listener = TcpListener::bind(config.listen_addr).await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -198,6 +200,18 @@ async fn retries_while_relay_is_unavailable() {
 #[tokio::test]
 async fn drops_batch_rejected_by_relay() {
     let mut relay = fake_relay(&[StatusCode::BAD_REQUEST]).await;
+    let agent = start_agent(relay.url.clone(), 1, Duration::from_secs(60)).await;
+
+    send_log(&agent, "text/plain", "rejected").await;
+    send_log(&agent, "text/plain", "accepted").await;
+
+    assert_eq!(payloads(next_batch(&mut relay).await), [text("accepted")]);
+    assert_eq!(relay.requests.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn drops_unauthorized_batch_without_retrying() {
+    let mut relay = fake_relay(&[StatusCode::UNAUTHORIZED]).await;
     let agent = start_agent(relay.url.clone(), 1, Duration::from_secs(60)).await;
 
     send_log(&agent, "text/plain", "rejected").await;

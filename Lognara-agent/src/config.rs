@@ -13,7 +13,7 @@ const DEFAULT_MAX_BUFFER: usize = 100_000;
 const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:7400";
 const DEFAULT_RELAY_URL: &str = "http://lognara-relay:7401/v1/batches";
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct Config {
     pub service: String,
     pub server: String,
@@ -28,6 +28,25 @@ pub struct Config {
     pub max_buffer: usize,
     pub listen_addr: SocketAddr,
     pub relay_url: Url,
+    pub relay_token: String,
+}
+
+impl fmt::Debug for Config {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Config")
+            .field("service", &self.service)
+            .field("server", &self.server)
+            .field("backend", &self.backend)
+            .field("environment", &self.environment)
+            .field("service_instance", &self.service_instance)
+            .field("batch_size", &self.batch_size)
+            .field("flush_interval", &self.flush_interval)
+            .field("max_buffer", &self.max_buffer)
+            .field("listen_addr", &self.listen_addr)
+            .field("relay_url", &self.relay_url)
+            .field("relay_token", &"[redacted]")
+            .finish()
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -65,6 +84,15 @@ impl Config {
         let get = |name: &str| lookup(name).filter(|value| !value.is_empty());
         let required = |var: &'static str| get(var).ok_or(ConfigError::Missing(var));
 
+        let relay_token = required("LOGNARA_RELAY_TOKEN")?;
+        if !relay_token.bytes().all(|byte| byte.is_ascii_graphic()) {
+            return Err(ConfigError::Invalid {
+                var: "LOGNARA_RELAY_TOKEN",
+                value: "[redacted]".into(),
+                expected: "an ASCII token without whitespace or control characters",
+            });
+        }
+
         let batch_size = positive(&get, "LOGNARA_BATCH_SIZE", DEFAULT_BATCH_SIZE)?;
         let max_buffer = positive(&get, "LOGNARA_MAX_BUFFER", DEFAULT_MAX_BUFFER)?;
         if max_buffer < batch_size {
@@ -93,6 +121,7 @@ impl Config {
                 "an address like 127.0.0.1:7400",
             )?,
             relay_url: parse(&get, "LOGNARA_RELAY_URL", DEFAULT_RELAY_URL, "a URL")?,
+            relay_token,
         })
     }
 }
@@ -136,10 +165,53 @@ fn parse<T: FromStr>(
 mod tests {
     use super::*;
 
-    const REQUIRED: [(&str, &str); 3] = [
+    #[test]
+    fn rejects_invalid_token_without_exposing_it() {
+        for token in [
+            "relay secret",
+            " secret",
+            "secret ",
+            "secret\t",
+            "secret\r\n",
+            "secret\0",
+            "secret\u{7f}",
+            "секрет",
+        ] {
+            let err = with_required(&[("LOGNARA_RELAY_TOKEN", token)]).unwrap_err();
+            assert!(matches!(
+                &err,
+                ConfigError::Invalid {
+                    var: "LOGNARA_RELAY_TOKEN",
+                    ..
+                }
+            ));
+            assert!(!err.to_string().contains(token));
+            assert!(!format!("{err:?}").contains(token));
+            assert!(err.to_string().contains("LOGNARA_RELAY_TOKEN"));
+        }
+    }
+
+    #[test]
+    fn debug_redacts_tokens() {
+        let config = with_required(&[("LOGNARA_RELAY_TOKEN", "unique-relay-secret")]).unwrap();
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("unique-relay-secret"));
+        assert!(debug.contains("[redacted]"));
+    }
+
+    #[test]
+    fn requires_relay_token() {
+        assert_eq!(
+            with_required(&[("LOGNARA_RELAY_TOKEN", "")]),
+            Err(ConfigError::Missing("LOGNARA_RELAY_TOKEN"))
+        );
+    }
+
+    const REQUIRED: [(&str, &str); 4] = [
         ("LOGNARA_SERVICE", "api"),
         ("LOGNARA_SERVER", "eu-prod-01"),
         ("LOGNARA_BACKEND", "barkcloud"),
+        ("LOGNARA_RELAY_TOKEN", "relay-secret"),
     ];
 
     fn config(vars: &[(&str, &str)]) -> Result<Config, ConfigError> {
@@ -162,6 +234,7 @@ mod tests {
         assert_eq!(config.service, "api");
         assert_eq!(config.server, "eu-prod-01");
         assert_eq!(config.backend, "barkcloud");
+        assert_eq!(config.relay_token, "relay-secret");
         assert_eq!(config.environment, None);
         assert_eq!(config.service_instance, None);
         assert_eq!(config.batch_size, 1000);
@@ -187,6 +260,7 @@ mod tests {
             ("LOGNARA_MAX_BUFFER", "500"),
             ("LOGNARA_LISTEN_ADDR", "0.0.0.0:9000"),
             ("LOGNARA_RELAY_URL", "http://127.0.0.1:9001/batches"),
+            ("LOGNARA_RELAY_TOKEN", "new-relay-secret"),
         ])
         .unwrap();
 
@@ -200,10 +274,11 @@ mod tests {
             "0.0.0.0:9000".parse::<SocketAddr>().unwrap()
         );
         assert_eq!(config.relay_url.as_str(), "http://127.0.0.1:9001/batches");
+        assert_eq!(config.relay_token, "new-relay-secret");
     }
 
     #[test]
-    fn requires_identity_variables() {
+    fn requires_agent_variables() {
         for (missing, _) in REQUIRED {
             let vars: Vec<_> = REQUIRED
                 .into_iter()

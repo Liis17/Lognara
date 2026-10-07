@@ -26,7 +26,8 @@ use tokio_util::sync::CancellationToken;
 
 const WAIT: Duration = Duration::from_secs(5);
 const TOKEN: &str = "secret";
-const BATCH_HEADERS: [(&str, &str); 2] = [
+const BATCH_HEADERS: [(&str, &str); 3] = [
+    ("authorization", "Bearer relay-secret"),
     ("content-type", "application/msgpack"),
     ("content-encoding", "zstd"),
 ];
@@ -135,6 +136,7 @@ fn config(core: &FakeCore, spool_dir: &Path) -> Config {
     Config {
         core_url: core.url.clone(),
         core_token: TOKEN.into(),
+        relay_token: "relay-secret".into(),
         flush_interval: Duration::from_millis(100),
         batch_size: 1000,
         max_buffer: 10_000,
@@ -425,6 +427,51 @@ async fn drops_batch_rejected_by_core() {
 }
 
 #[tokio::test]
+async fn rejects_unauthenticated_batches_without_delivering_or_spooling() {
+    let mut core = fake_core().await;
+    let spool = tempfile::tempdir().unwrap();
+    let mut cfg = config(&core, spool.path());
+    cfg.flush_interval = Duration::from_secs(60);
+    cfg.batch_size = 1;
+    let relay = start_relay(cfg).await;
+    let mut rejected = agent_batch("api", &["rejected"]);
+    rejected.dropped = 17;
+    let packed = rmp_serde::to_vec_named(&rejected).unwrap();
+    let body = zstd::encode_all(packed.as_slice(), 3).unwrap();
+
+    let response = reqwest::Client::new()
+        .post(format!("http://{}/v1/batches", relay.addr))
+        .header("content-type", "application/msgpack")
+        .header("content-encoding", "zstd")
+        .body(body.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(response.headers()["www-authenticate"], "Bearer");
+
+    send(&relay, &agent_batch("api", &["accepted"])).await;
+    let accepted = core.next_batch().await;
+    assert_eq!(messages(&accepted.groups[0]), ["accepted"]);
+    assert_eq!(accepted.dropped, 0);
+    assert_eq!(accepted.groups[0].dropped, 0);
+    relay.stop().await;
+    assert_eq!(core.requests(), 1);
+    assert_eq!(spooled(spool.path()), 0);
+
+    // При недоступном core отказ тоже не должен создавать spool на остановке.
+    core.respond(StatusCode::SERVICE_UNAVAILABLE);
+    let relay = start_relay(config(&core, spool.path())).await;
+    assert_eq!(
+        post_body(&relay, &BATCH_HEADERS[1..], body).await,
+        StatusCode::UNAUTHORIZED
+    );
+    relay.stop().await;
+    assert_eq!(core.requests(), 1);
+    assert_eq!(spooled(spool.path()), 0);
+}
+
+#[tokio::test]
 async fn rejects_invalid_requests_and_overflow() {
     let core = fake_core().await;
     let spool = tempfile::tempdir().unwrap();
@@ -433,7 +480,11 @@ async fn rejects_invalid_requests_and_overflow() {
     config.max_buffer = 2;
     let relay = start_relay(config).await;
 
-    let text = [("content-type", "text/plain"), ("content-encoding", "zstd")];
+    let text = [
+        ("authorization", "Bearer relay-secret"),
+        ("content-type", "text/plain"),
+        ("content-encoding", "zstd"),
+    ];
     assert_eq!(
         post_body(&relay, &text, b"hi".to_vec()).await,
         StatusCode::UNSUPPORTED_MEDIA_TYPE

@@ -35,6 +35,7 @@ async fn actual_relay_delivers_to_core_and_all_public_routes_observe_the_log() {
     let relay_config = RelayConfig::from_lookup(|key| match key {
         "LOGNARA_CORE_URL" => Some(format!("{url}/v1/batches")),
         "LOGNARA_CORE_TOKEN" => Some("ingest".into()),
+        "LOGNARA_RELAY_TOKEN" => Some("relay-secret".into()),
         "LOGNARA_FLUSH_INTERVAL_MS" => Some("20".into()),
         "LOGNARA_BATCH_SIZE" => Some("1".into()),
         _ => None,
@@ -61,6 +62,7 @@ async fn actual_relay_delivers_to_core_and_all_public_routes_observe_the_log() {
     assert_eq!(
         client
             .post(relay_url)
+            .bearer_auth("relay-secret")
             .header("content-type", "application/msgpack")
             .header("content-encoding", "zstd")
             .body(body)

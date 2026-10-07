@@ -38,7 +38,7 @@ pub async fn run(
     let sender =
         tokio::spawn(Sender::new(&config, buffer.clone(), spool, stop_sending.clone()).run());
 
-    let served = axum::serve(listener, ingest::router(buffer))
+    let served = axum::serve(listener, ingest::router(buffer, &config.relay_token))
         .with_graceful_shutdown(shutdown.cancelled_owned())
         .await;
 
