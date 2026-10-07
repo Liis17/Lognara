@@ -28,7 +28,7 @@ MessagePack с именованными полями + ZSTD; `CoreBatch = droppe
 
 ## Зависимости
 
-Tokio, Axum, serde/MessagePack/ZSTD; Parquet 59.2 совместим с Arrow из DataFusion 55.1; Tantivy 0.26, SQLite через rusqlite. Зависимость на relay существует только в тестах и примерах.
+Tokio, Axum, serde/MessagePack/ZSTD; Parquet 59.2 совместим с Arrow из DataFusion 55.1; Tantivy 0.26, SQLite через rusqlite. Зависимость на relay существует только в тестах и примерах, на agent только в сквозном тесте.
 
 ## Надёжный приём
 
@@ -93,7 +93,7 @@ Retention смотрит max core_received_at, исключает expired сег
 
 `Lognara-core/docs/operations.md` описывает все переменные, запуск за TLS-прокси, остановку, резервную копию всего каталога и восстановление. SIGTERM/SIGINT прекращает HTTP, дорабатывает WAL и закрывает открытый сегмент. Метрики Prometheus защищены query-токеном; health доступен без токена.
 
-`tests/crashes.rs` запускает настоящий бинарник с feature `crash-tests`: завершение до rename WAL, после fsync, записи Parquet, до/после SQLite-транзакции, после очистки WAL; отдельно SIGKILL после 204. В production feature выключен. `tests/e2e.rs` запускает настоящий relay и core, проверяет API чтения и доступ.
+`tests/crashes.rs` запускает настоящий бинарник с feature `crash-tests`: завершение до rename WAL, после fsync, записи Parquet, до/после SQLite-транзакции, после очистки WAL; отдельно SIGKILL после 204. В production feature выключен. `tests/e2e.rs` запускает настоящие agent, relay и core, проверяет API чтения и доступ; временно останавливает HTTP core, принимает логи через agent с `202`, после восстановления проверяет наличие всех сообщений.
 
 Аварийные проверки также включают остановку до fsync, во время записи Parquet и после пометки retention `deleting`. Двухосевое ревью и исправления описаны в `docs/review.md`: бюджет модели/поиска, классификация транспортных ошибок и ожидание конкурентных повторов.
 

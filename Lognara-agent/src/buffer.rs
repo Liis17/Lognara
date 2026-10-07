@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::body::Bytes;
-use lognara_spool::{Entry, Error, Queue, wire_budget};
+use lognara_spool::{Entry, Error, PendingBatch, Queue, wire_budget};
 use serde::Serialize;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
@@ -166,7 +166,7 @@ impl Buffer {
         permit: OwnedSemaphorePermit,
     ) -> Result<Option<Pending>, Error> {
         let queue = self.queue.lock().unwrap();
-        if let Some((body, entries)) = queue.pending(self.config.max_batch_bytes)? {
+        if let Some(PendingBatch { body, entries }) = queue.pending(self.config.max_batch_bytes)? {
             if !entries.is_empty() {
                 return Ok(Some(Pending {
                     body: body.into(),
@@ -188,12 +188,11 @@ impl Buffer {
         let mut raw_size = 0usize;
         let mut model_size = 0usize;
         for entry in queue.entries() {
-            if let Some(batch) = &batch {
-                if batch.records.len() as u64 + entry.events > self.config.batch_size as u64
-                    || raw_size + entry.size as usize > self.raw_limit()
-                {
-                    break;
-                }
+            if let Some(batch) = &batch
+                && (batch.records.len() as u64 + entry.events > self.config.batch_size as u64
+                    || raw_size + entry.size as usize > self.raw_limit())
+            {
+                break;
             }
             let body = queue.read(entry, self.config.max_batch_bytes)?;
             let estimate =

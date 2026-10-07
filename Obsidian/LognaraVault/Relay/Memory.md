@@ -81,3 +81,5 @@ python3 Lognara-relay/tests/check-memory-profile.py
 |---|---|
 | `bounded_relay_memory_profile()` | Проверяет поведение при большой конкурентной нагрузке и недоступном core. |
 | `check-memory-profile.py::main(): int` | Собирает тест, контролирует его RSS и возвращает результат проверки. |
+
+Повторный прогон текущей реализации: пик RSS 1617,5 MiB, accepted=9, admission=60, resource=4; обе проверки ниже 2048 MiB. Максимальный наблюдавшийся пик 1672,4 MiB.

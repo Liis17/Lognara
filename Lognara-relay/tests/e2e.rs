@@ -661,3 +661,79 @@ async fn oversized_spool_stops_ingest_and_resumes_after_file_is_repaired() {
     assert_eq!(messages(&core.next_batch().await.groups[0]), ["new"]);
     relay.stop().await;
 }
+
+struct ProcessRelay(std::process::Child);
+impl Drop for ProcessRelay {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+async fn process_relay(dir: &Path, core: &Url, addr: SocketAddr) -> ProcessRelay {
+    let process = ProcessRelay(
+        std::process::Command::new(env!("CARGO_BIN_EXE_lognara-relay"))
+            .env("LOGNARA_CORE_URL", core.as_str())
+            .env("LOGNARA_CORE_TOKEN", TOKEN)
+            .env("LOGNARA_RELAY_TOKEN", "relay-secret")
+            .env("LOGNARA_SPOOL_DIR", dir)
+            .env("LOGNARA_LISTEN_ADDR", addr.to_string())
+            .env("LOGNARA_BATCH_SIZE", "1")
+            .env("LOGNARA_FLUSH_INTERVAL_MS", "100")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    timeout(WAIT, async {
+        loop {
+            if reqwest::get(format!("http://{addr}/v1/batches"))
+                .await
+                .is_ok()
+            {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("relay process did not listen");
+    process
+}
+#[tokio::test]
+async fn sigkill_after_202_restores_confirmed_relay_parts_with_identical_bytes() {
+    let mut core = fake_core().await;
+    core.respond(StatusCode::SERVICE_UNAVAILABLE);
+    let dir = tempfile::tempdir().unwrap();
+    let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = socket.local_addr().unwrap();
+    drop(socket);
+    let process = process_relay(dir.path(), &core.url, addr).await;
+    let batch = agent_batch("api", &["one", "two", "three"]);
+    let body = zstd::encode_all(&rmp_serde::to_vec_named(&batch).unwrap()[..], 3).unwrap();
+    let response = reqwest::Client::new()
+        .post(format!("http://{addr}/v1/batches"))
+        .bearer_auth("relay-secret")
+        .header("content-type", "application/msgpack")
+        .header("content-encoding", "zstd")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    eventually(|| core.requests() > 0).await;
+    let original = core.bodies.lock().unwrap()[0].clone();
+    drop(process);
+    assert!(spooled(dir.path()) > 0);
+    core.respond(StatusCode::OK);
+    let _restarted = process_relay(dir.path(), &core.url, addr).await;
+    let delivered = core.next_batch().await;
+    assert_eq!(messages(&delivered.groups[0]), ["one", "two", "three"]);
+    assert!(
+        core.bodies
+            .lock()
+            .unwrap()
+            .iter()
+            .skip(1)
+            .any(|body| *body == original)
+    );
+}

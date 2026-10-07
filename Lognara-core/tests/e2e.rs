@@ -9,7 +9,7 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
-async fn actual_relay_delivers_to_core_and_all_public_routes_observe_the_log() {
+async fn actual_pipeline_recovers_after_core_outage_and_public_routes_observe_logs() {
     let dir = tempfile::tempdir().unwrap();
     let mut config = Config::from_lookup(|key| match key {
         "LOGNARA_INGEST_TOKEN" => Some("ingest".into()),
@@ -22,7 +22,8 @@ async fn actual_relay_delivers_to_core_and_all_public_routes_observe_the_log() {
     config.refresh_interval = Duration::from_millis(20);
     let core = Core::open(config).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
+    let core_addr = listener.local_addr().unwrap();
+    let url = format!("http://{core_addr}");
     let stop_core = CancellationToken::new();
     let stop = stop_core.clone();
     let router = api::router(core.clone());
@@ -61,7 +62,7 @@ async fn actual_relay_delivers_to_core_and_all_public_routes_observe_the_log() {
     let client = reqwest::Client::new();
     assert_eq!(
         client
-            .post(relay_url)
+            .post(&relay_url)
             .bearer_auth("relay-secret")
             .header("content-type", "application/msgpack")
             .header("content-encoding", "zstd")
@@ -176,6 +177,94 @@ async fn actual_relay_delivers_to_core_and_all_public_routes_observe_the_log() {
             .status(),
         400
     );
+    // Настоящий agent принимает 202 при остановленном HTTP core.
+    stop_core.cancel();
+    server.await.unwrap();
+    let mut agent_config = lognara_agent::config::Config::from_lookup(|key| match key {
+        "LOGNARA_SERVICE" => Some("api".into()),
+        "LOGNARA_SERVER" => Some("srv".into()),
+        "LOGNARA_BACKEND" => Some("backend".into()),
+        "LOGNARA_RELAY_TOKEN" => Some("relay-secret".into()),
+        "LOGNARA_RELAY_URL" => Some(relay_url.clone()),
+        "LOGNARA_BATCH_SIZE" => Some("1".into()),
+        "LOGNARA_FLUSH_INTERVAL_MS" => Some("20".into()),
+        _ => None,
+    })
+    .unwrap();
+    agent_config.spool_dir = dir.path().join("agent-spool");
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let agent_url = format!("http://{}/v1/logs", listener.local_addr().unwrap());
+    let stop_agent = CancellationToken::new();
+    let agent = tokio::spawn(lognara_agent::run(
+        agent_config,
+        listener,
+        stop_agent.clone(),
+    ));
+    for number in 0..8 {
+        let response = client
+            .post(&agent_url)
+            .header("content-type", "text/plain")
+            .body(format!("agent delivery {number}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 202);
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        std::fs::read_dir(dir.path().join("spool"))
+            .unwrap()
+            .any(|item| item
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|ext| ext == "group"))
+    );
+    let listener = TcpListener::bind(core_addr).await.unwrap();
+    let stop_core = CancellationToken::new();
+    let stop = stop_core.clone();
+    let router = api::router(core.clone());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(stop.cancelled_owned())
+            .await
+            .unwrap();
+    });
+    let query = serde_json::json!({"from":"2020-01-01T00:00:00Z","to":"2100-01-01T00:00:00Z",
+        "text":{"query":"agent delivery","mode":"phrase"}});
+    let expected: std::collections::HashSet<_> =
+        (0..8).map(|n| format!("agent delivery {n}")).collect();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let result: serde_json::Value = client
+            .post(format!("{url}/v1/logs/search"))
+            .bearer_auth("query")
+            .json(&query)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let delivered: std::collections::HashSet<_> = result["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| event["message"].as_str().unwrap().to_owned())
+            .collect();
+        if expected.is_subset(&delivered) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "confirmed agent logs missing after core recovery"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    stop_agent.cancel();
+    agent.await.unwrap().unwrap();
     stop_relay.cancel();
     relay.await.unwrap().unwrap();
     stop_core.cancel();

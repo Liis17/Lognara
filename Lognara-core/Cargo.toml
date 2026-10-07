@@ -42,6 +42,7 @@ uuid = { version = "1", features = ["v7", "v4", "serde"] }
 zstd = "0.13"
 
 [dev-dependencies]
+lognara-agent = { path = "../Lognara-agent" }
 lognara-relay = { path = "../Lognara-relay" }
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 tempfile = "3"

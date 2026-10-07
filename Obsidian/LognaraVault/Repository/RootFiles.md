@@ -8,7 +8,7 @@ Parent: [[Index]]
 
 ## Файлы
 
-- `README.md` — описание проекта на русском: назначение, схема потока логов (Mermaid), возможности компонентов, быстрый старт, порты и параметры `LOGNARA_*`, общий ключ agent → relay, `.env` и фрагмент Compose с выделенной сетью, HTTP API core, эксплуатация, разработка, структура репозитория, статус и ограничения. Детали core вынесены в `Lognara-core/README.md` и `Lognara-core/docs/`.
+- `README.md` — описание проекта на русском: назначение, схема потока логов (Mermaid), возможности компонентов, быстрый старт, порты и параметры `LOGNARA_*`, общий ключ agent → relay, `.env` и фрагмент Compose с выделенной сетью, durable ACK и обязательные volumes обоих сервисов, порядок обновления, HTTP API core, эксплуатация, разработка, структура репозитория, статус и ограничения. Детали core вынесены в `Lognara-core/README.md` и `Lognara-core/docs/`.
 - `.gitignore` — содержит исключения для Cargo, артефактов сборки агента в `/build/`, rustfmt, PDB, Cargo Mutants, RustRover, `default.profraw`, `.DS_Store` и локального `.env` с ключом.
 - `.env.example` — пустой обязательный `LOGNARA_RELAY_TOKEN` и инструкция сгенерировать ключ через `openssl rand -hex 32`; копируется в `.env` для настройки Compose.
 - `LICENSE` — лицензия MIT с указанием copyright 2026 Li_is.

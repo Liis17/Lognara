@@ -103,7 +103,6 @@ enum Payload { Text(String), Json(String), Binary(Vec<u8>) }
 | ~~`Relay::post(body: Vec<u8>): reqwest::Result<StatusCode>`~~ (удалён: 2026-10-08) | Отправляет сжатую пачку с общим Bearer-токеном в relay. |
 | `wire::encode(batch: &Batch): Vec<u8>` | MessagePack + zstd. |
 | `wire::unix_nanos(): i64` | Текущее Unix-время в наносекундах. |
-
 | `Config::validate(): Result<(), ConfigError>` | Проверяет квоты, два конвейера, metadata и размер записи при запуске. |
 | `Config::pipeline_bytes(): usize` | Вычисляет резерв одного конвейера после индекса и источника. |
 | `ingest::parse_body_limited(content_type: Option<&str>, body: &[u8], records: usize, max_record: usize): Result<Vec<Payload>, IngestError>` | Проверяет размеры до материализации payload. |
@@ -123,3 +122,5 @@ enum Payload { Text(String), Json(String), Binary(Vec<u8>) }
 - Использует: `tokio`, `tokio-util`, `axum`, `reqwest` (без TLS), `serde`, `serde_json` (`raw_value`), `rmp-serde`, `serde_bytes`, `zstd`, `tracing`, `tracing-subscriber`, `http-body`, общий `lognara-spool`.
 - Отправляет пачки в: [[Relay/LognaraRelay]].
 - Используется в: [[Architecture]].
+
+Измерение `check-memory-profile.py` на macOS arm64/debug: пик RSS 96,8 MiB, 7 подтверждённых записей по 2 MiB, 50 отказов при конкурентном приёме и 10 запросов без ответа из-за разрыва транспорта. Очередь оставалась заполненной при недоступном relay ещё 30 секунд; после восстановления доставлены все 7 подтверждённых записей. Клиент обязан повторять запросы без ACK; тестовые клиенты входят в измерение.

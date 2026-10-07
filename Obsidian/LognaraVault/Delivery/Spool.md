@@ -18,7 +18,7 @@ Parent: [[Index]]
 | `Queue::read(entry: &Entry, limit: usize): Result<Vec<u8>, Error>` | Читает файл с ограничением capacity и проверкой размера. |
 | `Queue::ack(entries: &[Entry]): Result<(), Error>` | Удаляет только подтверждённый префикс очереди. |
 | `Queue::save_pending(entries: &[Entry], body: &[u8], limit: usize): Result<(), Error>` | Сохраняет точные байты подготовленной отправки. |
-| `Queue::pending(limit: usize): Result<Option<(Vec<u8>, Vec<Entry>)>, Error>` | Восстанавливает отправку и оставшиеся неподтверждённые части. |
+| `Queue::pending(limit: usize): Result<Option<PendingBatch>, Error>` | Восстанавливает отправку и оставшиеся неподтверждённые части. |
 | `Queue::clear_pending(): Result<(), Error>` | Атомарно снимает завершённую отправку. |
 
 Тесты проверяют квоты, отмену группы, восстановление legacy, эксклюзивный доступ, сохранение unreadable/oversized файлов и pending после частичного ACK; subprocess SIGKILL до публикации и после durable commit до ответа.

@@ -40,6 +40,11 @@ pub struct Entry {
     path: PathBuf,
 }
 
+pub struct PendingBatch {
+    pub body: Vec<u8>,
+    pub entries: Vec<Entry>,
+}
+
 pub struct Queue {
     dir: PathBuf,
     files: VecDeque<Entry>,
@@ -320,7 +325,7 @@ impl Queue {
         Ok(())
     }
 
-    pub fn pending(&self, limit: usize) -> Result<Option<(Vec<u8>, Vec<Entry>)>, Error> {
+    pub fn pending(&self, limit: usize) -> Result<Option<PendingBatch>, Error> {
         let dir = self.dir.join("pending");
         if !dir.exists() {
             return Ok(None);
@@ -362,7 +367,7 @@ impl Queue {
         }
         let mut body = vec![0; size as usize];
         File::open(dir.join("body"))?.read_exact(&mut body)?;
-        Ok(Some((body, entries)))
+        Ok(Some(PendingBatch { body, entries }))
     }
 
     pub fn clear_pending(&self) -> Result<(), Error> {
@@ -472,13 +477,16 @@ mod tests {
         queue.ack(&entries[..1]).unwrap();
         drop(queue);
         let mut queue = Queue::open(dir.path(), 10, 100).unwrap();
-        let (body, remaining) = queue.pending(32).unwrap().unwrap();
+        let PendingBatch {
+            body,
+            entries: remaining,
+        } = queue.pending(32).unwrap().unwrap();
         assert_eq!(body, b"stable transport");
         assert_eq!(remaining, entries[1..]);
         queue.ack(&remaining).unwrap();
         drop(queue);
         let queue = Queue::open(dir.path(), 10, 100).unwrap();
-        assert!(queue.pending(32).unwrap().unwrap().1.is_empty());
+        assert!(queue.pending(32).unwrap().unwrap().entries.is_empty());
         queue.clear_pending().unwrap();
         assert!(queue.pending(32).unwrap().is_none());
     }
@@ -492,7 +500,7 @@ mod tests {
             .save_pending(&[queue.entries()[0].clone()], b"body", 4)
             .unwrap();
         assert!(!queue.available());
-        assert_eq!(queue.pending(4).unwrap().unwrap().0, b"body");
+        assert_eq!(queue.pending(4).unwrap().unwrap().body, b"body");
     }
 
     #[test]

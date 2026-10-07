@@ -149,9 +149,13 @@ impl Config {
             spool_dir: get("LOGNARA_SPOOL_DIR")
                 .unwrap_or_else(|| DEFAULT_SPOOL_DIR.to_owned())
                 .into(),
-            spool_max_bytes: spool_max_mb.checked_mul(1024 * 1024).ok_or(ConfigError::Invalid {
-                var: "LOGNARA_SPOOL_MAX_MB", value: spool_max_mb.to_string(), expected: "a byte quota without overflow",
-            })?,
+            spool_max_bytes: spool_max_mb
+                .checked_mul(1024 * 1024)
+                .ok_or(ConfigError::Invalid {
+                    var: "LOGNARA_SPOOL_MAX_MB",
+                    value: spool_max_mb.to_string(),
+                    expected: "a byte quota without overflow",
+                })?,
             core_max_body_bytes: positive(&get, "LOGNARA_CORE_MAX_BODY_BYTES", 64 << 20)?,
             core_max_decoded_bytes: positive(&get, "LOGNARA_CORE_MAX_DECODED_BYTES", 256 << 20)?,
             core_max_model_bytes: positive(
@@ -202,8 +206,16 @@ impl Config {
     }
 
     pub fn validate_memory(&self) -> Result<(), ConfigError> {
-        if self.batch_size == 0 || self.max_buffer < self.batch_size || self.spool_max_bytes == 0 {
-            return Err(ConfigError::Invalid { var: "LOGNARA_MAX_BUFFER", value: self.max_buffer.to_string(), expected: "positive spool quota and max buffer >= positive batch size" });
+        if self.flush_interval.is_zero()
+            || self.batch_size == 0
+            || self.max_buffer < self.batch_size
+            || self.spool_max_bytes == 0
+        {
+            return Err(ConfigError::Invalid {
+                var: "LOGNARA_MAX_BUFFER",
+                value: self.max_buffer.to_string(),
+                expected: "positive spool quota and max buffer >= positive batch size",
+            });
         }
         let required = self
             .ingest_request_bytes()

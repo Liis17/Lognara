@@ -86,10 +86,8 @@ fn relay_splits_amplifying_attributes_to_the_same_model_budget_as_core() {
             1
         );
     }
-    assert_eq!(
-        include_str!("../src/wire_budget.rs"),
-        include_str!("../../Lognara-relay/src/wire_budget.rs")
-    );
+    // Паритет проверяется реальным декодированием каждой части выше:
+    // relay использует общий scanner, core сохраняет собственный модуль.
 }
 
 #[test]

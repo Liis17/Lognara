@@ -14,7 +14,7 @@ Lognara-relay/
 │   ├── config.rs           параметры LOGNARA_*
 │   ├── agent_wire.rs       контракт агента: Batch, Record, Payload, decode_with_budget()
 │   ├── core_wire.rs        контракт с core: CoreBatch, Group, Source, Event, encode()
-│   ├── wire_budget.rs      no-alloc оценка памяти MessagePack, идентичная core
+│   ├── wire_budget.rs      общая no-alloc оценка MessagePack из lognara-spool, идентичная core
 │   ├── normalize.rs        разбор Record в Event
 │   ├── ingest.rs           Bearer-аутентификация до чтения тела, POST /v1/batches
 │   ├── memory.rs           резервы, admission и ожидание blocking-работников
@@ -63,4 +63,4 @@ Lognara-relay/
 | `tests/memory_profile.rs` | 16 конкурентных клиентов, тела около 60 MiB, распаковка около 256 MiB, JSON с миллионом узлов, base64, байтовый отказ буфера, core `503` и shutdown |
 | `tests/check-memory-profile.py` | запускает отдельный процесс теста; останавливает при RSS выше 2 GiB, проверяет kernel high-water mark после завершения |
 
-Разделённые пачки дополнительно проходят рестарт relay со spool и проверку идентичности байтов повторной отправки. Shutdown с зависшей доставкой удерживает все сохранённые части; oversized replay закрывает admission до исправления файла. Настоящий core проверяется в `Lognara-core/tests/e2e.rs`.
+Разделённые пачки дополнительно проходят рестарт relay со spool и проверку идентичности байтов повторной отправки; SIGKILL после `202` восстанавливает подтверждённые части. Shutdown с зависшей доставкой удерживает все сохранённые части; oversized replay закрывает admission до исправления файла. Настоящий core проверяется в `Lognara-core/tests/e2e.rs`.

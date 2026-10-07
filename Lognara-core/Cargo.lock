@@ -2157,6 +2157,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
+name = "lognara-agent"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "http-body",
+ "lognara-spool",
+ "reqwest",
+ "rmp-serde",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "zstd",
+]
+
+[[package]]
 name = "lognara-core"
 version = "0.1.0"
 dependencies = [
@@ -2171,6 +2190,7 @@ dependencies = [
  "hex",
  "hmac",
  "http-body-util",
+ "lognara-agent",
  "lognara-relay",
  "lru",
  "parquet",
@@ -2203,6 +2223,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "http-body",
+ "lognara-spool",
  "reqwest",
  "rmp-serde",
  "serde",
@@ -2218,6 +2239,10 @@ dependencies = [
  "uuid",
  "zstd",
 ]
+
+[[package]]
+name = "lognara-spool"
+version = "0.1.0"
 
 [[package]]
 name = "lru"

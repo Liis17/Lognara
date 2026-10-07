@@ -136,6 +136,22 @@ async fn bounded_agent_memory_profile() {
             assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         }
     }
+    // 30 секунд полной очереди: несколько циклов максимального backoff,
+    // повторные неподтверждённые запросы не вытесняют подтверждённые данные.
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let response = reqwest::Client::new()
+            .post(&url)
+            .header("content-type", "application/octet-stream")
+            .body(random.clone())
+            .send()
+            .await;
+        match response {
+            Ok(response) => assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE),
+            Err(_) => transport_errors += 1,
+        }
+        assert!(relay.delivered.lock().unwrap().is_empty());
+    }
     relay.ready.store(true, Ordering::Release);
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
