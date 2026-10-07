@@ -1,10 +1,11 @@
 //! Приём пачек от агентов: `POST /v1/batches`, MessagePack + zstd.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Request, State};
+use axum::extract::{DefaultBodyLimit, FromRequest, Request, State};
 use axum::http::header::{AUTHORIZATION, CONTENT_ENCODING, CONTENT_TYPE, HeaderName};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
@@ -16,19 +17,20 @@ use subtle::ConstantTimeEq;
 use crate::agent_wire::{self, DecodeError};
 use crate::buffer::Buffer;
 use crate::core_wire::Source;
+use crate::memory::{MAX_BODY, MAX_DECODED, Resources};
 use crate::normalize;
 
-/// Предел сжатого тела запроса.
-const MAX_BODY: usize = 64 * 1024 * 1024;
-/// Предел распакованной пачки, защита от zstd-бомбы.
-const MAX_DECODED: u64 = 256 * 1024 * 1024;
+#[derive(Clone)]
+struct IngestState {
+    buffer: Arc<Buffer>,
+    resources: Arc<Resources>,
+}
 
-pub fn router(buffer: Arc<Buffer>, token: &str) -> Router {
+pub fn router(buffer: Arc<Buffer>, token: &str, resources: Arc<Resources>) -> Router {
     Router::new()
         .route("/v1/batches", post(ingest))
-        .layer(DefaultBodyLimit::max(MAX_BODY))
         .route_layer(middleware::from_fn_with_state(token_hash(token), authorize))
-        .with_state(buffer)
+        .with_state(IngestState { buffer, resources })
 }
 
 fn token_hash(token: &str) -> [u8; 32] {
@@ -57,17 +59,45 @@ async fn authorize(State(expected): State<[u8; 32]>, request: Request, next: Nex
 }
 
 async fn ingest(
-    State(buffer): State<Arc<Buffer>>,
-    headers: HeaderMap,
-    body: Bytes,
+    State(state): State<IngestState>,
+    mut request: Request,
 ) -> Result<StatusCode, IngestError> {
-    if !header_is(&headers, CONTENT_TYPE, "application/msgpack")
-        || !header_is(&headers, CONTENT_ENCODING, "zstd")
+    if !header_is(request.headers(), CONTENT_TYPE, "application/msgpack")
+        || !header_is(request.headers(), CONTENT_ENCODING, "zstd")
     {
         return Err(IngestError::UnsupportedType);
     }
 
-    let batch = agent_wire::decode(&body, MAX_DECODED)?;
+    if !state.resources.ready() {
+        return Err(IngestError::Unavailable);
+    }
+    let permit = state
+        .resources
+        .slots
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| IngestError::Unavailable)?;
+    DefaultBodyLimit::max(MAX_BODY).apply(&mut request);
+    let body = tokio::time::timeout(Duration::from_secs(30), Bytes::from_request(request, &()))
+        .await
+        .map_err(|_| IngestError::Timeout)?
+        .map_err(|error| {
+            if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
+                IngestError::TooLarge
+            } else {
+                IngestError::InvalidBody
+            }
+        })?;
+    crate::memory::run_blocking(permit, move || accept(&state.buffer, &body))
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "ingest worker failed");
+            IngestError::Unavailable
+        })?
+}
+
+fn accept(buffer: &Buffer, body: &[u8]) -> Result<StatusCode, IngestError> {
+    let batch = agent_wire::decode(body, MAX_DECODED as u64)?;
     let source = Source {
         environment: batch.environment,
         server: batch.server,
@@ -96,6 +126,8 @@ enum IngestError {
     TooLarge,
     InvalidBody,
     BufferFull,
+    Unavailable,
+    Timeout,
 }
 
 impl From<DecodeError> for IngestError {
@@ -121,6 +153,11 @@ impl IntoResponse for IngestError {
             ),
             // Агент повторит пачку с backoff и пока продержит записи у себя.
             Self::BufferFull => (StatusCode::SERVICE_UNAVAILABLE, "relay buffer is full"),
+            Self::Unavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "relay ingest capacity is unavailable",
+            ),
+            Self::Timeout => (StatusCode::REQUEST_TIMEOUT, "request body timed out"),
         };
         (status, message).into_response()
     }
@@ -139,6 +176,41 @@ mod tests {
 
     use super::*;
 
+    fn resources() -> Arc<Resources> {
+        let config = crate::config::Config::from_lookup(|name| match name {
+            "LOGNARA_CORE_URL" => Some("http://localhost/v1/batches".into()),
+            "LOGNARA_CORE_TOKEN" | "LOGNARA_RELAY_TOKEN" => Some("secret".into()),
+            _ => None,
+        })
+        .unwrap();
+        Resources::new(&config)
+    }
+
+    #[tokio::test]
+    async fn rejects_saturated_admission_without_reading_body() {
+        let resources = resources();
+        let held = resources.slots.clone().try_acquire_owned().unwrap();
+        let app = router(
+            Arc::new(Buffer::new(1, 1)),
+            "relay-secret",
+            resources.clone(),
+        );
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/batches")
+            .header(AUTHORIZATION, "Bearer relay-secret")
+            .header(CONTENT_TYPE, "application/msgpack")
+            .header(CONTENT_ENCODING, "zstd")
+            .body(Body::new(UnreadableBody))
+            .unwrap();
+        assert_eq!(
+            app.oneshot(request).await.unwrap().status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        drop(held);
+        assert_eq!(resources.slots.available_permits(), 1);
+    }
+
     struct UnreadableBody;
 
     impl http_body::Body for UnreadableBody {
@@ -156,7 +228,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_invalid_authorization_before_reading_body() {
         let buffer = Arc::new(Buffer::new(1, 1));
-        let app = router(buffer.clone(), "relay-secret");
+        let app = router(buffer.clone(), "relay-secret", resources());
         let invalid_headers: &[&[&str]] = &[
             &[],
             &["Bearer wrong"],
@@ -193,7 +265,7 @@ mod tests {
 
     #[tokio::test]
     async fn accepts_case_insensitive_bearer_scheme_and_preserves_body_validation() {
-        let app = router(Arc::new(Buffer::new(1, 1)), "relay-secret");
+        let app = router(Arc::new(Buffer::new(1, 1)), "relay-secret", resources());
         for (content_type, status) in [
             ("text/plain", StatusCode::UNSUPPORTED_MEDIA_TYPE),
             ("application/msgpack", StatusCode::BAD_REQUEST),

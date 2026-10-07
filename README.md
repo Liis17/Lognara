@@ -150,6 +150,10 @@ curl -X POST http://127.0.0.1:7402/v1/logs/search \
 | `LOGNARA_CORE_MAX_BODY_BYTES` | `67108864` | максимум сжатой пачки, не больше лимита core |
 | `LOGNARA_CORE_MAX_DECODED_BYTES` | `268435456` | максимум MessagePack до сжатия, не больше лимита core |
 | `LOGNARA_CORE_MAX_MODEL_BYTES` | `268435456` | бюджет модели, не больше лимита core |
+| `LOGNARA_RELAY_MEMORY_BYTES` | `1879048192` | общий бюджет резервов приёма, буфера и sender |
+| `LOGNARA_RELAY_MAX_MODEL_BYTES` | `268435456` | бюджет входной модели и нормализации |
+| `LOGNARA_RELAY_MAX_BUFFER_BYTES` | `268435456` | байтовый резерв накопленных моделей |
+| `LOGNARA_RELAY_MAX_INGEST_CONCURRENCY` | `1` | число одновременно читаемых/обрабатываемых пачек |
 
 Параметры core (лимиты, память, сегменты, retention) описаны в [эксплуатации core](Lognara-core/docs/operations.md#конфигурация).
 

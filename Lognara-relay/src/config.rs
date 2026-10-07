@@ -35,6 +35,10 @@ pub struct Config {
     pub core_max_body_bytes: usize,
     pub core_max_decoded_bytes: usize,
     pub core_max_model_bytes: usize,
+    pub memory_bytes: usize,
+    pub max_model_bytes: usize,
+    pub max_buffer_bytes: usize,
+    pub max_ingest_concurrency: usize,
 }
 
 impl fmt::Debug for Config {
@@ -52,6 +56,10 @@ impl fmt::Debug for Config {
             .field("core_max_body_bytes", &self.core_max_body_bytes)
             .field("core_max_decoded_bytes", &self.core_max_decoded_bytes)
             .field("core_max_model_bytes", &self.core_max_model_bytes)
+            .field("memory_bytes", &self.memory_bytes)
+            .field("max_model_bytes", &self.max_model_bytes)
+            .field("max_buffer_bytes", &self.max_buffer_bytes)
+            .field("max_ingest_concurrency", &self.max_ingest_concurrency)
             .finish()
     }
 }
@@ -125,7 +133,7 @@ impl Config {
             positive(&get, "LOGNARA_FLUSH_INTERVAL_MS", DEFAULT_FLUSH_INTERVAL_MS)?;
         let spool_max_mb = positive(&get, "LOGNARA_SPOOL_MAX_MB", DEFAULT_SPOOL_MAX_MB)?;
 
-        Ok(Self {
+        let config = Self {
             core_url,
             core_token: required("LOGNARA_CORE_TOKEN")?,
             relay_token,
@@ -149,7 +157,72 @@ impl Config {
                 "LOGNARA_CORE_MAX_MODEL_BYTES",
                 crate::wire_budget::DEFAULT_MODEL_BYTES,
             )?,
-        })
+            memory_bytes: positive(
+                &get,
+                "LOGNARA_RELAY_MEMORY_BYTES",
+                crate::memory::DEFAULT_MEMORY,
+            )?,
+            max_model_bytes: positive(
+                &get,
+                "LOGNARA_RELAY_MAX_MODEL_BYTES",
+                crate::memory::DEFAULT_MODEL,
+            )?,
+            max_buffer_bytes: positive(
+                &get,
+                "LOGNARA_RELAY_MAX_BUFFER_BYTES",
+                crate::memory::DEFAULT_BUFFER,
+            )?,
+            max_ingest_concurrency: positive(&get, "LOGNARA_RELAY_MAX_INGEST_CONCURRENCY", 1usize)?,
+        };
+        config.validate_memory()?;
+        Ok(config)
+    }
+
+    /// Входной резерв округляется вверх до 128 MiB, по умолчанию 1 GiB.
+    pub fn ingest_request_bytes(&self) -> Option<usize> {
+        use crate::memory::{CODEC_WORKSPACE, MAX_BODY, MAX_DECODED};
+        let unit = 128 << 20;
+        let bytes = MAX_BODY
+            .checked_mul(2)?
+            .checked_add(MAX_DECODED + 1)?
+            .checked_add(self.max_model_bytes)?
+            .checked_add(CODEC_WORKSPACE)?
+            .checked_add(unit)?;
+        bytes.checked_add(unit - 1).map(|n| n / unit * unit)
+    }
+
+    pub fn sender_bytes(&self) -> Option<usize> {
+        self.core_max_body_bytes
+            .checked_mul(2)?
+            .checked_add(self.core_max_decoded_bytes)?
+            .checked_add(crate::memory::CODEC_WORKSPACE)
+    }
+
+    pub fn validate_memory(&self) -> Result<(), ConfigError> {
+        let required = self
+            .ingest_request_bytes()
+            .and_then(|bytes| bytes.checked_mul(self.max_ingest_concurrency))
+            .and_then(|bytes| bytes.checked_add(self.max_buffer_bytes))
+            .and_then(|bytes| {
+                self.sender_bytes()
+                    .and_then(|sender| bytes.checked_add(sender))
+            });
+        if self.max_ingest_concurrency == 0
+            || self.max_ingest_concurrency > u32::MAX as usize
+            || self.max_model_bytes == 0
+            || self.max_buffer_bytes == 0
+            || self.core_max_body_bytes == 0
+            || self.core_max_decoded_bytes == 0
+            || self.core_max_model_bytes == 0
+            || required.is_none_or(|bytes| bytes > self.memory_bytes)
+        {
+            return Err(ConfigError::Invalid {
+                var: "LOGNARA_RELAY_MEMORY_BYTES",
+                value: self.memory_bytes.to_string(),
+                expected: "memory covering all ingest slots, buffer and sender without overflow",
+            });
+        }
+        Ok(())
     }
 }
 
@@ -191,6 +264,32 @@ fn parse<T: FromStr>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_memory_below_partition_requirements() {
+        assert!(with_required(&[("LOGNARA_RELAY_MEMORY_BYTES", "1073741824")]).is_err());
+        assert!(with_required(&[("LOGNARA_RELAY_MAX_INGEST_CONCURRENCY", "2")]).is_err());
+    }
+
+    #[test]
+    fn validates_defaults_concurrency_and_checked_arithmetic() {
+        let config = with_required(&[]).unwrap();
+        assert_eq!(config.ingest_request_bytes(), Some(1024 << 20));
+        assert_eq!(config.sender_bytes(), Some(512 << 20));
+        assert_eq!(config.memory_bytes, 1792 << 20);
+        let two = with_required(&[
+            ("LOGNARA_RELAY_MEMORY_BYTES", "2952790016"),
+            ("LOGNARA_RELAY_MAX_INGEST_CONCURRENCY", "2"),
+        ])
+        .unwrap();
+        assert_eq!(two.max_ingest_concurrency, 2);
+        let mut overflow = config;
+        overflow.max_model_bytes = usize::MAX;
+        assert!(overflow.validate_memory().is_err());
+        overflow.max_model_bytes = 1;
+        overflow.core_max_body_bytes = usize::MAX;
+        assert!(overflow.validate_memory().is_err());
+    }
 
     #[test]
     fn rejects_invalid_token_without_exposing_it() {

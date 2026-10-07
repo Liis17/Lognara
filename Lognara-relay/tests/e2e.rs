@@ -146,6 +146,10 @@ fn config(core: &FakeCore, spool_dir: &Path) -> Config {
         core_max_body_bytes: 64 << 20,
         core_max_decoded_bytes: 256 << 20,
         core_max_model_bytes: 256 << 20,
+        memory_bytes: 1792 << 20,
+        max_model_bytes: 256 << 20,
+        max_buffer_bytes: 256 << 20,
+        max_ingest_concurrency: 1,
     }
 }
 

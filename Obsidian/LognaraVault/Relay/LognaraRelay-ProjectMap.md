@@ -17,6 +17,7 @@ Lognara-relay/
 │   ├── wire_budget.rs      no-alloc оценка памяти MessagePack, идентичная core
 │   ├── normalize.rs        разбор Record в Event
 │   ├── ingest.rs           Bearer-аутентификация до чтения тела, POST /v1/batches
+│   ├── memory.rs           резервы, admission и ожидание blocking-работников
 │   ├── buffer.rs           группы событий в памяти
 │   ├── spool.rs            дисковая очередь пачек
 │   └── sender.rs           отправка в core, работа со spool, остановка
@@ -42,6 +43,7 @@ Lognara-relay/
 - `main` → `config`, `spool`, `lib::run`.
 - `lib::run` создаёт `Buffer`, запускает `Sender` в отдельной задаче и `ingest::router` через `axum::serve`. Отправка останавливается отдельным токеном только после приёма.
 - `ingest` → `agent_wire`, `normalize`, `buffer`.
+- `ingest` → `memory`: slot до чтения тела; blocking-задача владеет permit. Подробности в [[Relay/Memory]].
 - `sender` → `buffer`, `spool`, `core_wire`. `Sender` владеет `Spool` единолично, поэтому очередь без блокировок.
 - Публичные модули (`agent_wire`, `config`, `core_wire`, `normalize`, `spool`) используют сквозные тесты; `buffer`, `ingest`, `sender` скрыты.
 

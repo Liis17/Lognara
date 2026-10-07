@@ -30,6 +30,12 @@ Rust-процесс, один на машину. Принимает пачки �
 | `LOGNARA_CORE_MAX_BODY_BYTES` | нет | `67108864` | максимум сжатой исходящей пачки, не больше лимита core |
 | `LOGNARA_CORE_MAX_DECODED_BYTES` | нет | `268435456` | максимум MessagePack до сжатия, не больше лимита core |
 | `LOGNARA_CORE_MAX_MODEL_BYTES` | нет | `268435456` | бюджет модели: 128 байт на узел MessagePack плюс string/bin |
+| `LOGNARA_RELAY_MEMORY_BYTES` | нет | `1879048192` | сумма резервов приёма, буфера и sender |
+| `LOGNARA_RELAY_MAX_MODEL_BYTES` | нет | `268435456` | резерв входной модели и нормализации |
+| `LOGNARA_RELAY_MAX_BUFFER_BYTES` | нет | `268435456` | резерв накопленных моделей |
+| `LOGNARA_RELAY_MAX_INGEST_CONCURRENCY` | нет | `1` | число одновременных чтений/обработок |
+
+Ресурсная конфигурация, admission до чтения тела и ожидание blocking-работников при остановке описаны в [[Relay/Memory]].
 
 Пример docker-compose (Dockerfile пока нет):
 
@@ -119,7 +125,8 @@ struct LogId(Uuid); struct TraceId([u8; 16]); struct SpanId([u8; 8]);  // bin 16
 | `core_wire::encode(batch: &CoreBatch): Vec<u8>` | MessagePack + zstd. |
 | `core_wire::encode_split(batch: CoreBatch, body_limit: usize, decoded_limit: usize, model_limit: usize): (Vec<EncodedBatch>, u64)` | Делит по байтовым лимитам и бюджету модели, возвращает готовые тела и число неотправляемых событий. |
 | ~~`ingest::router(buffer: Arc<Buffer>): Router`~~ (удалён: 2026-10-07) | Заменён вариантом с обязательным ключом. |
-| `ingest::router(buffer: Arc<Buffer>, token: &str): Router` | Роутер с защищённым `POST /v1/batches`. |
+| ~~`ingest::router(buffer: Arc<Buffer>, token: &str): Router`~~ (удалён: 2026-10-07) | Заменён вариантом с ресурсами admission. |
+| `ingest::router(buffer: Arc<Buffer>, token: &str, resources: Arc<Resources>): Router` | Проверяет авторизацию, заголовки и admission перед чтением тела. |
 | `ingest::token_hash(token: &str): [u8; 32]` | Вычисляет SHA-256 для сравнения ключей. |
 | `ingest::authorize(State(expected): State<[u8; 32]>, request: Request, next: Next): Response` | Отклоняет неверную авторизацию до чтения тела запроса. |
 | `Buffer::push(source: Source, dropped: u64, events: Vec<Event>): Result<(), Full>` | Добавляет события в группу источника; `Full`, если не помещаются в лимит. |
