@@ -1,23 +1,23 @@
 //! Отправка накопленных событий в lognara-core. Пока core недоступен, пачки ждут в spool.
 
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
 use reqwest::header::{CONTENT_ENCODING, CONTENT_TYPE};
 use reqwest::{Client, StatusCode, Url};
+use tokio::task::JoinHandle;
 use tokio::time::{self, Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
 
 use crate::buffer::Buffer;
 use crate::config::Config;
-use crate::core_wire::{self, CoreBatch};
+use crate::core_wire::{BatchEncoder, EncodedBatch};
+use crate::memory::{CODEC_WORKSPACE, Reservation, Resources};
 use crate::spool::Spool;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-/// Сколько после остановки ждать доставки накопленного.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct Sender {
@@ -26,16 +26,32 @@ pub struct Sender {
     core: Core,
     flush_interval: Duration,
     shutdown: CancellationToken,
-    /// Уже закодированные части пачки, ещё не доставленные и не сохранённые в spool.
-    pending: VecDeque<Pending>,
+    resources: Arc<Resources>,
+    pending: Option<Pending>,
+    encoding: Option<Encoding>,
+    // Handle принадлежит Sender, а не отменяемому future flush.
+    job: Option<JoinHandle<Encoded>>,
     body_limit: usize,
     decoded_limit: usize,
     model_limit: usize,
+    replay_limit: usize,
 }
 
 struct Pending {
     body: Bytes,
     events: usize,
+}
+
+struct Encoding {
+    encoder: BatchEncoder,
+    // Поля уничтожаются по порядку: сначала модели, затем резервы.
+    _reservations: Vec<Reservation>,
+}
+
+struct Encoded {
+    encoding: Option<Encoding>,
+    part: Option<EncodedBatch>,
+    dropped: u64,
 }
 
 impl Sender {
@@ -44,6 +60,7 @@ impl Sender {
         buffer: Arc<Buffer>,
         spool: Spool,
         shutdown: CancellationToken,
+        resources: Arc<Resources>,
     ) -> Self {
         let client = Client::builder()
             .timeout(REQUEST_TIMEOUT)
@@ -59,34 +76,40 @@ impl Sender {
             },
             flush_interval: config.flush_interval,
             shutdown,
-            pending: VecDeque::new(),
+            resources,
+            pending: None,
+            encoding: None,
+            job: None,
             body_limit: config.core_max_body_bytes,
             decoded_limit: config.core_max_decoded_bytes,
             model_limit: config.core_max_model_bytes,
+            replay_limit: config.sender_bytes().unwrap() - CODEC_WORKSPACE,
         }
     }
 
-    /// Отправляет накопленное раз в `flush_interval` и сразу, как только набран
-    /// `batch_size`. После остановки сохраняет недоставленное в spool и завершается.
     pub async fn run(mut self) {
         let mut ticker =
             time::interval_at(Instant::now() + self.flush_interval, self.flush_interval);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let shutdown = self.shutdown.clone();
         loop {
+            let partial = tokio::select! {
+                _ = shutdown.cancelled() => break,
+                _ = ticker.tick() => true,
+                _ = self.buffer.full() => false,
+            };
             tokio::select! {
-                _ = self.shutdown.cancelled() => break,
-                _ = ticker.tick() => self.flush(true).await,
-                _ = self.buffer.full() => self.flush(false).await,
+                _ = shutdown.cancelled() => break,
+                _ = self.flush(partial) => {},
             }
         }
-
         if time::timeout(SHUTDOWN_TIMEOUT, self.flush(true))
             .await
             .is_err()
         {
             warn!("timed out delivering batches to core");
         }
-        // Если ожидание прервано, недоставленная пачка и остаток памяти сохраняются на диск.
+        // Дожидаемся уже запущенного кодирования и сохраняем каждый остаток.
         self.save_pending().await;
         self.seal(true);
         self.save_pending().await;
@@ -98,61 +121,111 @@ impl Sender {
         }
     }
 
-    /// Отправляет сначала пачки из spool, затем накопленное в памяти.
-    /// При `partial = false` из памяти берётся только полная пачка.
     async fn flush(&mut self, partial: bool) {
-        while let Some(body) = self.spool.oldest().await {
+        loop {
+            let body = match self.spool.oldest_limited(self.replay_limit).await {
+                Ok(body) => {
+                    self.resources.set_ready(true);
+                    body
+                }
+                Err(error) => {
+                    self.resources.set_ready(false);
+                    error!(
+                        size = error.size,
+                        limit = error.limit,
+                        "spool batch exceeds sender memory reserve; file retained, ingest stopped"
+                    );
+                    break;
+                }
+            };
+            let Some(body) = body else {
+                break;
+            };
             if !self.core.deliver(body.into()).await {
                 break;
             }
             self.spool.remove_oldest().await;
-            // Пока разгружается бэклог, полные пачки из памяти встают в конец очереди.
             self.seal(false);
             self.save_pending().await;
         }
-
         self.seal(partial);
-        while let Some(pending) = self.pending.front()
-            && self.spool.is_empty()
-        {
+        while self.spool.is_empty() && self.next_part().await {
+            let pending = self.pending.as_ref().unwrap();
             if !self.core.deliver(pending.body.clone()).await {
                 break;
             }
-            self.pending.pop_front();
+            self.pending = None;
         }
-        // Core недоступен или в spool остались старые пачки: новая ждёт своей очереди.
         self.save_pending().await;
     }
 
-    /// Собирает пачку из памяти, если прежняя уже доставлена или сохранена.
     fn seal(&mut self, partial: bool) {
-        if !self.pending.is_empty() {
+        if self.pending.is_some() || self.encoding.is_some() || self.job.is_some() {
             return;
         }
-        if let Some((groups, _)) = self.buffer.take(partial) {
-            let batch = CoreBatch {
-                dropped: self.spool.take_dropped(),
-                groups,
+        if let Some(mut taken) = self.buffer.take(partial) {
+            tracing::debug!(events = taken.len, "sealing relay batch");
+            taken.batch.dropped = self.spool.take_dropped();
+            self.encoding = Some(Encoding {
+                encoder: BatchEncoder::new(
+                    taken.batch,
+                    self.body_limit,
+                    self.decoded_limit,
+                    self.model_limit,
+                ),
+                _reservations: taken.reservations,
+            });
+        }
+    }
+
+    async fn next_part(&mut self) -> bool {
+        if self.pending.is_some() {
+            return true;
+        }
+        if self.job.is_none() {
+            let Some(mut encoding) = self.encoding.take() else {
+                return false;
             };
-            let (batches, dropped) = core_wire::encode_split(
-                batch,
-                self.body_limit,
-                self.decoded_limit,
-                self.model_limit,
-            );
-            self.spool.record_dropped(dropped);
-            self.pending
-                .extend(batches.into_iter().map(|batch| Pending {
-                    body: batch.body.into(),
-                    events: batch.events,
-                }));
+            self.job = Some(tokio::task::spawn_blocking(move || {
+                let part = encoding.encoder.next();
+                let dropped = encoding.encoder.take_dropped();
+                let encoding = if encoding.encoder.finished() {
+                    None
+                } else {
+                    Some(encoding)
+                };
+                Encoded {
+                    encoding,
+                    part,
+                    dropped,
+                }
+            }));
+        }
+        let result = self.job.as_mut().unwrap().await;
+        self.job = None;
+        match result {
+            Ok(encoded) => {
+                self.encoding = encoded.encoding;
+                self.spool.record_dropped(encoded.dropped);
+                self.pending = encoded.part.map(|part| Pending {
+                    body: part.body.into(),
+                    events: part.events,
+                });
+                self.pending.is_some()
+            }
+            Err(error) => {
+                self.resources.stop();
+                error!(%error, "encoding worker failed; ingest stopped");
+                false
+            }
         }
     }
 
     async fn save_pending(&mut self) {
-        while let Some(pending) = self.pending.front() {
+        while self.next_part().await {
+            let pending = self.pending.as_ref().unwrap();
             self.spool.push(&pending.body, pending.events as u64).await;
-            self.pending.pop_front();
+            self.pending = None;
         }
     }
 }

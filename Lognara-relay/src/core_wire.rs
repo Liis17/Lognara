@@ -7,6 +7,7 @@
 //! События сгруппированы по источнику: полный `LogEvent` в core = `Source` группы + `Event`.
 
 use std::collections::HashMap;
+use std::io::Write;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -105,73 +106,201 @@ pub fn encode_split(
     decoded_limit: usize,
     model_limit: usize,
 ) -> (Vec<EncodedBatch>, u64) {
-    let mut pending = vec![batch];
+    let mut encoder = BatchEncoder::new(batch, body_limit, decoded_limit, model_limit);
     let mut encoded = Vec::new();
-    let mut dropped = 0u64;
-    while let Some(mut batch) = pending.pop() {
-        let events = batch.groups.iter().map(|group| group.events.len()).sum();
-        let mut packed = LimitedWriter {
-            bytes: Vec::new(),
-            limit: decoded_limit,
-        };
-        if batch
-            .serialize(&mut rmp_serde::Serializer::new(&mut packed).with_struct_map())
-            .is_ok()
-            && crate::wire_budget::validate(&packed.bytes, model_limit).is_ok()
-        {
-            let mut compressed = LimitedWriter {
-                bytes: Vec::new(),
-                limit: body_limit,
-            };
-            if zstd::stream::copy_encode(&packed.bytes[..], &mut compressed, ZSTD_LEVEL).is_ok() {
-                encoded.push(EncodedBatch {
-                    body: compressed.bytes,
-                    events,
-                });
-                continue;
-            }
-        }
-        // Метаданные и счётчики передаются ровно в одной из дочерних пачек.
-        let right = if batch.groups.len() > 1 {
-            let middle = batch.groups.len() / 2;
-            Some(CoreBatch {
-                dropped: 0,
-                groups: batch.groups.split_off(middle),
-            })
-        } else if let Some(group) = batch.groups.first_mut()
-            && group.events.len() > 1
-        {
-            let middle = group.events.len() / 2;
-            Some(CoreBatch {
-                dropped: 0,
-                groups: vec![Group {
-                    source: group.source.clone(),
-                    dropped: 0,
-                    events: group.events.split_off(middle),
-                }],
-            })
-        } else {
-            None
-        };
-        if let Some(right) = right {
-            pending.push(right);
-            pending.push(batch);
-        } else {
-            tracing::error!(
-                events,
-                "single event or source metadata exceeds core byte limits"
-            );
-            dropped = dropped
-                .saturating_add(events as u64)
-                .saturating_add(batch.dropped);
+    for part in encoder.by_ref() {
+        encoded.push(part);
+    }
+    (encoded, encoder.take_dropped())
+}
+
+/// Ленивые части: единственная исходная модель, без копирования Source/Event.
+pub struct BatchEncoder {
+    batch: CoreBatch,
+    pending: Vec<Part>,
+    body_limit: usize,
+    decoded_limit: usize,
+    model_limit: usize,
+    dropped: u64,
+}
+
+#[derive(Clone, Copy)]
+struct Part {
+    groups_start: usize,
+    groups_end: usize,
+    events: Option<(usize, usize)>,
+    batch_counter: bool,
+}
+
+impl BatchEncoder {
+    pub fn new(
+        batch: CoreBatch,
+        body_limit: usize,
+        decoded_limit: usize,
+        model_limit: usize,
+    ) -> Self {
+        let end = batch.groups.len();
+        Self {
+            batch,
+            pending: vec![Part {
+                groups_start: 0,
+                groups_end: end,
+                events: None,
+                batch_counter: true,
+            }],
+            body_limit,
+            decoded_limit,
+            model_limit,
+            dropped: 0,
         }
     }
-    (encoded, dropped)
+
+    pub fn finished(&self) -> bool {
+        self.pending.is_empty()
+    }
+    pub fn take_dropped(&mut self) -> u64 {
+        std::mem::take(&mut self.dropped)
+    }
+}
+
+#[derive(Serialize)]
+struct BatchView<'a> {
+    dropped: u64,
+    groups: GroupsView<'a>,
+}
+
+struct GroupsView<'a> {
+    groups: &'a [Group],
+    events: Option<(usize, usize)>,
+}
+
+#[derive(Serialize)]
+struct GroupView<'a> {
+    source: &'a Source,
+    dropped: u64,
+    events: &'a [Event],
+}
+
+impl Serialize for GroupsView<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        let mut sequence = serializer.serialize_seq(Some(self.groups.len()))?;
+        for group in self.groups {
+            let (start, end) = self.events.unwrap_or((0, group.events.len()));
+            sequence.serialize_element(&GroupView {
+                source: &group.source,
+                dropped: if start == 0 { group.dropped } else { 0 },
+                events: &group.events[start..end],
+            })?;
+        }
+        sequence.end()
+    }
+}
+
+impl Iterator for BatchEncoder {
+    type Item = EncodedBatch;
+
+    fn next(&mut self) -> Option<EncodedBatch> {
+        while let Some(part) = self.pending.pop() {
+            let groups = &self.batch.groups[part.groups_start..part.groups_end];
+            let events = part.events.map_or_else(
+                || groups.iter().map(|g| g.events.len()).sum(),
+                |(start, end)| end - start,
+            );
+            let counter = if part.batch_counter {
+                self.batch.dropped
+            } else {
+                0
+            };
+            let view = BatchView {
+                dropped: counter,
+                groups: GroupsView {
+                    groups,
+                    events: part.events,
+                },
+            };
+            let mut packed = LimitedWriter::new(self.decoded_limit);
+            if view
+                .serialize(&mut rmp_serde::Serializer::new(&mut packed).with_struct_map())
+                .is_ok()
+                && crate::wire_budget::validate(&packed.bytes, self.model_limit).is_ok()
+            {
+                let mut compressed = LimitedWriter::new(self.body_limit);
+                let result = (|| {
+                    let mut encoder =
+                        zstd::stream::write::Encoder::new(&mut compressed, ZSTD_LEVEL)?;
+                    encoder.window_log(25)?;
+                    encoder.write_all(&packed.bytes)?;
+                    encoder.finish()?;
+                    Ok::<_, std::io::Error>(())
+                })();
+                if result.is_ok() {
+                    return Some(EncodedBatch {
+                        body: compressed.bytes,
+                        events,
+                    });
+                }
+            }
+            let split = if groups.len() > 1 {
+                let middle = part.groups_start + groups.len() / 2;
+                Some((
+                    Part {
+                        groups_end: middle,
+                        ..part
+                    },
+                    Part {
+                        groups_start: middle,
+                        batch_counter: false,
+                        ..part
+                    },
+                ))
+            } else if events > 1 {
+                let (start, end) = part.events.unwrap_or((0, events));
+                let middle = start + (end - start) / 2;
+                Some((
+                    Part {
+                        events: Some((start, middle)),
+                        ..part
+                    },
+                    Part {
+                        events: Some((middle, end)),
+                        batch_counter: false,
+                        ..part
+                    },
+                ))
+            } else {
+                None
+            };
+            if let Some((left, right)) = split {
+                self.pending.push(right);
+                self.pending.push(left);
+            } else {
+                tracing::error!(
+                    events,
+                    "single event or source metadata exceeds core byte limits"
+                );
+                self.dropped = self
+                    .dropped
+                    .saturating_add(events as u64)
+                    .saturating_add(counter);
+            }
+        }
+        None
+    }
 }
 
 struct LimitedWriter {
     bytes: Vec<u8>,
     limit: usize,
+}
+
+impl LimitedWriter {
+    fn new(limit: usize) -> Self {
+        Self {
+            bytes: Vec::with_capacity(limit),
+            limit,
+        }
+    }
 }
 
 impl std::io::Write for LimitedWriter {

@@ -71,6 +71,7 @@ async fn ingest(
     if !state.resources.ready() {
         return Err(IngestError::Unavailable);
     }
+    state.buffer.check_admission().map_err(IngestError::from)?;
     let permit = state
         .resources
         .slots
@@ -125,7 +126,7 @@ fn accept(buffer: &Buffer, body: &[u8], model_limit: usize) -> Result<StatusCode
     }
     buffer
         .push(source, batch.dropped, events)
-        .map_err(|_| IngestError::BufferFull)?;
+        .map_err(IngestError::from)?;
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -145,6 +146,15 @@ enum IngestError {
     BufferFull,
     Unavailable,
     Timeout,
+}
+
+impl From<crate::buffer::Full> for IngestError {
+    fn from(error: crate::buffer::Full) -> Self {
+        match error {
+            crate::buffer::Full::Busy => Self::BufferFull,
+            crate::buffer::Full::TooLarge => Self::TooLarge,
+        }
+    }
 }
 
 impl From<DecodeError> for IngestError {
@@ -272,6 +282,71 @@ mod tests {
     }
 
     struct UnreadableBody;
+
+    #[tokio::test]
+    async fn full_buffer_and_unready_relay_reject_without_reading_body() {
+        for full in [true, false] {
+            let resources = resources();
+            let buffer = Arc::new(Buffer::new(1, 1));
+            if full {
+                let batch =
+                    agent_wire::decode(include_bytes!("../tests/fixtures/agent-batch.bin"), 1024)
+                        .unwrap();
+                buffer
+                    .push(
+                        Source {
+                            environment: batch.environment,
+                            server: batch.server,
+                            backend: batch.backend,
+                            service: batch.service,
+                            service_instance: batch.service_instance,
+                        },
+                        0,
+                        vec![normalize::event(batch.records[0].clone())],
+                    )
+                    .unwrap();
+            } else {
+                resources.set_ready(false);
+            }
+            let app = router(buffer, "relay-secret", resources.clone());
+            let request = Request::builder()
+                .method("POST")
+                .uri("/v1/batches")
+                .header(AUTHORIZATION, "Bearer relay-secret")
+                .header(CONTENT_TYPE, "application/msgpack")
+                .header(CONTENT_ENCODING, "zstd")
+                .body(Body::new(UnreadableBody))
+                .unwrap();
+            assert_eq!(
+                app.oneshot(request).await.unwrap().status(),
+                StatusCode::SERVICE_UNAVAILABLE
+            );
+            assert_eq!(resources.slots.available_permits(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn compressed_body_limit_is_explicit_and_releases_admission() {
+        let resources = resources();
+        let app = router(
+            Arc::new(Buffer::new(1, 1)),
+            "relay-secret",
+            resources.clone(),
+        );
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/batches")
+            .header(AUTHORIZATION, "Bearer relay-secret")
+            .header(CONTENT_TYPE, "application/msgpack")
+            .header(CONTENT_ENCODING, "zstd")
+            .body(Body::from(vec![0; MAX_BODY + 1]))
+            .unwrap();
+        assert_eq!(
+            app.oneshot(request).await.unwrap().status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert_eq!(resources.slots.available_permits(), 1);
+    }
 
     impl http_body::Body for UnreadableBody {
         type Data = Bytes;

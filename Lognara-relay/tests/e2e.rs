@@ -39,6 +39,7 @@ struct FakeCore {
     requests: Arc<AtomicUsize>,
     status: Arc<Mutex<StatusCode>>,
     bodies: Arc<Mutex<Vec<Bytes>>>,
+    delay_ms: Arc<AtomicUsize>,
 }
 
 #[derive(Clone)]
@@ -47,6 +48,7 @@ struct CoreState {
     requests: Arc<AtomicUsize>,
     status: Arc<Mutex<StatusCode>>,
     bodies: Arc<Mutex<Vec<Bytes>>>,
+    delay_ms: Arc<AtomicUsize>,
 }
 
 impl FakeCore {
@@ -73,10 +75,12 @@ async fn fake_core() -> FakeCore {
         requests: Arc::default(),
         status: Arc::new(Mutex::new(StatusCode::OK)),
         bodies: Arc::default(),
+        delay_ms: Arc::default(),
     };
     let requests = state.requests.clone();
     let status = state.status.clone();
     let bodies = state.bodies.clone();
+    let delay_ms = state.delay_ms.clone();
     let app = Router::new()
         .route("/v1/batches", post(receive))
         .with_state(state);
@@ -91,6 +95,7 @@ async fn fake_core() -> FakeCore {
         requests,
         status,
         bodies,
+        delay_ms,
     }
 }
 
@@ -99,6 +104,10 @@ async fn receive(State(state): State<CoreState>, headers: HeaderMap, body: Bytes
     let status = *state.status.lock().unwrap();
     state.bodies.lock().unwrap().push(body.clone());
     state.requests.fetch_add(1, Ordering::SeqCst);
+    let delay = state.delay_ms.load(Ordering::SeqCst);
+    if delay > 0 {
+        sleep(Duration::from_millis(delay as u64)).await;
+    }
     if status != StatusCode::OK {
         return status;
     }
@@ -124,7 +133,7 @@ struct Relay {
 impl Relay {
     async fn stop(self) {
         self.shutdown.cancel();
-        timeout(WAIT, self.task)
+        timeout(WAIT + Duration::from_secs(2), self.task)
             .await
             .expect("relay did not stop")
             .unwrap()
@@ -510,4 +519,101 @@ async fn rejects_invalid_requests_and_overflow() {
         send(&relay, &agent_batch("api", &["3"])).await,
         StatusCode::SERVICE_UNAVAILABLE
     );
+}
+
+#[tokio::test]
+async fn shutdown_cancels_delivery_and_spools_all_remaining_parts_with_identical_bytes() {
+    let mut core = fake_core().await;
+    core.delay_ms.store(30_000, Ordering::SeqCst);
+    let directory = tempfile::tempdir().unwrap();
+    let mut cfg = config(&core, directory.path());
+    cfg.batch_size = 1;
+    cfg.core_max_decoded_bytes = 900;
+    let relay = start_relay(cfg.clone()).await;
+    let expected = [
+        "one", "two", "three", "four", "five", "six", "seven", "eight",
+    ];
+    assert_eq!(
+        send(&relay, &agent_batch("api", &expected)).await,
+        StatusCode::ACCEPTED
+    );
+    eventually(|| core.requests() > 0).await;
+    let original = core.bodies.lock().unwrap()[0].clone();
+    relay.stop().await;
+    assert!(spooled(directory.path()) > 1);
+    assert_eq!(core.bodies.lock().unwrap()[1], original);
+
+    core.delay_ms.store(0, Ordering::SeqCst);
+    let relay = start_relay(cfg).await;
+    let mut received = Vec::new();
+    while received.len() < expected.len() {
+        let batch = core.next_batch().await;
+        for group in batch.groups {
+            received.extend(group.events.into_iter().map(|event| event.message));
+        }
+    }
+    assert_eq!(received, expected);
+    assert_eq!(core.bodies.lock().unwrap()[2], original);
+    eventually(|| spooled(directory.path()) == 0).await;
+    relay.stop().await;
+}
+
+#[tokio::test]
+async fn dropped_only_batches_are_delivered_on_interval() {
+    let mut core = fake_core().await;
+    let directory = tempfile::tempdir().unwrap();
+    let relay = start_relay(config(&core, directory.path())).await;
+    let mut batch = agent_batch("api", &[]);
+    batch.dropped = 7;
+    assert_eq!(send(&relay, &batch).await, StatusCode::ACCEPTED);
+    let delivered = core.next_batch().await;
+    assert_eq!(delivered.groups[0].dropped, 7);
+    assert!(delivered.groups[0].events.is_empty());
+    relay.stop().await;
+}
+
+#[tokio::test]
+async fn oversized_spool_stops_ingest_and_resumes_after_file_is_repaired() {
+    let mut core = fake_core().await;
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("00000000000000000000-1.batch");
+    std::fs::File::create(&file)
+        .unwrap()
+        .set_len((3 << 20) + 1)
+        .unwrap();
+    let mut cfg = config(&core, directory.path());
+    cfg.core_max_body_bytes = 1 << 20;
+    cfg.core_max_decoded_bytes = 1 << 20;
+    let relay = start_relay(cfg).await;
+    timeout(WAIT, async {
+        loop {
+            if post_body(&relay, &BATCH_HEADERS, b"invalid".to_vec()).await
+                == StatusCode::SERVICE_UNAVAILABLE
+            {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(core.requests(), 0);
+    assert!(file.exists());
+    assert_eq!(std::fs::metadata(&file).unwrap().len(), (3 << 20) + 1);
+    let fixed = CoreBatch {
+        dropped: 0,
+        groups: vec![Group {
+            source: source("api"),
+            dropped: 0,
+            events: vec![normalize::event(record("repaired"))],
+        }],
+    };
+    std::fs::write(&file, core_wire::encode(&fixed)).unwrap();
+    assert_eq!(messages(&core.next_batch().await.groups[0]), ["repaired"]);
+    assert_eq!(
+        send(&relay, &agent_batch("api", &["new"])).await,
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(messages(&core.next_batch().await.groups[0]), ["new"]);
+    relay.stop().await;
 }

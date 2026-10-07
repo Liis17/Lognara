@@ -9,7 +9,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{error, warn};
 
 pub struct Spool {
@@ -28,6 +28,12 @@ struct Entry {
     seq: u64,
     events: u64,
     size: u64,
+}
+
+#[derive(Debug)]
+pub struct ReadTooLarge {
+    pub size: u64,
+    pub limit: usize,
 }
 
 impl Spool {
@@ -67,6 +73,10 @@ impl Spool {
         self.files.len()
     }
 
+    pub fn oldest_size(&self) -> Option<u64> {
+        self.files.front().map(|entry| entry.size)
+    }
+
     /// Дописывает пачку в конец очереди. Если места не хватает, сначала удаляет
     /// самые старые пачки. Потерянные события учитываются в `dropped`.
     pub async fn push(&mut self, body: &[u8], events: u64) {
@@ -101,9 +111,45 @@ impl Spool {
 
     /// Тело самой старой пачки. Пачку, которую не удалось прочитать, пропускает.
     pub async fn oldest(&mut self) -> Option<Vec<u8>> {
+        self.oldest_limited(usize::MAX).await.ok().flatten()
+    }
+
+    /// Проверяет размер до выделения; слишком большой файл остаётся на диске.
+    pub async fn oldest_limited(&mut self, limit: usize) -> Result<Option<Vec<u8>>, ReadTooLarge> {
         while let Some(entry) = self.files.front().copied() {
-            match fs::read(self.path(entry)).await {
-                Ok(body) => return Some(body),
+            let read = async {
+                let mut file = fs::File::open(self.path(entry)).await?;
+                let size = file.metadata().await?.len();
+                let Some(capacity) = usize::try_from(size).ok().and_then(|n| n.checked_add(1))
+                else {
+                    return Ok::<_, io::Error>(Err(ReadTooLarge { size, limit }));
+                };
+                if size > limit as u64 {
+                    return Ok(Err(ReadTooLarge { size, limit }));
+                }
+                let mut body = vec![0; capacity];
+                let mut length = 0;
+                while length < capacity {
+                    let count = file.read(&mut body[length..]).await?;
+                    if count == 0 {
+                        break;
+                    }
+                    length += count;
+                }
+                if length as u64 > size {
+                    // Файл вырос после metadata: не читаем растущий файл без лимита.
+                    return Ok(Err(ReadTooLarge {
+                        size: length as u64,
+                        limit,
+                    }));
+                }
+                body.truncate(length);
+                Ok(Ok(body))
+            }
+            .await;
+            match read {
+                Ok(Ok(body)) => return Ok(Some(body)),
+                Ok(Err(error)) => return Err(error),
                 Err(err) => {
                     self.dropped += entry.events;
                     error!(error = %err, events = entry.events, "failed to read batch from spool, batch is lost");
@@ -111,7 +157,7 @@ impl Spool {
                 }
             }
         }
-        None
+        Ok(None)
     }
 
     /// Удаляет самую старую пачку, например после доставки.
@@ -165,6 +211,17 @@ fn parse_name(path: &Path) -> Option<(u64, u64)> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn oversized_replay_is_retained_until_it_fits_the_reserve() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut spool = super::Spool::open(directory.path(), 1000).await.unwrap();
+        spool.push(b"large", 1).await;
+        let error = spool.oldest_limited(4).await.unwrap_err();
+        assert_eq!(error.size, 5);
+        assert_eq!(spool.len(), 1);
+        assert_eq!(spool.take_dropped(), 0);
+        assert_eq!(spool.oldest_limited(5).await.unwrap().unwrap(), b"large");
+    }
     use super::*;
 
     const UNLIMITED: u64 = u64::MAX;

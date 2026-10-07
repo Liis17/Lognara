@@ -31,6 +31,7 @@ pub struct Resources {
     pub buffered: Arc<Pool>,
     pub model_limit: usize,
     ready: AtomicBool,
+    accepting: AtomicBool,
     concurrency: usize,
 }
 
@@ -41,21 +42,26 @@ impl Resources {
             buffered: Pool::new(config.max_buffer_bytes),
             model_limit: config.max_model_bytes,
             ready: AtomicBool::new(true),
+            accepting: AtomicBool::new(true),
             concurrency: config.max_ingest_concurrency,
         })
     }
 
     pub fn ready(&self) -> bool {
-        self.ready.load(Ordering::Acquire)
+        self.accepting.load(Ordering::Acquire) && self.ready.load(Ordering::Acquire)
     }
 
     pub fn set_ready(&self, ready: bool) {
         self.ready.store(ready, Ordering::Release);
     }
 
+    pub fn stop(&self) {
+        self.accepting.store(false, Ordering::Release);
+    }
+
     /// После остановки HTTP ждём также работников отменённых запросов.
     pub async fn drain(&self) {
-        self.set_ready(false);
+        self.stop();
         let _all = self
             .slots
             .clone()
@@ -101,6 +107,10 @@ impl Pool {
 
     pub fn used(&self) -> usize {
         *self.used.lock().unwrap()
+    }
+
+    pub fn limit(&self) -> usize {
+        self.limit
     }
 }
 

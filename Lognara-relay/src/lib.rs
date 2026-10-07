@@ -38,11 +38,29 @@ pub async fn run(
         .validate_memory()
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let resources = memory::Resources::new(&config);
-    let buffer = Arc::new(Buffer::new(config.batch_size, config.max_buffer));
+    let replay_limit = config.sender_bytes().unwrap() - memory::CODEC_WORKSPACE;
+    resources.set_ready(
+        spool
+            .oldest_size()
+            .is_none_or(|size| size <= replay_limit as u64),
+    );
+    let buffer = Arc::new(Buffer::with_memory(
+        config.batch_size,
+        config.max_buffer,
+        resources.buffered.clone(),
+    ));
     // Отправка останавливается только после приёма, чтобы последние события не потерялись.
     let stop_sending = CancellationToken::new();
-    let sender =
-        tokio::spawn(Sender::new(&config, buffer.clone(), spool, stop_sending.clone()).run());
+    let sender = tokio::spawn(
+        Sender::new(
+            &config,
+            buffer.clone(),
+            spool,
+            stop_sending.clone(),
+            resources.clone(),
+        )
+        .run(),
+    );
 
     let served = axum::serve(
         listener,
