@@ -38,7 +38,7 @@ Parent: [[Index]]
 
 1. Приложение (или библиотека lognara) отправляет лог на `POST http://127.0.0.1:7400/v1/logs` агента в своём контейнере: text, JSON или бинарные данные.
 2. Агент добавляет время приёма, держит записи в памяти и отправляет пачку, как только набрано `LOGNARA_BATCH_SIZE` записей или прошёл `LOGNARA_FLUSH_INTERVAL_MS`.
-3. Пачка (MessagePack + zstd, идентификация источника: service, server, backend, environment, service_instance) уходит в lognara-relay на той же машине с `Authorization: Bearer {LOGNARA_RELAY_TOKEN}` при каждой попытке.
+3. Непустая пачка (MessagePack + zstd, идентификация источника: service, server, backend, environment, service_instance) уходит в lognara-relay на той же машине с `Authorization: Bearer {LOGNARA_RELAY_TOKEN}` при каждой попытке. При пустом буфере агент не отправляет запрос; relay отклоняет `records=[]` с `400` независимо от `dropped`.
 4. Relay проверяет общий ключ до чтения тела и распаковки, затем разбирает записи в события, группирует их по источнику и раз в `LOGNARA_FLUSH_INTERVAL_MS` (или сразу по `LOGNARA_BATCH_SIZE` событий) отправляет пачки MessagePack + zstd в lognara-core с Bearer-токеном core. Перед первой отправкой делит по согласованным байтовым лимитам core; повторяет исходные байты.
 5. Пока core недоступен, пачки relay ждут в spool на volume и затем уходят от старых к новым. Core подтверждает пачку после fsync WAL, затем публикует поиск и аналитику по открытым и закрытым сегментам.
 

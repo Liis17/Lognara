@@ -183,6 +183,37 @@ async fn sends_partial_batch_on_interval() {
 }
 
 #[tokio::test]
+async fn does_not_send_empty_batches_on_interval_or_shutdown() {
+    let mut relay = fake_relay(&[]).await;
+    let agent = start_agent(relay.url.clone(), 1000, Duration::from_millis(20)).await;
+
+    send_log(&agent, "application/json", "[]").await;
+    assert!(
+        timeout(Duration::from_millis(100), relay.batches.recv())
+            .await
+            .is_err()
+    );
+    assert_eq!(relay.requests.load(Ordering::SeqCst), 0);
+
+    send_log(&agent, "text/plain", "one").await;
+    assert_eq!(payloads(next_batch(&mut relay).await), [text("one")]);
+    assert!(
+        timeout(Duration::from_millis(100), relay.batches.recv())
+            .await
+            .is_err()
+    );
+
+    agent.shutdown.cancel();
+    timeout(WAIT, agent.task)
+        .await
+        .expect("agent did not stop")
+        .unwrap()
+        .unwrap();
+    assert_eq!(relay.requests.load(Ordering::SeqCst), 1);
+    assert!(relay.batches.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn retries_while_relay_is_unavailable() {
     let mut relay = fake_relay(&[
         StatusCode::SERVICE_UNAVAILABLE,

@@ -567,17 +567,19 @@ async fn shutdown_cancels_delivery_and_spools_all_remaining_parts_with_identical
 }
 
 #[tokio::test]
-async fn dropped_only_batches_are_delivered_on_interval() {
-    let mut core = fake_core().await;
+async fn empty_batches_are_rejected_without_delivery_or_spooling() {
+    let core = fake_core().await;
+    core.respond(StatusCode::SERVICE_UNAVAILABLE);
     let directory = tempfile::tempdir().unwrap();
     let relay = start_relay(config(&core, directory.path())).await;
     let mut batch = agent_batch("api", &[]);
-    batch.dropped = 7;
-    assert_eq!(send(&relay, &batch).await, StatusCode::ACCEPTED);
-    let delivered = core.next_batch().await;
-    assert_eq!(delivered.groups[0].dropped, 7);
-    assert!(delivered.groups[0].events.is_empty());
+    for dropped in [0, 7] {
+        batch.dropped = dropped;
+        assert_eq!(send(&relay, &batch).await, StatusCode::BAD_REQUEST);
+    }
     relay.stop().await;
+    assert_eq!(core.requests(), 0);
+    assert_eq!(spooled(directory.path()), 0);
 }
 
 #[tokio::test]

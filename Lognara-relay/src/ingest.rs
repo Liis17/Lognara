@@ -112,6 +112,9 @@ async fn read_body(mut body: Body) -> Result<Vec<u8>, IngestError> {
 fn accept(buffer: &Buffer, body: &[u8], model_limit: usize) -> Result<StatusCode, IngestError> {
     let mut budget = crate::model_budget::ModelBudget::new(model_limit);
     let batch = agent_wire::decode_with_budget(body, MAX_DECODED, &mut budget)?;
+    if batch.records.is_empty() {
+        return Err(IngestError::EmptyBatch);
+    }
     let source = Source {
         environment: batch.environment,
         server: batch.server,
@@ -153,6 +156,7 @@ enum IngestError {
     UnsupportedType,
     TooLarge,
     InvalidBody,
+    EmptyBatch,
     BufferFull,
     Unavailable,
     Timeout,
@@ -187,6 +191,10 @@ impl IntoResponse for IngestError {
             Self::InvalidBody => (
                 StatusCode::BAD_REQUEST,
                 "body is not a zstd-compressed MessagePack batch",
+            ),
+            Self::EmptyBatch => (
+                StatusCode::BAD_REQUEST,
+                "batch must contain at least one record",
             ),
             // Агент повторит пачку с backoff и пока продержит записи у себя.
             Self::BufferFull => (StatusCode::SERVICE_UNAVAILABLE, "relay buffer is full"),
@@ -287,6 +295,48 @@ mod tests {
         assert_eq!(body, vec![b'x'; 1024]);
         assert_eq!(body.capacity(), MAX_BODY);
         assert_eq!(live.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn rejects_empty_batches_without_changing_buffer_or_dropped() {
+        let memory = crate::memory::Pool::new(crate::memory::DEFAULT_BUFFER);
+        let buffer = Buffer::with_memory(1, 1, memory.clone());
+        let mut batch =
+            agent_wire::decode(include_bytes!("../tests/fixtures/agent-batch.bin"), 1024).unwrap();
+        let record = batch.records[0].clone();
+        batch.records.clear();
+        for index in 0..100 {
+            batch.service = format!("empty-{index}");
+            batch.dropped = if index % 2 == 0 { 0 } else { 7 };
+            let packed = rmp_serde::to_vec_named(&batch).unwrap();
+            let body = zstd::encode_all(&packed[..], 3).unwrap();
+            let error = accept(&buffer, &body, crate::memory::DEFAULT_MODEL).unwrap_err();
+            assert_eq!(error.into_response().status(), StatusCode::BAD_REQUEST);
+            assert_eq!(memory.used(), 0);
+            assert!(buffer.take(true).is_none());
+        }
+
+        batch.records = vec![record];
+        batch.dropped = 3;
+        let packed = rmp_serde::to_vec_named(&batch).unwrap();
+        let body = zstd::encode_all(&packed[..], 3).unwrap();
+        assert_eq!(
+            accept(&buffer, &body, crate::memory::DEFAULT_MODEL).unwrap(),
+            StatusCode::ACCEPTED
+        );
+        let used = memory.used();
+
+        batch.records.clear();
+        batch.dropped = 7;
+        let packed = rmp_serde::to_vec_named(&batch).unwrap();
+        let body = zstd::encode_all(&packed[..], 3).unwrap();
+        let error = accept(&buffer, &body, crate::memory::DEFAULT_MODEL).unwrap_err();
+        assert_eq!(error.into_response().status(), StatusCode::BAD_REQUEST);
+        assert_eq!(memory.used(), used);
+        let taken = buffer.take(true).unwrap();
+        assert_eq!(taken.len, 1);
+        assert_eq!(taken.batch.groups.len(), 1);
+        assert_eq!(taken.batch.groups[0].dropped, 3);
     }
 
     #[tokio::test]
