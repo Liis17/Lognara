@@ -76,10 +76,6 @@ impl Spool {
         self.files.len()
     }
 
-    pub fn oldest_size(&self) -> Option<u64> {
-        self.files.front().map(|entry| entry.size)
-    }
-
     pub fn set_replay_limit(&mut self, limit: usize) {
         self.replay_limit = limit;
     }

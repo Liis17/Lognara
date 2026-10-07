@@ -469,7 +469,15 @@ async fn rejects_unauthenticated_batches_without_delivering_or_spooling() {
     assert_eq!(accepted.dropped, 0);
     assert_eq!(accepted.groups[0].dropped, 0);
     relay.stop().await;
-    assert_eq!(core.requests(), 1);
+    // Shutdown может прервать ожидание ACK уже принятой пачки. Допустим только
+    // повтор тех же байтов; отказ авторизации не должен появиться среди них.
+    let accepted_requests = core.requests();
+    assert!(accepted_requests >= 1);
+    {
+        let bodies = core.bodies.lock().unwrap();
+        assert_eq!(bodies.len(), accepted_requests);
+        assert!(bodies.iter().all(|body| body == &bodies[0]));
+    }
     assert_eq!(spooled(spool.path()), 0);
 
     // При недоступном core отказ тоже не должен создавать spool на остановке.
@@ -480,7 +488,7 @@ async fn rejects_unauthenticated_batches_without_delivering_or_spooling() {
         StatusCode::UNAUTHORIZED
     );
     relay.stop().await;
-    assert_eq!(core.requests(), 1);
+    assert_eq!(core.requests(), accepted_requests);
     assert_eq!(spooled(spool.path()), 0);
 }
 

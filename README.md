@@ -240,6 +240,14 @@ cargo clippy --manifest-path Lognara-core/Cargo.toml --all-targets --all-feature
 
 Те же команды с `Lognara-agent/Cargo.toml` и `Lognara-relay/Cargo.toml`. Тесты core запускают настоящий relay (dev-зависимость) и проверяют повтор после рестарта, SIGKILL после ACK, сбои публикации, индексы, курсоры и retention. Feature `crash-tests` включает только аварийные точки для тестов, для эксплуатации собирайте без неё.
 
+Тяжёлая проверка профиля relay запускается отдельно (Python 3, macOS/Linux):
+
+```sh
+python3 Lognara-relay/tests/check-memory-profile.py
+```
+
+Она собирает отдельный тест, проверяет большие тела, конкурентный приём и shutdown при недоступном core; останавливает процесс при RSS выше 2 GiB и проверяет пиковый RSS ядра. Компиляция не измеряется, генератор фикстур измеряется вместе с relay. Локальный пик на macOS arm64/debug — 1521 MiB. Жёсткая квота Linux cgroup/container здесь не проверялась; перед deployment повторите нагрузку с лимитом 2 GiB. Подробности: [память relay](Obsidian/LognaraVault/Relay/Memory.md).
+
 ## Структура репозитория
 
 ```text

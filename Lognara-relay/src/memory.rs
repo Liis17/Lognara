@@ -162,4 +162,40 @@ mod tests {
             .unwrap();
         drop(permit);
     }
+
+    #[tokio::test]
+    async fn shutdown_closes_admission_and_waits_for_a_detached_worker() {
+        let config = Config::from_lookup(|name| match name {
+            "LOGNARA_CORE_URL" => Some("http://localhost/v1/batches".into()),
+            "LOGNARA_CORE_TOKEN" | "LOGNARA_RELAY_TOKEN" => Some("secret".into()),
+            _ => None,
+        })
+        .unwrap();
+        let resources = Resources::new(&config);
+        let permit = resources.slots.clone().try_acquire_owned().unwrap();
+        let (started, begun) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let request = tokio::spawn(run_blocking(permit, move || {
+            started.send(()).unwrap();
+            wait.recv().unwrap();
+        }));
+        begun.await.unwrap();
+        request.abort();
+        let _ = request.await;
+        let draining = resources.clone();
+        let mut drain = tokio::spawn(async move { draining.drain().await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut drain)
+                .await
+                .is_err()
+        );
+        assert!(!resources.ready());
+        release.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), drain)
+            .await
+            .unwrap()
+            .unwrap();
+        resources.set_ready(true);
+        assert!(!resources.ready(), "shutdown must keep admission closed");
+    }
 }

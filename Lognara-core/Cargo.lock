@@ -2202,6 +2202,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "bytes",
+ "http-body",
  "reqwest",
  "rmp-serde",
  "serde",
