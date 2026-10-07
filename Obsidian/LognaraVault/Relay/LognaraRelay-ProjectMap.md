@@ -12,7 +12,7 @@ Lognara-relay/
 │   ├── main.rs             точка входа: логирование, конфиг, spool, bind, SIGTERM/SIGINT
 │   ├── lib.rs              сборка компонентов и run()
 │   ├── config.rs           параметры LOGNARA_*
-│   ├── agent_wire.rs       контракт агента: Batch, Record, Payload, decode()
+│   ├── agent_wire.rs       контракт агента: Batch, Record, Payload, decode_with_budget()
 │   ├── core_wire.rs        контракт с core: CoreBatch, Group, Source, Event, encode()
 │   ├── wire_budget.rs      no-alloc оценка памяти MessagePack, идентичная core
 │   ├── normalize.rs        разбор Record в Event
@@ -32,8 +32,8 @@ Lognara-relay/
 
 | Стадия | Модуль | Вход | Выход |
 |---|---|---|---|
-| Приём | `ingest` | HTTP-запрос агента с общим Bearer-токеном | `401` без чтения тела или `Batch` через `agent_wire::decode` |
-| Разбор | `normalize` | `Record` | `Event` |
+| Приём | `ingest` | HTTP-запрос агента с общим Bearer-токеном | отказ до тела или `Batch` через `agent_wire::decode_with_budget` |
+| Разбор | `normalize` | `Record` + `ModelBudget` | `Event` либо ресурсная ошибка |
 | Накопление | `buffer` | `Source` + `Vec<Event>` | `Taken`: группы и RAII-резервы |
 | Кодирование | `core_wire` | `CoreBatch` | одна часть через `BatchEncoder::next()` |
 | Отправка | `sender` | тело запроса | `POST` в core или `Spool::push` |
@@ -46,7 +46,7 @@ Lognara-relay/
 - `ingest` → `agent_wire`, `normalize`, `buffer`.
 - `ingest` → `memory`: slot до чтения тела; blocking-задача владеет permit. Подробности в [[Relay/Memory]].
 - `sender` → `buffer`, `spool`, `core_wire`. `Sender` владеет `Spool` единолично, поэтому очередь без блокировок.
-- Публичные модули (`agent_wire`, `config`, `core_wire`, `normalize`, `spool`) используют сквозные тесты; `buffer`, `ingest`, `sender` скрыты.
+- Публичные модули (`agent_wire`, `config`, `core_wire`, `model_budget`, `normalize`, `spool`) используют сквозные тесты; `buffer`, `ingest`, `memory`, `sender` скрыты.
 
 ## Тесты
 

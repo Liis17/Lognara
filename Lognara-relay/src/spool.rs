@@ -21,6 +21,8 @@ pub struct Spool {
     next_seq: u64,
     /// Потерянные relay события, ещё не учтённые в пачке для core.
     dropped: u64,
+    /// Такие файлы нельзя вытеснять по дисковой квоте до исправления причины.
+    replay_limit: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -61,6 +63,7 @@ impl Spool {
             bytes: files.iter().map(|entry| entry.size).sum(),
             files: files.into(),
             dropped: 0,
+            replay_limit: usize::MAX,
         })
     }
 
@@ -77,13 +80,33 @@ impl Spool {
         self.files.front().map(|entry| entry.size)
     }
 
+    pub fn set_replay_limit(&mut self, limit: usize) {
+        self.replay_limit = limit;
+    }
+
+    pub fn fits_replay_limit(&self) -> bool {
+        self.files
+            .iter()
+            .all(|entry| entry.size <= self.replay_limit as u64)
+    }
+
     /// Дописывает пачку в конец очереди. Если места не хватает, сначала удаляет
     /// самые старые пачки. Потерянные события учитываются в `dropped`.
     pub async fn push(&mut self, body: &[u8], events: u64) {
         let size = body.len() as u64;
-        while self.bytes + size > self.max_bytes
-            && let Some(evicted) = self.pop().await
-        {
+        while self.bytes.saturating_add(size) > self.max_bytes {
+            let Some(entry) = self.files.front().copied() else {
+                break;
+            };
+            if let Ok(metadata) = fs::metadata(self.path(entry)).await {
+                self.update_oldest_size(metadata.len());
+            }
+            // Временно превышаем дисковую квоту, чтобы сохранить уже принятые
+            // данные, не удаляя файл, который заблокировал новый приём.
+            if self.files.front().unwrap().size > self.replay_limit as u64 {
+                break;
+            }
+            let evicted = self.pop().await.unwrap();
             self.dropped += evicted.events;
             warn!(
                 events = evicted.events,
@@ -148,8 +171,16 @@ impl Spool {
             }
             .await;
             match read {
-                Ok(Ok(body)) => return Ok(Some(body)),
-                Ok(Err(error)) => return Err(error),
+                Ok(Ok(body)) => {
+                    self.update_oldest_size(body.len() as u64);
+                    return Ok(Some(body));
+                }
+                Ok(Err(error)) => {
+                    // Размер мог измениться на диске после open; защита от
+                    // вытеснения должна учитывать и обнаруженный новый размер.
+                    self.update_oldest_size(error.size);
+                    return Err(error);
+                }
                 Err(err) => {
                     self.dropped += entry.events;
                     error!(error = %err, events = entry.events, "failed to read batch from spool, batch is lost");
@@ -182,6 +213,12 @@ impl Spool {
             error!(error = %err, "failed to remove batch from spool");
         }
         Some(entry)
+    }
+
+    fn update_oldest_size(&mut self, size: u64) {
+        let entry = self.files.front_mut().unwrap();
+        self.bytes = self.bytes.saturating_sub(entry.size).saturating_add(size);
+        entry.size = size;
     }
 
     /// Пишет через временный файл, чтобы после падения не осталось обрезанной пачки.
@@ -221,6 +258,43 @@ mod tests {
         assert_eq!(spool.len(), 1);
         assert_eq!(spool.take_dropped(), 0);
         assert_eq!(spool.oldest_limited(5).await.unwrap().unwrap(), b"large");
+    }
+
+    #[tokio::test]
+    async fn oversized_file_behind_a_small_head_survives_quota_and_shutdown_saves() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("00000000000000000000-1.batch"), b"small").unwrap();
+        let protected = dir.path().join("00000000000000000001-7.batch");
+        std::fs::write(&protected, b"oversized").unwrap();
+        let mut spool = Spool::open(dir.path(), 6).await.unwrap();
+        spool.set_replay_limit(5);
+        assert!(!spool.fits_replay_limit());
+        spool.push(b"saved", 2).await;
+        assert_eq!(std::fs::read(&protected).unwrap(), b"oversized");
+        assert_eq!(spool.len(), 2);
+        assert_eq!(spool.take_dropped(), 1);
+        assert_eq!(spool.oldest_limited(5).await.unwrap_err().size, 9);
+        spool.push(b"last", 3).await;
+        assert_eq!(spool.len(), 3);
+        std::fs::write(&protected, b"fixed").unwrap();
+        assert_eq!(spool.oldest_limited(5).await.unwrap().unwrap(), b"fixed");
+        assert!(spool.fits_replay_limit());
+        assert_eq!(drain(&mut spool).await, [&b"fixed"[..], b"saved", b"last"]);
+    }
+
+    #[tokio::test]
+    async fn quota_eviction_checks_a_file_that_grew_since_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("00000000000000000000-7.batch");
+        std::fs::write(&path, b"small").unwrap();
+        let mut spool = Spool::open(dir.path(), 6).await.unwrap();
+        spool.set_replay_limit(5);
+        std::fs::write(&path, b"oversized").unwrap();
+        spool.push(b"saved", 2).await;
+        assert_eq!(std::fs::read(&path).unwrap(), b"oversized");
+        assert!(!spool.fits_replay_limit());
+        assert_eq!(spool.take_dropped(), 0);
+        assert_eq!(spool.len(), 2);
     }
     use super::*;
 

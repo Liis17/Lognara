@@ -10,6 +10,7 @@ publish = false
 axum = "0.8"
 base64 = "0.22"
 bytes = "1"
+http-body = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 rmp-serde = "1"
 serde = { version = "1", features = ["derive"] }
@@ -26,6 +27,5 @@ uuid = { version = "1", features = ["v7", "serde"] }
 zstd = "0.13"
 
 [dev-dependencies]
-http-body = "1"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }

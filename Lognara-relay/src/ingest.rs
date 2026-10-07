@@ -1,16 +1,18 @@
 //! Приём пачек от агентов: `POST /v1/batches`, MessagePack + zstd.
 
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, FromRequest, Request, State};
+use axum::body::Body;
+use axum::extract::{Request, State};
 use axum::http::header::{AUTHORIZATION, CONTENT_ENCODING, CONTENT_TYPE, HeaderName};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
+use http_body::Body as _;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
@@ -60,7 +62,7 @@ async fn authorize(State(expected): State<[u8; 32]>, request: Request, next: Nex
 
 async fn ingest(
     State(state): State<IngestState>,
-    mut request: Request,
+    request: Request,
 ) -> Result<StatusCode, IngestError> {
     if !header_is(request.headers(), CONTENT_TYPE, "application/msgpack")
         || !header_is(request.headers(), CONTENT_ENCODING, "zstd")
@@ -78,17 +80,9 @@ async fn ingest(
         .clone()
         .try_acquire_owned()
         .map_err(|_| IngestError::Unavailable)?;
-    DefaultBodyLimit::max(MAX_BODY).apply(&mut request);
-    let body = tokio::time::timeout(Duration::from_secs(30), Bytes::from_request(request, &()))
+    let body = tokio::time::timeout(Duration::from_secs(30), read_body(request.into_body()))
         .await
-        .map_err(|_| IngestError::Timeout)?
-        .map_err(|error| {
-            if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
-                IngestError::TooLarge
-            } else {
-                IngestError::InvalidBody
-            }
-        })?;
+        .map_err(|_| IngestError::Timeout)??;
     crate::memory::run_blocking(permit, move || {
         accept(&state.buffer, &body, state.resources.model_limit)
     })
@@ -97,6 +91,22 @@ async fn ingest(
         tracing::error!(%error, "ingest worker failed");
         IngestError::Unavailable
     })?
+}
+
+// Не collect(): число DATA frames тоже контролирует клиент. После копирования
+// каждого фрагмента он освобождается, capacity тела никогда не растёт.
+async fn read_body(mut body: Body) -> Result<Vec<u8>, IngestError> {
+    let mut bytes = Vec::with_capacity(MAX_BODY);
+    while let Some(frame) = std::future::poll_fn(|cx| Pin::new(&mut body).poll_frame(cx)).await {
+        let frame = frame.map_err(|_| IngestError::InvalidBody)?;
+        if let Ok(data) = frame.into_data() {
+            if data.len() > MAX_BODY - bytes.len() {
+                return Err(IngestError::TooLarge);
+            }
+            bytes.extend_from_slice(&data);
+        }
+    }
+    Ok(bytes)
 }
 
 fn accept(buffer: &Buffer, body: &[u8], model_limit: usize) -> Result<StatusCode, IngestError> {
@@ -193,10 +203,10 @@ impl IntoResponse for IngestError {
 #[cfg(test)]
 mod tests {
     use std::convert::Infallible;
-    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll};
 
-    use axum::body::Body;
+    use axum::body::Bytes;
     use axum::http::HeaderValue;
     use http_body::Frame;
     use tower::ServiceExt;
@@ -216,6 +226,100 @@ mod tests {
         })
         .unwrap();
         Resources::new(&config)
+    }
+
+    struct Fragment {
+        live: Arc<AtomicUsize>,
+        byte: u8,
+    }
+
+    impl AsRef<[u8]> for Fragment {
+        fn as_ref(&self) -> &[u8] {
+            std::slice::from_ref(&self.byte)
+        }
+    }
+
+    impl Drop for Fragment {
+        fn drop(&mut self) {
+            self.live.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    struct FragmentedBody {
+        left: usize,
+        live: Arc<AtomicUsize>,
+    }
+
+    impl http_body::Body for FragmentedBody {
+        type Data = Bytes;
+        type Error = Infallible;
+
+        fn poll_frame(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+            assert_eq!(
+                self.live.load(Ordering::SeqCst),
+                0,
+                "previous frame retained"
+            );
+            if self.left == 0 {
+                return Poll::Ready(None);
+            }
+            self.left -= 1;
+            self.live.fetch_add(1, Ordering::SeqCst);
+            Poll::Ready(Some(Ok(Frame::data(Bytes::from_owner(Fragment {
+                live: self.live.clone(),
+                byte: b'x',
+            })))))
+        }
+    }
+
+    #[tokio::test]
+    async fn fragmented_body_releases_each_frame_and_keeps_fixed_capacity() {
+        let live = Arc::new(AtomicUsize::new(0));
+        let body = read_body(Body::new(FragmentedBody {
+            left: 1024,
+            live: live.clone(),
+        }))
+        .await
+        .unwrap();
+        assert_eq!(body, vec![b'x'; 1024]);
+        assert_eq!(body.capacity(), MAX_BODY);
+        assert_eq!(live.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn minimum_configured_model_and_buffer_accept_a_text_record() {
+        let resources = resources_with_model(8192);
+        let buffer = Arc::new(Buffer::with_memory(
+            100,
+            100,
+            crate::memory::Pool::new(8192),
+        ));
+        let mut batch =
+            agent_wire::decode(include_bytes!("../tests/fixtures/agent-batch.bin"), 1024).unwrap();
+        batch.records = vec![agent_wire::Record {
+            received_at: 1,
+            payload: agent_wire::Payload::Text("x".into()),
+        }];
+        let packed = rmp_serde::to_vec_named(&batch).unwrap();
+        let body = zstd::encode_all(&packed[..], 3).unwrap();
+        let app = router(buffer.clone(), "relay-secret", resources.clone());
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/batches")
+            .header(AUTHORIZATION, "Bearer relay-secret")
+            .header(CONTENT_TYPE, "application/msgpack")
+            .header(CONTENT_ENCODING, "zstd")
+            .body(Body::from(body))
+            .unwrap();
+        assert_eq!(
+            app.oneshot(request).await.unwrap().status(),
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(buffer.take(true).unwrap().len, 1);
+        assert_eq!(resources.slots.available_permits(), 1);
     }
 
     #[tokio::test]

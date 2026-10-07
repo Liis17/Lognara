@@ -7,7 +7,7 @@ Parent: [[Index]]
 | Область | Текущее состояние |
 |---------|-------------------|
 | Язык и runtime | Rust (edition 2024) и tokio подтверждены для `Lognara-agent/` и `Lognara-relay/`. Core также использует Rust 2024 и tokio; MSRV 1.94. |
-| Зависимости | `Lognara-agent/Cargo.toml`: axum, reqwest, tokio, tokio-util, serde, serde_json, rmp-serde, serde_bytes, zstd, tracing. Подробности в [[Agent/LognaraAgent]]. `Lognara-relay/Cargo.toml`: те же, reqwest с rustls, а также uuid, time, base64, bytes, sha2 и subtle для аутентификации агентов. Подробности в [[Relay/LognaraRelay]]. |
+| Зависимости | `Lognara-agent/Cargo.toml`: axum, reqwest, tokio, tokio-util, serde, serde_json, rmp-serde, serde_bytes, zstd, tracing. Подробности в [[Agent/LognaraAgent]]. `Lognara-relay/Cargo.toml`: те же, reqwest с rustls, а также uuid, time, base64, bytes, http-body для ограниченного чтения, sha2 и subtle для аутентификации агентов. Подробности в [[Relay/LognaraRelay]]. |
 | Лицензия | MIT, см. `LICENSE`. |
 
 ## Компоненты и сервисы

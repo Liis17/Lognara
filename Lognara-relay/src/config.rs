@@ -209,8 +209,9 @@ impl Config {
             });
         if self.max_ingest_concurrency == 0
             || self.max_ingest_concurrency > u32::MAX as usize
-            || self.max_model_bytes == 0
-            || self.max_buffer_bytes == 0
+            // Должны помещаться хотя бы короткая текстовая запись и её контейнеры.
+            || self.max_model_bytes < 8192
+            || self.max_buffer_bytes < 8192
             || self.core_max_body_bytes == 0
             || self.core_max_decoded_bytes == 0
             || self.core_max_model_bytes == 0
@@ -219,7 +220,7 @@ impl Config {
             return Err(ConfigError::Invalid {
                 var: "LOGNARA_RELAY_MEMORY_BYTES",
                 value: self.memory_bytes.to_string(),
-                expected: "memory covering all ingest slots, buffer and sender without overflow",
+                expected: "model/buffer >= 8192 bytes and memory covering ingest, buffer and sender without overflow",
             });
         }
         Ok(())
@@ -269,6 +270,19 @@ mod tests {
     fn rejects_memory_below_partition_requirements() {
         assert!(with_required(&[("LOGNARA_RELAY_MEMORY_BYTES", "1073741824")]).is_err());
         assert!(with_required(&[("LOGNARA_RELAY_MAX_INGEST_CONCURRENCY", "2")]).is_err());
+    }
+
+    #[test]
+    fn rejects_model_and_buffer_that_cannot_accept_a_record() {
+        for var in [
+            "LOGNARA_RELAY_MAX_MODEL_BYTES",
+            "LOGNARA_RELAY_MAX_BUFFER_BYTES",
+        ] {
+            for bytes in ["1", "8191"] {
+                assert!(with_required(&[(var, bytes)]).is_err(), "{var}={bytes}");
+            }
+            assert!(with_required(&[(var, "8192")]).is_ok());
+        }
     }
 
     #[test]

@@ -122,10 +122,13 @@ impl Sender {
     }
 
     async fn flush(&mut self, partial: bool) {
+        // flush мог быть отменён с незавершённым job или pending body. Сначала
+        // освобождаем workspace кодирования; replay не должен жить рядом с ним.
+        self.save_pending().await;
         loop {
             let body = match self.spool.oldest_limited(self.replay_limit).await {
                 Ok(body) => {
-                    self.resources.set_ready(true);
+                    self.resources.set_ready(self.spool.fits_replay_limit());
                     body
                 }
                 Err(error) => {
@@ -287,6 +290,52 @@ fn is_permanent(status: StatusCode) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cancelled_encoding_is_finished_before_replay_starts() {
+        let config = Config::from_lookup(|name| match name {
+            "LOGNARA_CORE_URL" => Some("http://127.0.0.1:1/v1/batches".into()),
+            "LOGNARA_CORE_TOKEN" | "LOGNARA_RELAY_TOKEN" => Some("secret".into()),
+            _ => None,
+        })
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("00000000000000000000-1.batch");
+        std::fs::write(&path, b"spool").unwrap();
+        let mut spool = Spool::open(dir.path(), u64::MAX).await.unwrap();
+        spool.set_replay_limit(config.sender_bytes().unwrap() - CODEC_WORKSPACE);
+        // При чтении эта запись была бы удалена как нечитаемая. Проверяем, что
+        // replay не начался, пока отменённый encoding всё ещё удерживает workspace.
+        std::fs::remove_file(path).unwrap();
+        let resources = Resources::new(&config);
+        let mut sender = Sender::new(
+            &config,
+            Arc::new(Buffer::new(1, 1)),
+            spool,
+            CancellationToken::new(),
+            resources,
+        );
+        let (release, wait) = tokio::sync::oneshot::channel();
+        sender.job = Some(tokio::spawn(async move {
+            wait.await.unwrap();
+            Encoded {
+                encoding: None,
+                part: None,
+                dropped: 0,
+            }
+        }));
+        assert!(
+            time::timeout(Duration::from_millis(10), sender.flush(true))
+                .await
+                .is_err()
+        );
+        assert_eq!(sender.spool.len(), 1);
+        assert!(sender.job.is_some());
+        release.send(()).unwrap();
+        sender.flush(true).await;
+        assert!(sender.spool.is_empty());
+        assert!(sender.job.is_none());
+    }
 
     #[test]
     fn only_unfixable_client_errors_are_permanent() {

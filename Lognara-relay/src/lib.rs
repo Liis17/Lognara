@@ -31,7 +31,7 @@ use crate::spool::Spool;
 pub async fn run(
     config: Config,
     listener: TcpListener,
-    spool: Spool,
+    mut spool: Spool,
     shutdown: CancellationToken,
 ) -> io::Result<()> {
     config
@@ -39,11 +39,8 @@ pub async fn run(
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
     let resources = memory::Resources::new(&config);
     let replay_limit = config.sender_bytes().unwrap() - memory::CODEC_WORKSPACE;
-    resources.set_ready(
-        spool
-            .oldest_size()
-            .is_none_or(|size| size <= replay_limit as u64),
-    );
+    spool.set_replay_limit(replay_limit);
+    resources.set_ready(spool.fits_replay_limit());
     let buffer = Arc::new(Buffer::with_memory(
         config.batch_size,
         config.max_buffer,

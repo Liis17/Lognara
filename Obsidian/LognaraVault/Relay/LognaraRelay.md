@@ -131,24 +131,27 @@ struct LogId(Uuid); struct TraceId([u8; 16]); struct SpanId([u8; 8]);  // bin 16
 | `ingest::router(buffer: Arc<Buffer>, token: &str, resources: Arc<Resources>): Router` | Проверяет авторизацию, заголовки и admission перед чтением тела. |
 | `ingest::token_hash(token: &str): [u8; 32]` | Вычисляет SHA-256 для сравнения ключей. |
 | `ingest::authorize(State(expected): State<[u8; 32]>, request: Request, next: Next): Response` | Отклоняет неверную авторизацию до чтения тела запроса. |
+| `ingest::read_body(body: Body): Result<Vec<u8>, IngestError>` | Копирует фрагменты последовательно в capacity 64 MiB, освобождая каждый до следующего. |
 | `Buffer::push(source: Source, dropped: u64, events: Vec<Event>): Result<(), Full>` | Резервирует capacity до изменения группы; различает TooLarge и Busy. |
 | ~~`Buffer::take(partial: bool): Option<(Vec<Group>, usize)>`~~ (удалён: 2026-10-07) | Заменён передачей моделей и резервов. |
 | `Buffer::take(partial: bool): Option<Taken>` | Забирает группы и резервы; также реагирует на байтовое давление и dropped-only группы. |
-| `Buffer::full()` | Ждёт, пока наберётся `batch_size` событий. |
+| `Buffer::full()` | Ждёт `batch_size` событий либо байтового давления/отказа. |
 | `Spool::open(dir: &Path, max_bytes: u64): io::Result<Spool>` | Создаёт каталог, удаляет `*.tmp`, восстанавливает очередь. |
-| `Spool::push(body: &[u8], events: u64)` | Дописывает пачку в конец, при нехватке места вытесняет старые. |
+| `Spool::push(body: &[u8], events: u64)` | Дописывает пачку; вытесняет старые, сохраняя oversized файлы даже сверх дисковой квоты. |
+| `Spool::set_replay_limit(limit: usize)` | Задаёт размер защищённых от вытеснения файлов. |
+| `Spool::fits_replay_limit(): bool` | Проверяет размеры всех известных файлов для готовности приёма. |
 | `Spool::oldest(): Option<Vec<u8>>` | Тело самой старой пачки; нечитаемые пропускает и считает потерянными. |
 | `Spool::remove_oldest()` | Удаляет самую старую пачку после доставки. |
 | `Spool::take_dropped(): u64` | Забирает счётчик потерянных событий для `CoreBatch.dropped`. |
 | `Spool::record_dropped(events: u64)` | Учитывает одиночные события, превышающие лимиты core. |
 | `Sender::run(self)` | Цикл отправки: тик, полная пачка, остановка. |
-| `Sender::flush(partial: bool)` | Отправляет spool, затем память; при неудаче пачка уходит в spool. |
+| `Sender::flush(partial: bool)` | Сначала завершает сохранённое кодирование, затем replay без одновременных больших workspace. |
 | `Sender::seal(partial: bool)` | Передаёт группы с резервами ленивому BatchEncoder. |
 | `Sender::save_pending()` | Последовательно кодирует и сохраняет остатки, включая job отменённого flush. |
 | `Core::deliver(body: Bytes): bool` | Одна попытка отправки; `false`, если core недоступен. |
 
 ## Зависимости
 
-- Использует: `tokio`, `tokio-util`, `axum`, `reqwest` (rustls), `serde`, `serde_json`, `rmp-serde`, `serde_bytes`, `zstd`, `uuid` (v7), `time`, `base64`, `bytes`, `sha2`, `subtle`, `tracing`, `tracing-subscriber`; в тестах `tempfile`, `http-body`, `tower` (`util`).
+- Использует: `tokio`, `tokio-util`, `axum`, `reqwest` (rustls), `serde`, `serde_json`, `rmp-serde`, `serde_bytes`, `zstd`, `uuid` (v7), `time`, `base64`, `bytes`, `http-body`, `sha2`, `subtle`, `tracing`, `tracing-subscriber`; в тестах `tempfile`, `tower` (`util`).
 - Принимает пачки от: [[Agent/LognaraAgent]].
 - Используется в: [[Architecture]].
