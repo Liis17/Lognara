@@ -17,6 +17,7 @@ Parent: [[Index]]
 | [[Agent/LognaraAgent]] | `Lognara-agent/` | Реализован приём логов, буфер в памяти и отправка в relay. |
 | [[Relay/LognaraRelay]] | `Lognara-relay/` | Реализованы приём пачек агентов, разбор в события, группировка по источнику, отправка в core и spool на диске. Структура в [[Relay/LognaraRelay-ProjectMap]]. |
 | [[Core/LognaraCore]] | `Lognara-core/` | Реализованы HTTP-приём, WAL, Arrow/Parquet, каталог SQLite, поиск Tantivy, аналитика DataFusion и retention. |
+| [[Delivery/Spool]] | `Lognara-spool/` | Общая атомарная файловая очередь, проверена отдельно; подключение к сервисам выполняется следующим этапом. |
 
 Корневые файлы описаны в [[Repository/RootFiles]].
 
