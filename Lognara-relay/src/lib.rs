@@ -8,20 +8,17 @@ pub mod model_budget;
 pub mod normalize;
 pub mod spool;
 
-mod buffer;
 mod ingest;
 mod memory;
 mod sender;
 mod wire_budget;
 
 use std::io;
-use std::sync::Arc;
 
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
 
-use crate::buffer::Buffer;
 use crate::config::Config;
 use crate::sender::Sender;
 use crate::spool::Spool;
@@ -41,18 +38,13 @@ pub async fn run(
     let replay_limit = config.sender_bytes().unwrap() - memory::CODEC_WORKSPACE;
     spool.set_replay_limit(replay_limit);
     resources.set_ready(spool.fits_replay_limit());
-    let buffer = Arc::new(Buffer::with_memory(
-        config.batch_size,
-        config.max_buffer,
-        resources.buffered.clone(),
-    ));
+    spool.set_max_events(config.max_buffer);
     // Отправка останавливается только после приёма, чтобы последние события не потерялись.
     let stop_sending = CancellationToken::new();
     let sender = tokio::spawn(
         Sender::new(
             &config,
-            buffer.clone(),
-            spool,
+            spool.clone(),
             stop_sending.clone(),
             resources.clone(),
         )
@@ -61,7 +53,7 @@ pub async fn run(
 
     let served = axum::serve(
         listener,
-        ingest::router(buffer, &config.relay_token, resources.clone()),
+        ingest::router(spool, &config.relay_token, resources.clone()),
     )
     .with_graceful_shutdown(shutdown.cancelled_owned())
     .await;

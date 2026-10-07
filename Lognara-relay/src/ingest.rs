@@ -17,22 +17,23 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use crate::agent_wire::{self, DecodeError};
-use crate::buffer::Buffer;
 use crate::core_wire::Source;
+use crate::core_wire::{BatchEncoder, CoreBatch, Event, Group};
 use crate::memory::{MAX_BODY, MAX_DECODED, Resources};
 use crate::normalize;
+use crate::spool::Spool;
 
 #[derive(Clone)]
 struct IngestState {
-    buffer: Arc<Buffer>,
+    spool: Spool,
     resources: Arc<Resources>,
 }
 
-pub fn router(buffer: Arc<Buffer>, token: &str, resources: Arc<Resources>) -> Router {
+pub fn router(spool: Spool, token: &str, resources: Arc<Resources>) -> Router {
     Router::new()
         .route("/v1/batches", post(ingest))
         .route_layer(middleware::from_fn_with_state(token_hash(token), authorize))
-        .with_state(IngestState { buffer, resources })
+        .with_state(IngestState { spool, resources })
 }
 
 fn token_hash(token: &str) -> [u8; 32] {
@@ -73,7 +74,9 @@ async fn ingest(
     if !state.resources.ready() {
         return Err(IngestError::Unavailable);
     }
-    state.buffer.check_admission().map_err(IngestError::from)?;
+    if !state.spool.available() {
+        return Err(IngestError::BufferFull);
+    }
     let permit = state
         .resources
         .slots
@@ -84,7 +87,7 @@ async fn ingest(
         .await
         .map_err(|_| IngestError::Timeout)??;
     crate::memory::run_blocking(permit, move || {
-        accept(&state.buffer, &body, state.resources.model_limit)
+        accept(&state.spool, &body, &state.resources)
     })
     .await
     .map_err(|error| {
@@ -109,11 +112,20 @@ async fn read_body(mut body: Body) -> Result<Vec<u8>, IngestError> {
     Ok(bytes)
 }
 
-fn accept(buffer: &Buffer, body: &[u8], model_limit: usize) -> Result<StatusCode, IngestError> {
-    let mut budget = crate::model_budget::ModelBudget::new(model_limit);
+fn accept(spool: &Spool, body: &[u8], resources: &Resources) -> Result<StatusCode, IngestError> {
+    let mut budget = crate::model_budget::ModelBudget::new(resources.model_limit);
     let batch = agent_wire::decode_with_budget(body, MAX_DECODED, &mut budget)?;
     if batch.records.is_empty() {
         return Err(IngestError::EmptyBatch);
+    }
+    for record in &batch.records {
+        let size = match &record.payload {
+            agent_wire::Payload::Text(s) | agent_wire::Payload::Json(s) => s.len(),
+            agent_wire::Payload::Binary(bytes) => bytes.len(),
+        };
+        if size > 2 << 20 {
+            return Err(IngestError::TooLarge);
+        }
     }
     let source = Source {
         environment: batch.environment,
@@ -127,7 +139,7 @@ fn accept(buffer: &Buffer, body: &[u8], model_limit: usize) -> Result<StatusCode
             batch
                 .records
                 .len()
-                .checked_mul(std::mem::size_of::<crate::core_wire::Event>())
+                .checked_mul(std::mem::size_of::<Event>())
                 .ok_or(IngestError::TooLarge)?,
         )
         .map_err(|_| IngestError::TooLarge)?;
@@ -137,9 +149,44 @@ fn accept(buffer: &Buffer, body: &[u8], model_limit: usize) -> Result<StatusCode
             normalize::event_with_budget(record, &mut budget).map_err(|_| IngestError::TooLarge)?,
         );
     }
-    buffer
-        .push(source, batch.dropped, events)
-        .map_err(IngestError::from)?;
+    let bytes = buffered_bytes(&source, &events, events.capacity());
+    let _reservation = resources
+        .buffered
+        .reserve(bytes)
+        .map_err(|error| match error {
+            crate::memory::ReserveError::TooLarge => IngestError::TooLarge,
+            crate::memory::ReserveError::Full => IngestError::BufferFull,
+        })?;
+    let batch = CoreBatch {
+        dropped: 0,
+        groups: vec![Group {
+            source,
+            dropped: batch.dropped,
+            events,
+        }],
+    };
+    let mut encoder = BatchEncoder::new(
+        batch,
+        resources.body_limit,
+        resources.decoded_limit,
+        resources.core_model_limit,
+    );
+    let parts = std::iter::from_fn(move || {
+        let part = encoder.next();
+        if encoder.take_dropped() != 0 {
+            return Some(Err(crate::spool::Error::TooLarge));
+        }
+        part.map(|part| Ok((part.body, part.events as u64)))
+    });
+    spool.append_group(parts).map_err(|error| match error {
+        crate::spool::Error::TooLarge => IngestError::TooLarge,
+        crate::spool::Error::Full => IngestError::BufferFull,
+        crate::spool::Error::Io(error) => {
+            resources.set_ready(false);
+            tracing::error!(%error, "durable commit failed; request not acknowledged");
+            IngestError::Unavailable
+        }
+    })?;
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -160,15 +207,6 @@ enum IngestError {
     BufferFull,
     Unavailable,
     Timeout,
-}
-
-impl From<crate::buffer::Full> for IngestError {
-    fn from(error: crate::buffer::Full) -> Self {
-        match error {
-            crate::buffer::Full::Busy => Self::BufferFull,
-            crate::buffer::Full::TooLarge => Self::TooLarge,
-        }
-    }
 }
 
 impl From<DecodeError> for IngestError {
@@ -208,34 +246,222 @@ impl IntoResponse for IngestError {
     }
 }
 
+fn buffered_bytes(source: &Source, events: &[Event], capacity: usize) -> usize {
+    let source_bytes = [&source.server, &source.backend, &source.service]
+        .into_iter()
+        .chain(source.environment.iter())
+        .chain(source.service_instance.iter())
+        .fold(0usize, |sum, text| sum.saturating_add(text.capacity()));
+    events.iter().fold(
+        4096usize
+            .saturating_add(source_bytes)
+            .saturating_add(capacity.saturating_mul(4 * std::mem::size_of::<Event>())),
+        |sum, event| {
+            let strings = [&event.message]
+                .into_iter()
+                .chain(event.action.iter())
+                .chain(event.request_id.iter())
+                .fold(0usize, |n, text| {
+                    n.saturating_add(text.capacity().saturating_mul(2))
+                });
+            event.attributes.iter().fold(
+                sum.saturating_add(strings)
+                    .saturating_add(event.attributes.capacity().saturating_mul(256)),
+                |n, (key, value)| {
+                    n.saturating_add(key.capacity().saturating_mul(2))
+                        .saturating_add(value_bytes(value))
+                },
+            )
+        },
+    )
+}
+
+fn value_bytes(value: &serde_json::Value) -> usize {
+    use serde_json::Value;
+    let heap = match value {
+        Value::String(text) => text.capacity().saturating_mul(2),
+        Value::Array(values) => values
+            .iter()
+            .fold(values.capacity().saturating_mul(256), |n, v| {
+                n.saturating_add(value_bytes(v))
+            }),
+        Value::Object(values) => values.iter().fold(0usize, |n, (key, v)| {
+            n.saturating_add(256)
+                .saturating_add(key.capacity().saturating_mul(2))
+                .saturating_add(value_bytes(v))
+        }),
+        _ => 0,
+    };
+    256usize.saturating_add(heap)
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use axum::body::Bytes;
+    use http_body::Frame;
     use std::convert::Infallible;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll};
-
-    use axum::body::Bytes;
-    use axum::http::HeaderValue;
-    use http_body::Frame;
     use tower::ServiceExt;
 
-    use super::*;
-
-    fn resources() -> Arc<Resources> {
-        resources_with_model(crate::memory::DEFAULT_MODEL)
-    }
-
-    fn resources_with_model(model: usize) -> Arc<Resources> {
+    async fn setup() -> (tempfile::TempDir, Spool, Arc<Resources>) {
+        let dir = tempfile::tempdir().unwrap();
+        let spool = Spool::open(dir.path(), 1 << 20).await.unwrap();
         let config = crate::config::Config::from_lookup(|name| match name {
             "LOGNARA_CORE_URL" => Some("http://localhost/v1/batches".into()),
             "LOGNARA_CORE_TOKEN" | "LOGNARA_RELAY_TOKEN" => Some("secret".into()),
-            "LOGNARA_RELAY_MAX_MODEL_BYTES" => Some(model.to_string()),
             _ => None,
         })
         .unwrap();
-        Resources::new(&config)
+        (dir, spool, Resources::new(&config))
+    }
+    fn encoded(batch: &agent_wire::Batch) -> Vec<u8> {
+        zstd::encode_all(&rmp_serde::to_vec_named(batch).unwrap()[..], 3).unwrap()
+    }
+    fn fixture() -> agent_wire::Batch {
+        agent_wire::decode(include_bytes!("../tests/fixtures/agent-batch.bin"), 1024).unwrap()
+    }
+    struct Unreadable;
+    impl http_body::Body for Unreadable {
+        type Data = Bytes;
+        type Error = Infallible;
+        fn poll_frame(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
+            panic!("rejected request body was read");
+        }
+    }
+    fn request(body: Body, token: &str) -> Request {
+        Request::builder()
+            .method("POST")
+            .uri("/v1/batches")
+            .header(AUTHORIZATION, token)
+            .header(CONTENT_TYPE, "application/msgpack")
+            .header(CONTENT_ENCODING, "zstd")
+            .body(body)
+            .unwrap()
     }
 
+    #[tokio::test]
+    async fn auth_and_busy_admission_reject_before_reading_body() {
+        let (_dir, spool, resources) = setup().await;
+        let app = router(spool.clone(), "relay-secret", resources.clone());
+        for token in [
+            "Bearer wrong",
+            "Basic relay-secret",
+            "Bearer",
+            "Bearer  relay-secret",
+        ] {
+            assert_eq!(
+                app.clone()
+                    .oneshot(request(Body::new(Unreadable), token))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        let permit = resources.slots.clone().try_acquire_owned().unwrap();
+        assert_eq!(
+            app.clone()
+                .oneshot(request(Body::new(Unreadable), "Bearer relay-secret"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        drop(permit);
+        resources.set_ready(false);
+        assert_eq!(
+            app.oneshot(request(Body::new(Unreadable), "Bearer relay-secret"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert!(spool.is_empty());
+    }
+
+    #[tokio::test]
+    async fn invalid_or_empty_batches_never_publish_any_part() {
+        let (_dir, spool, resources) = setup().await;
+        let mut batch = fixture();
+        batch.records.clear();
+        batch.dropped = 7;
+        assert!(matches!(
+            accept(&spool, &encoded(&batch), &resources),
+            Err(IngestError::EmptyBatch)
+        ));
+        assert!(matches!(
+            accept(&spool, b"invalid", &resources),
+            Err(IngestError::InvalidBody)
+        ));
+        assert!(spool.is_empty());
+        assert_eq!(resources.buffered.used(), 0);
+    }
+
+    #[tokio::test]
+    async fn unencodable_last_record_rolls_back_entire_request() {
+        let (_dir, spool, mut resources) = setup().await;
+        Arc::get_mut(&mut resources).unwrap().decoded_limit = 400;
+        let mut batch = fixture();
+        batch.records = vec![
+            agent_wire::Record {
+                received_at: 1,
+                payload: agent_wire::Payload::Text("small".into()),
+            },
+            agent_wire::Record {
+                received_at: 2,
+                payload: agent_wire::Payload::Text("x".repeat(1024)),
+            },
+        ];
+        assert!(matches!(
+            accept(&spool, &encoded(&batch), &resources),
+            Err(IngestError::TooLarge)
+        ));
+        assert!(spool.is_empty());
+    }
+
+    #[tokio::test]
+    async fn per_record_limit_and_disk_quota_are_checked_before_ack() {
+        let (dir, spool, resources) = setup().await;
+        let mut batch = fixture();
+        batch.records = vec![agent_wire::Record {
+            received_at: 1,
+            payload: agent_wire::Payload::Text("x".repeat((2 << 20) + 1)),
+        }];
+        assert!(matches!(
+            accept(&spool, &encoded(&batch), &resources),
+            Err(IngestError::TooLarge)
+        ));
+        assert!(spool.is_empty());
+        drop(spool);
+        let spool = Spool::open(dir.path(), 1).await.unwrap();
+        assert!(matches!(
+            accept(&spool, &encoded(&fixture()), &resources),
+            Err(IngestError::BufferFull)
+        ));
+        assert!(spool.is_empty());
+    }
+
+    #[tokio::test]
+    async fn compressed_body_limit_releases_slot() {
+        let (_dir, spool, resources) = setup().await;
+        let app = router(spool, "relay-secret", resources.clone());
+        assert_eq!(
+            app.oneshot(request(
+                Body::from(vec![0; MAX_BODY + 1]),
+                "Bearer relay-secret"
+            ))
+            .await
+            .unwrap()
+            .status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert_eq!(resources.slots.available_permits(), 1);
+    }
     struct Fragment {
         live: Arc<AtomicUsize>,
         byte: u8,
@@ -295,279 +521,5 @@ mod tests {
         assert_eq!(body, vec![b'x'; 1024]);
         assert_eq!(body.capacity(), MAX_BODY);
         assert_eq!(live.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn rejects_empty_batches_without_changing_buffer_or_dropped() {
-        let memory = crate::memory::Pool::new(crate::memory::DEFAULT_BUFFER);
-        let buffer = Buffer::with_memory(1, 1, memory.clone());
-        let mut batch =
-            agent_wire::decode(include_bytes!("../tests/fixtures/agent-batch.bin"), 1024).unwrap();
-        let record = batch.records[0].clone();
-        batch.records.clear();
-        for index in 0..100 {
-            batch.service = format!("empty-{index}");
-            batch.dropped = if index % 2 == 0 { 0 } else { 7 };
-            let packed = rmp_serde::to_vec_named(&batch).unwrap();
-            let body = zstd::encode_all(&packed[..], 3).unwrap();
-            let error = accept(&buffer, &body, crate::memory::DEFAULT_MODEL).unwrap_err();
-            assert_eq!(error.into_response().status(), StatusCode::BAD_REQUEST);
-            assert_eq!(memory.used(), 0);
-            assert!(buffer.take(true).is_none());
-        }
-
-        batch.records = vec![record];
-        batch.dropped = 3;
-        let packed = rmp_serde::to_vec_named(&batch).unwrap();
-        let body = zstd::encode_all(&packed[..], 3).unwrap();
-        assert_eq!(
-            accept(&buffer, &body, crate::memory::DEFAULT_MODEL).unwrap(),
-            StatusCode::ACCEPTED
-        );
-        let used = memory.used();
-
-        batch.records.clear();
-        batch.dropped = 7;
-        let packed = rmp_serde::to_vec_named(&batch).unwrap();
-        let body = zstd::encode_all(&packed[..], 3).unwrap();
-        let error = accept(&buffer, &body, crate::memory::DEFAULT_MODEL).unwrap_err();
-        assert_eq!(error.into_response().status(), StatusCode::BAD_REQUEST);
-        assert_eq!(memory.used(), used);
-        let taken = buffer.take(true).unwrap();
-        assert_eq!(taken.len, 1);
-        assert_eq!(taken.batch.groups.len(), 1);
-        assert_eq!(taken.batch.groups[0].dropped, 3);
-    }
-
-    #[tokio::test]
-    async fn minimum_configured_model_and_buffer_accept_a_text_record() {
-        let resources = resources_with_model(8192);
-        let buffer = Arc::new(Buffer::with_memory(
-            100,
-            100,
-            crate::memory::Pool::new(8192),
-        ));
-        let mut batch =
-            agent_wire::decode(include_bytes!("../tests/fixtures/agent-batch.bin"), 1024).unwrap();
-        batch.records = vec![agent_wire::Record {
-            received_at: 1,
-            payload: agent_wire::Payload::Text("x".into()),
-        }];
-        let packed = rmp_serde::to_vec_named(&batch).unwrap();
-        let body = zstd::encode_all(&packed[..], 3).unwrap();
-        let app = router(buffer.clone(), "relay-secret", resources.clone());
-        let request = Request::builder()
-            .method("POST")
-            .uri("/v1/batches")
-            .header(AUTHORIZATION, "Bearer relay-secret")
-            .header(CONTENT_TYPE, "application/msgpack")
-            .header(CONTENT_ENCODING, "zstd")
-            .body(Body::from(body))
-            .unwrap();
-        assert_eq!(
-            app.oneshot(request).await.unwrap().status(),
-            StatusCode::ACCEPTED
-        );
-        assert_eq!(buffer.take(true).unwrap().len, 1);
-        assert_eq!(resources.slots.available_permits(), 1);
-    }
-
-    #[tokio::test]
-    async fn rejects_model_amplification_atomically_and_releases_admission() {
-        let resources = resources_with_model(32 << 10);
-        let buffer = Arc::new(Buffer::new(100, 100));
-        let app = router(buffer.clone(), "relay-secret", resources.clone());
-        let mut batch =
-            agent_wire::decode(include_bytes!("../tests/fixtures/agent-batch.bin"), 1024).unwrap();
-        batch.records = vec![
-            agent_wire::Record {
-                received_at: 1,
-                payload: agent_wire::Payload::Text("first".into()),
-            },
-            agent_wire::Record {
-                received_at: 2,
-                payload: agent_wire::Payload::Json(format!(
-                    "{{\"a\":[{}null]}}",
-                    "null,".repeat(1000)
-                )),
-            },
-        ];
-        let packed = rmp_serde::to_vec_named(&batch).unwrap();
-        let body = zstd::encode_all(&packed[..], 3).unwrap();
-        let request = Request::builder()
-            .method("POST")
-            .uri("/v1/batches")
-            .header(AUTHORIZATION, "Bearer relay-secret")
-            .header(CONTENT_TYPE, "application/msgpack")
-            .header(CONTENT_ENCODING, "zstd")
-            .body(Body::from(body))
-            .unwrap();
-        assert_eq!(
-            app.oneshot(request).await.unwrap().status(),
-            StatusCode::PAYLOAD_TOO_LARGE
-        );
-        assert!(buffer.take(true).is_none());
-        assert_eq!(resources.slots.available_permits(), 1);
-    }
-
-    #[tokio::test]
-    async fn rejects_saturated_admission_without_reading_body() {
-        let resources = resources();
-        let held = resources.slots.clone().try_acquire_owned().unwrap();
-        let app = router(
-            Arc::new(Buffer::new(1, 1)),
-            "relay-secret",
-            resources.clone(),
-        );
-        let request = Request::builder()
-            .method("POST")
-            .uri("/v1/batches")
-            .header(AUTHORIZATION, "Bearer relay-secret")
-            .header(CONTENT_TYPE, "application/msgpack")
-            .header(CONTENT_ENCODING, "zstd")
-            .body(Body::new(UnreadableBody))
-            .unwrap();
-        assert_eq!(
-            app.oneshot(request).await.unwrap().status(),
-            StatusCode::SERVICE_UNAVAILABLE
-        );
-        drop(held);
-        assert_eq!(resources.slots.available_permits(), 1);
-    }
-
-    struct UnreadableBody;
-
-    #[tokio::test]
-    async fn full_buffer_and_unready_relay_reject_without_reading_body() {
-        for full in [true, false] {
-            let resources = resources();
-            let buffer = Arc::new(Buffer::new(1, 1));
-            if full {
-                let batch =
-                    agent_wire::decode(include_bytes!("../tests/fixtures/agent-batch.bin"), 1024)
-                        .unwrap();
-                buffer
-                    .push(
-                        Source {
-                            environment: batch.environment,
-                            server: batch.server,
-                            backend: batch.backend,
-                            service: batch.service,
-                            service_instance: batch.service_instance,
-                        },
-                        0,
-                        vec![normalize::event(batch.records[0].clone())],
-                    )
-                    .unwrap();
-            } else {
-                resources.set_ready(false);
-            }
-            let app = router(buffer, "relay-secret", resources.clone());
-            let request = Request::builder()
-                .method("POST")
-                .uri("/v1/batches")
-                .header(AUTHORIZATION, "Bearer relay-secret")
-                .header(CONTENT_TYPE, "application/msgpack")
-                .header(CONTENT_ENCODING, "zstd")
-                .body(Body::new(UnreadableBody))
-                .unwrap();
-            assert_eq!(
-                app.oneshot(request).await.unwrap().status(),
-                StatusCode::SERVICE_UNAVAILABLE
-            );
-            assert_eq!(resources.slots.available_permits(), 1);
-        }
-    }
-
-    #[tokio::test]
-    async fn compressed_body_limit_is_explicit_and_releases_admission() {
-        let resources = resources();
-        let app = router(
-            Arc::new(Buffer::new(1, 1)),
-            "relay-secret",
-            resources.clone(),
-        );
-        let request = Request::builder()
-            .method("POST")
-            .uri("/v1/batches")
-            .header(AUTHORIZATION, "Bearer relay-secret")
-            .header(CONTENT_TYPE, "application/msgpack")
-            .header(CONTENT_ENCODING, "zstd")
-            .body(Body::from(vec![0; MAX_BODY + 1]))
-            .unwrap();
-        assert_eq!(
-            app.oneshot(request).await.unwrap().status(),
-            StatusCode::PAYLOAD_TOO_LARGE
-        );
-        assert_eq!(resources.slots.available_permits(), 1);
-    }
-
-    impl http_body::Body for UnreadableBody {
-        type Data = Bytes;
-        type Error = Infallible;
-
-        fn poll_frame(
-            self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-        ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-            panic!("unauthorized request body must not be read");
-        }
-    }
-
-    #[tokio::test]
-    async fn rejects_invalid_authorization_before_reading_body() {
-        let buffer = Arc::new(Buffer::new(1, 1));
-        let app = router(buffer.clone(), "relay-secret", resources());
-        let invalid_headers: &[&[&str]] = &[
-            &[],
-            &["Bearer wrong"],
-            &["Basic relay-secret"],
-            &["Bearer"],
-            &["Bearer "],
-            &["Bearer  relay-secret"],
-            &["Bearer relay-secret "],
-            &["Bearer relay-secret, Bearer relay-secret"],
-            &["Bearer relay-secret", "Bearer relay-secret"],
-            &["Bearer wrong", "Bearer relay-secret"],
-            &["Bearer relay-secret", "Bearer wrong"],
-        ];
-        for values in invalid_headers {
-            let mut request = Request::builder()
-                .method("POST")
-                .uri("/v1/batches")
-                .header(CONTENT_TYPE, "application/msgpack")
-                .header(CONTENT_ENCODING, "zstd")
-                .header("content-length", MAX_BODY + 1)
-                .body(Body::new(UnreadableBody))
-                .unwrap();
-            for value in *values {
-                request
-                    .headers_mut()
-                    .append(AUTHORIZATION, HeaderValue::from_str(value).unwrap());
-            }
-            let response = app.clone().oneshot(request).await.unwrap();
-            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{values:?}");
-            assert_eq!(response.headers()["www-authenticate"], "Bearer");
-            assert!(buffer.take(true).is_none());
-        }
-    }
-
-    #[tokio::test]
-    async fn accepts_case_insensitive_bearer_scheme_and_preserves_body_validation() {
-        let app = router(Arc::new(Buffer::new(1, 1)), "relay-secret", resources());
-        for (content_type, status) in [
-            ("text/plain", StatusCode::UNSUPPORTED_MEDIA_TYPE),
-            ("application/msgpack", StatusCode::BAD_REQUEST),
-        ] {
-            let request = Request::builder()
-                .method("POST")
-                .uri("/v1/batches")
-                .header(AUTHORIZATION, "bEaReR relay-secret")
-                .header(CONTENT_TYPE, content_type)
-                .header(CONTENT_ENCODING, "zstd")
-                .body(Body::from("not zstd"))
-                .unwrap();
-            assert_eq!(app.clone().oneshot(request).await.unwrap().status(), status);
-        }
     }
 }

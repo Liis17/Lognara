@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 const MIB: usize = 1 << 20;
 
-fn body(payload: Payload) -> Bytes {
+fn batch_body(payloads: Vec<Payload>) -> Bytes {
     let batch = Batch {
         service: "memory-profile".into(),
         server: "local".into(),
@@ -26,13 +26,20 @@ fn body(payload: Payload) -> Bytes {
         service_instance: None,
         sent_at: 1,
         dropped: 0,
-        records: vec![Record {
-            received_at: 1,
-            payload,
-        }],
+        records: payloads
+            .into_iter()
+            .map(|payload| Record {
+                received_at: 1,
+                payload,
+            })
+            .collect(),
     };
-    let packed = rmp_serde::to_vec_named(&batch).unwrap();
-    zstd::encode_all(packed.as_slice(), 3).unwrap().into()
+    zstd::encode_all(&rmp_serde::to_vec_named(&batch).unwrap()[..], 3)
+        .unwrap()
+        .into()
+}
+fn body(payload: Payload) -> Bytes {
+    batch_body(vec![payload])
 }
 
 fn incompressible(length: usize) -> Vec<u8> {
@@ -81,8 +88,16 @@ async fn eventually(client: &Client, url: &str, body: Bytes, expected: StatusCod
 async fn bounded_relay_memory_profile() {
     // Производитель фикстур тоже входит в измеряемый процесс. Сохраняются только
     // сжатые тела; исходные строки и MessagePack освобождаются до старта relay.
-    let text = body(Payload::Text("x".repeat(96 * MIB)));
-    let large_body = body(Payload::Binary(incompressible(60 * MIB)));
+    let text = batch_body(
+        (0..48)
+            .map(|_| Payload::Text("x".repeat(2 * MIB)))
+            .collect(),
+    );
+    let large_body = batch_body(
+        (0..30)
+            .map(|_| Payload::Binary(incompressible(2 * MIB)))
+            .collect(),
+    );
     assert!((59 * MIB..64 * MIB).contains(&large_body.len()));
     let near_model_limit = body(Payload::Text("x".repeat(256 * MIB - 65536)));
     let binary = body(Payload::Binary(vec![0; 120 * MIB]));

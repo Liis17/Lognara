@@ -75,7 +75,7 @@ impl Queue {
                     part: 0,
                     events,
                     size: item.metadata()?.len(),
-                    path,
+                    path: PathBuf::from(item.file_name()),
                 });
             } else if path.extension().is_some_and(|ext| ext == "group") {
                 let seq = path
@@ -93,7 +93,7 @@ impl Queue {
                         part: number,
                         events,
                         size: part.metadata()?.len(),
-                        path: part_path,
+                        path: path.strip_prefix(&dir).unwrap().join(part.file_name()),
                     });
                     if files.len() > max_events.min(100_000) as usize {
                         return Err(Error::TooLarge);
@@ -148,6 +148,10 @@ impl Queue {
     pub fn events(&self) -> u64 {
         self.events
     }
+
+    pub fn set_max_events(&mut self, limit: u64) {
+        self.max_events = limit;
+    }
     pub fn available(&self) -> bool {
         self.bytes < self.max_bytes
             && self.events < self.max_events
@@ -178,7 +182,7 @@ impl Queue {
                     .ok_or(Error::TooLarge)?;
                 events = events.checked_add(count).ok_or(Error::TooLarge)?;
                 if bytes > self.max_bytes || events > self.max_events {
-                    return Err(Error::TooLarge);
+                    return Err(Error::Full);
                 }
                 if bytes > self.max_bytes.saturating_sub(self.bytes)
                     || events > self.max_events.saturating_sub(self.events)
@@ -196,7 +200,7 @@ impl Queue {
                     part: number,
                     events: count,
                     size: body.len() as u64,
-                    path: published.join(name),
+                    path: PathBuf::from(format!("{seq:020}.group")).join(name),
                 });
             }
             if entries.is_empty() {
@@ -218,7 +222,7 @@ impl Queue {
     }
 
     pub fn read(&self, entry: &Entry, limit: usize) -> Result<Vec<u8>, Error> {
-        let mut file = File::open(&entry.path)?;
+        let mut file = File::open(self.dir.join(&entry.path))?;
         let size = file.metadata()?.len();
         if size > limit as u64 {
             return Err(Error::TooLarge);
@@ -252,8 +256,9 @@ impl Queue {
             if self.files.front() != Some(expected) {
                 return Err(invalid("out of order spool ACK").into());
             }
-            fs::remove_file(&expected.path)?;
-            let parent = expected.path.parent().unwrap();
+            let path = self.dir.join(&expected.path);
+            fs::remove_file(&path)?;
+            let parent = path.parent().unwrap();
             sync_dir(parent)?;
             self.files.pop_front();
             self.bytes -= expected.size;
@@ -427,7 +432,11 @@ mod tests {
             .unwrap();
         let entry = queue.entries()[0].clone();
         assert!(matches!(queue.read(&entry, 4), Err(Error::TooLarge)));
-        fs::rename(&entry.path, entry.path.with_extension("hidden")).unwrap();
+        fs::rename(
+            queue.dir.join(&entry.path),
+            queue.dir.join(entry.path.with_extension("hidden")),
+        )
+        .unwrap();
         assert!(matches!(queue.read(&entry, 100), Err(Error::Io(_))));
         assert_eq!(queue.entries().len(), 2);
     }

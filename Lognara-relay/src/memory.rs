@@ -30,6 +30,9 @@ pub struct Resources {
     pub slots: Arc<Semaphore>,
     pub buffered: Arc<Pool>,
     pub model_limit: usize,
+    pub body_limit: usize,
+    pub decoded_limit: usize,
+    pub core_model_limit: usize,
     ready: AtomicBool,
     accepting: AtomicBool,
     concurrency: usize,
@@ -41,6 +44,9 @@ impl Resources {
             slots: Arc::new(Semaphore::new(config.max_ingest_concurrency)),
             buffered: Pool::new(config.max_buffer_bytes),
             model_limit: config.max_model_bytes,
+            body_limit: config.core_max_body_bytes,
+            decoded_limit: config.core_max_decoded_bytes,
+            core_model_limit: config.core_max_model_bytes,
             ready: AtomicBool::new(true),
             accepting: AtomicBool::new(true),
             concurrency: config.max_ingest_concurrency,
@@ -105,12 +111,9 @@ impl Pool {
         })
     }
 
+    #[cfg(test)]
     pub fn used(&self) -> usize {
         *self.used.lock().unwrap()
-    }
-
-    pub fn limit(&self) -> usize {
-        self.limit
     }
 }
 

@@ -24,12 +24,12 @@ pub struct Config {
     pub flush_interval: Duration,
     /// Сколько событий накопить, чтобы отправить их раньше интервала.
     pub batch_size: usize,
-    /// Сколько событий держать в памяти; сверх лимита агенты получают 503.
+    /// Сколько подтверждённых событий держать в очереди; сверх лимита 503.
     pub max_buffer: usize,
     pub listen_addr: SocketAddr,
     /// Каталог для пачек, которые не удалось отправить в core.
     pub spool_dir: PathBuf,
-    /// Лимит spool; при переполнении удаляются самые старые пачки.
+    /// Лимит spool; при переполнении новые запросы получают 503.
     pub spool_max_bytes: u64,
     /// Должны быть не больше соответствующих лимитов core.
     pub core_max_body_bytes: usize,
@@ -149,7 +149,9 @@ impl Config {
             spool_dir: get("LOGNARA_SPOOL_DIR")
                 .unwrap_or_else(|| DEFAULT_SPOOL_DIR.to_owned())
                 .into(),
-            spool_max_bytes: spool_max_mb.saturating_mul(1024 * 1024),
+            spool_max_bytes: spool_max_mb.checked_mul(1024 * 1024).ok_or(ConfigError::Invalid {
+                var: "LOGNARA_SPOOL_MAX_MB", value: spool_max_mb.to_string(), expected: "a byte quota without overflow",
+            })?,
             core_max_body_bytes: positive(&get, "LOGNARA_CORE_MAX_BODY_BYTES", 64 << 20)?,
             core_max_decoded_bytes: positive(&get, "LOGNARA_CORE_MAX_DECODED_BYTES", 256 << 20)?,
             core_max_model_bytes: positive(
@@ -183,8 +185,9 @@ impl Config {
         use crate::memory::{CODEC_WORKSPACE, MAX_BODY, MAX_DECODED};
         let unit = 128 << 20;
         let bytes = MAX_BODY
+            .max(self.core_max_body_bytes)
             .checked_mul(2)?
-            .checked_add(MAX_DECODED + 1)?
+            .checked_add((MAX_DECODED + 1).max(self.core_max_decoded_bytes))?
             .checked_add(self.max_model_bytes)?
             .checked_add(CODEC_WORKSPACE)?
             .checked_add(unit)?;
@@ -199,6 +202,9 @@ impl Config {
     }
 
     pub fn validate_memory(&self) -> Result<(), ConfigError> {
+        if self.batch_size == 0 || self.max_buffer < self.batch_size || self.spool_max_bytes == 0 {
+            return Err(ConfigError::Invalid { var: "LOGNARA_MAX_BUFFER", value: self.max_buffer.to_string(), expected: "positive spool quota and max buffer >= positive batch size" });
+        }
         let required = self
             .ingest_request_bytes()
             .and_then(|bytes| bytes.checked_mul(self.max_ingest_concurrency))

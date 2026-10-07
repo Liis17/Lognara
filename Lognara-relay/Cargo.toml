@@ -7,6 +7,7 @@ description = "Принимает пачки логов от lognara-agent, гр
 publish = false
 
 [dependencies]
+lognara-spool = { path = "../Lognara-spool" }
 axum = "0.8"
 base64 = "0.22"
 bytes = "1"

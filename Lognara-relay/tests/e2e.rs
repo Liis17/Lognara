@@ -25,6 +25,25 @@ use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
 
 const WAIT: Duration = Duration::from_secs(5);
+
+#[tokio::test]
+async fn accepted_batch_is_on_disk_before_first_flush() {
+    let core = fake_core().await;
+    core.respond(StatusCode::SERVICE_UNAVAILABLE);
+    let directory = tempfile::tempdir().unwrap();
+    let mut cfg = config(&core, directory.path());
+    cfg.flush_interval = Duration::from_secs(60);
+    let relay = start_relay(cfg).await;
+    assert_eq!(
+        send(&relay, &agent_batch("api", &["confirmed"])).await,
+        StatusCode::ACCEPTED
+    );
+    assert!(
+        spooled(directory.path()) > 0,
+        "202 must follow durable commit"
+    );
+    relay.stop().await;
+}
 const TOKEN: &str = "secret";
 const BATCH_HEADERS: [(&str, &str); 3] = [
     ("authorization", "Bearer relay-secret"),
@@ -242,12 +261,17 @@ fn messages(group: &Group) -> Vec<&str> {
 fn spooled(dir: &Path) -> usize {
     std::fs::read_dir(dir)
         .unwrap()
-        .filter(|item| {
-            let path = item.as_ref().unwrap().path();
-            path.extension()
-                .is_some_and(|extension| extension == "batch")
+        .map(|item| {
+            let path = item.unwrap().path();
+            if path.extension().is_some_and(|ext| ext == "batch") {
+                1
+            } else if path.extension().is_some_and(|ext| ext == "group") {
+                std::fs::read_dir(path).unwrap().count()
+            } else {
+                0
+            }
         })
-        .count()
+        .sum()
 }
 
 async fn eventually(condition: impl Fn() -> bool) {
@@ -280,19 +304,17 @@ async fn groups_events_by_source_on_interval() {
         StatusCode::ACCEPTED
     );
 
-    let batch = core.next_batch().await;
-    assert_eq!(batch.dropped, 0);
-    assert_eq!(batch.groups.len(), 2);
-    assert_eq!(batch.groups[0].source, source("api"));
-    assert_eq!(batch.groups[0].dropped, 3);
-    assert_eq!(messages(&batch.groups[0]), ["a1", "a2", "a3"]);
-    assert_eq!(batch.groups[1].source, source("worker"));
-    assert_eq!(messages(&batch.groups[1]), ["w1"]);
-
-    let event = &batch.groups[1].events[0];
-    assert_eq!(event.level, LogLevel::Unknown);
-    assert_eq!(event.ingested_at, 1);
-    assert_eq!(spooled(spool.path()), 0);
+    let first = core.next_batch().await;
+    assert_eq!(first.groups[0].source, source("api"));
+    assert_eq!(first.groups[0].dropped, 3);
+    assert_eq!(messages(&first.groups[0]), ["a1", "a2"]);
+    let worker = core.next_batch().await;
+    assert_eq!(worker.groups[0].source, source("worker"));
+    assert_eq!(messages(&worker.groups[0]), ["w1"]);
+    assert_eq!(worker.groups[0].events[0].level, LogLevel::Unknown);
+    assert_eq!(worker.groups[0].events[0].ingested_at, 1);
+    assert_eq!(messages(&core.next_batch().await.groups[0]), ["a3"]);
+    eventually(|| spooled(spool.path()) == 0).await;
 }
 
 #[tokio::test]
@@ -308,7 +330,8 @@ async fn sends_early_when_batch_size_is_reached() {
     send(&relay, &agent_batch("api", &["3"])).await;
 
     let batch = core.next_batch().await;
-    assert_eq!(messages(&batch.groups[0]), ["1", "2", "3"]);
+    assert_eq!(messages(&batch.groups[0]), ["1", "2"]);
+    assert_eq!(messages(&core.next_batch().await.groups[0]), ["3"]);
 }
 
 #[tokio::test]
@@ -342,7 +365,10 @@ async fn delivers_spool_left_from_previous_run_first() {
         }],
     };
     let mut previous = Spool::open(spool.path(), u64::MAX).await.unwrap();
-    previous.push(&core_wire::encode(&leftover), 1).await;
+    previous
+        .push(&core_wire::encode(&leftover), 1)
+        .await
+        .unwrap();
     drop(previous);
 
     let mut config = config(&core, spool.path());
@@ -352,7 +378,7 @@ async fn delivers_spool_left_from_previous_run_first() {
 
     assert_eq!(core.next_batch().await, leftover);
     assert_eq!(messages(&core.next_batch().await.groups[0]), ["fresh"]);
-    assert_eq!(spooled(spool.path()), 0);
+    eventually(|| spooled(spool.path()) == 0).await;
 }
 
 #[tokio::test]
@@ -368,9 +394,9 @@ async fn keeps_events_in_spool_on_shutdown_when_core_is_down() {
     relay.stop().await;
 
     assert_eq!(core.requests(), 1);
-    let mut saved = Spool::open(spool.path(), u64::MAX).await.unwrap();
+    let saved = Spool::open(spool.path(), u64::MAX).await.unwrap();
     assert_eq!(saved.len(), 1);
-    let batch = decode(&saved.oldest().await.unwrap());
+    let batch = decode(&saved.oldest().await.unwrap().unwrap());
     assert_eq!(messages(&batch.groups[0]), ["late"]);
 }
 
@@ -393,8 +419,11 @@ async fn split_batches_survive_spool_restart_with_identical_retry_bytes() {
     eventually(|| spooled(spool.path()) == 6).await;
     relay.stop().await;
     let failed_body = core.bodies.lock().unwrap()[0].clone();
-    let mut saved = Spool::open(spool.path(), u64::MAX).await.unwrap();
-    assert_eq!(saved.oldest().await.unwrap().as_slice(), &failed_body[..]);
+    let saved = Spool::open(spool.path(), u64::MAX).await.unwrap();
+    assert_eq!(
+        saved.oldest().await.unwrap().unwrap().as_slice(),
+        &failed_body[..]
+    );
     drop(saved);
     core.respond(StatusCode::OK);
     let restarted = start_relay(cfg).await;
@@ -424,7 +453,7 @@ async fn split_batches_survive_spool_restart_with_identical_retry_bytes() {
 }
 
 #[tokio::test]
-async fn drops_batch_rejected_by_core() {
+async fn retains_batch_rejected_by_core() {
     let mut core = fake_core().await;
     core.respond(StatusCode::BAD_REQUEST);
     let spool = tempfile::tempdir().unwrap();
@@ -435,8 +464,9 @@ async fn drops_batch_rejected_by_core() {
     core.respond(StatusCode::OK);
     send(&relay, &agent_batch("api", &["accepted"])).await;
 
+    assert_eq!(messages(&core.next_batch().await.groups[0]), ["rejected"]);
     assert_eq!(messages(&core.next_batch().await.groups[0]), ["accepted"]);
-    assert_eq!(spooled(spool.path()), 0);
+    eventually(|| spooled(spool.path()) == 0).await;
 }
 
 #[tokio::test]
@@ -478,7 +508,7 @@ async fn rejects_unauthenticated_batches_without_delivering_or_spooling() {
         assert_eq!(bodies.len(), accepted_requests);
         assert!(bodies.iter().all(|body| body == &bodies[0]));
     }
-    assert_eq!(spooled(spool.path()), 0);
+    eventually(|| spooled(spool.path()) == 0).await;
 
     // При недоступном core отказ тоже не должен создавать spool на остановке.
     core.respond(StatusCode::SERVICE_UNAVAILABLE);
@@ -489,7 +519,7 @@ async fn rejects_unauthenticated_batches_without_delivering_or_spooling() {
     );
     relay.stop().await;
     assert_eq!(core.requests(), accepted_requests);
-    assert_eq!(spooled(spool.path()), 0);
+    eventually(|| spooled(spool.path()) == 0).await;
 }
 
 #[tokio::test]
@@ -499,6 +529,8 @@ async fn rejects_invalid_requests_and_overflow() {
     let mut config = config(&core, spool.path());
     config.flush_interval = Duration::from_secs(60);
     config.max_buffer = 2;
+    config.batch_size = 2;
+    core.respond(StatusCode::SERVICE_UNAVAILABLE);
     let relay = start_relay(config).await;
 
     let text = [
@@ -594,7 +626,7 @@ async fn oversized_spool_stops_ingest_and_resumes_after_file_is_repaired() {
     let mut cfg = config(&core, directory.path());
     cfg.core_max_body_bytes = 1 << 20;
     cfg.core_max_decoded_bytes = 1 << 20;
-    let relay = start_relay(cfg).await;
+    let relay = start_relay(cfg.clone()).await;
     timeout(WAIT, async {
         loop {
             if post_body(&relay, &BATCH_HEADERS, b"invalid".to_vec()).await
@@ -618,7 +650,9 @@ async fn oversized_spool_stops_ingest_and_resumes_after_file_is_repaired() {
             events: vec![normalize::event(record("repaired"))],
         }],
     };
+    relay.stop().await;
     std::fs::write(&file, core_wire::encode(&fixed)).unwrap();
+    let relay = start_relay(cfg).await;
     assert_eq!(messages(&core.next_batch().await.groups[0]), ["repaired"]);
     assert_eq!(
         send(&relay, &agent_batch("api", &["new"])).await,
