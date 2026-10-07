@@ -1,4 +1,4 @@
-//! lognara-agent: принимает логи приложения по HTTP, копит их в оперативной памяти
+//! lognara-agent: принимает логи приложения по HTTP, сохраняет их на диск
 //! и сжатыми пачками отправляет в lognara-relay.
 
 pub mod config;
@@ -9,7 +9,6 @@ mod ingest;
 mod sender;
 
 use std::io;
-use std::sync::Arc;
 
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -26,12 +25,16 @@ pub async fn run(
     listener: TcpListener,
     shutdown: CancellationToken,
 ) -> io::Result<()> {
-    let buffer = Arc::new(Buffer::new(config.batch_size, config.max_buffer));
+    config.validate().map_err(io::Error::other)?;
+    let buffer = Buffer::open(config.clone())
+        .await
+        .map_err(io::Error::other)?;
     // Отправка останавливается только после приёма, чтобы последние записи попали в финальную пачку.
     let stop_sending = CancellationToken::new();
+    let _cancel_sender = stop_sending.clone().drop_guard();
     let sender = tokio::spawn(Sender::new(&config, buffer.clone(), stop_sending.clone()).run());
 
-    let served = axum::serve(listener, ingest::router(buffer))
+    let served = axum::serve(listener, ingest::router(buffer.clone()))
         .with_graceful_shutdown(shutdown.cancelled_owned())
         .await;
 
@@ -39,5 +42,6 @@ pub async fn run(
     if let Err(err) = sender.await {
         error!(error = %err, "sender task failed");
     }
+    buffer.drain().await;
     served
 }

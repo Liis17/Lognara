@@ -3,10 +3,12 @@ name = "lognara-agent"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "Принимает логи приложения по localhost, копит их в памяти и сжатыми пачками отправляет в lognara-relay"
+description = "Принимает логи приложения по localhost, сохраняет их на диск и сжатыми пачками отправляет в lognara-relay"
 publish = false
 
 [dependencies]
+lognara-spool = { path = "../Lognara-spool" }
+http-body = "1"
 axum = "0.8"
 reqwest = { version = "0.12", default-features = false }
 rmp-serde = "1"
@@ -18,3 +20,6 @@ tokio-util = "0.7"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 zstd = "0.13"
+
+[dev-dependencies]
+tempfile = "3"

@@ -7,17 +7,17 @@ Parent: [[Index]]
 | Область | Текущее состояние |
 |---------|-------------------|
 | Язык и runtime | Rust (edition 2024) и tokio подтверждены для `Lognara-agent/` и `Lognara-relay/`. Core также использует Rust 2024 и tokio; MSRV 1.94. |
-| Зависимости | `Lognara-agent/Cargo.toml`: axum, reqwest, tokio, tokio-util, serde, serde_json, rmp-serde, serde_bytes, zstd, tracing. Подробности в [[Agent/LognaraAgent]]. `Lognara-relay/Cargo.toml`: те же, reqwest с rustls, а также uuid, time, base64, bytes, http-body для ограниченного чтения, sha2 и subtle для аутентификации агентов. Подробности в [[Relay/LognaraRelay]]. |
+| Зависимости | `Lognara-agent/Cargo.toml`: axum, reqwest, tokio, tokio-util, serde, serde_json, rmp-serde, serde_bytes, zstd, tracing, http-body, общий lognara-spool. Подробности в [[Agent/LognaraAgent]]. `Lognara-relay/Cargo.toml`: те же, reqwest с rustls, а также uuid, time, base64, bytes, http-body для ограниченного чтения, sha2 и subtle для аутентификации агентов. Подробности в [[Relay/LognaraRelay]]. |
 | Лицензия | MIT, см. `LICENSE`. |
 
 ## Компоненты и сервисы
 
 | Компонент | Каталог | Состояние |
 |-----------|---------|-----------|
-| [[Agent/LognaraAgent]] | `Lognara-agent/` | Реализован приём логов, буфер в памяти и отправка в relay. |
+| [[Agent/LognaraAgent]] | `Lognara-agent/` | Реализован приём логов, атомарная дисковая очередь до `202` и отправка в relay. |
 | [[Relay/LognaraRelay]] | `Lognara-relay/` | Реализованы приём пачек агентов, разбор в события, группировка по источнику, отправка в core и spool на диске. Структура в [[Relay/LognaraRelay-ProjectMap]]. |
 | [[Core/LognaraCore]] | `Lognara-core/` | Реализованы HTTP-приём, WAL, Arrow/Parquet, каталог SQLite, поиск Tantivy, аналитика DataFusion и retention. |
-| [[Delivery/Spool]] | `Lognara-spool/` | Общая атомарная файловая очередь; relay подтверждает приём только после durable commit. |
+| [[Delivery/Spool]] | `Lognara-spool/` | Общая атомарная файловая очередь; оба процесса подтверждают приём только после durable commit. |
 
 Корневые файлы описаны в [[Repository/RootFiles]].
 
@@ -38,7 +38,7 @@ Parent: [[Index]]
 ## Сквозной поток логов
 
 1. Приложение (или библиотека lognara) отправляет лог на `POST http://127.0.0.1:7400/v1/logs` агента в своём контейнере: text, JSON или бинарные данные.
-2. Агент добавляет время приёма, держит записи в памяти и отправляет пачку, как только набрано `LOGNARA_BATCH_SIZE` записей или прошёл `LOGNARA_FLUSH_INTERVAL_MS`.
+2. Агент добавляет время приёма, атомарно сохраняет запрос до `202` и отправляет пачку, как только набрано `LOGNARA_BATCH_SIZE` записей или прошёл `LOGNARA_FLUSH_INTERVAL_MS`; дополнительно ограничивает модель и байты пачки.
 3. Непустая пачка (MessagePack + zstd, идентификация источника: service, server, backend, environment, service_instance) уходит в lognara-relay на той же машине с `Authorization: Bearer {LOGNARA_RELAY_TOKEN}` при каждой попытке. При пустом буфере агент не отправляет запрос; relay отклоняет `records=[]` с `400` независимо от `dropped`.
 4. Relay проверяет общий ключ до чтения тела и распаковки, затем разбирает записи в события, атомарно сохраняет все части до `202` и раз в `LOGNARA_FLUSH_INTERVAL_MS` (или сразу по `LOGNARA_BATCH_SIZE` событий) отправляет пачки MessagePack + zstd в lognara-core с Bearer-токеном core. Перед первой отправкой делит по согласованным байтовым лимитам core; повторяет исходные байты.
 5. Пока core недоступен, пачки relay ждут в spool на volume и затем уходят от старых к новым. Core подтверждает пачку после fsync WAL, затем публикует поиск и аналитику по открытым и закрытым сегментам.
@@ -47,7 +47,7 @@ Parent: [[Index]]
 
 ## Паттерны
 
-- Модули агента и relay разделены по стадиям конвейера: config, ingest, buffer, wire, sender; у relay добавлены normalize и spool.
+- Модули разделены по стадиям конвейера; agent использует buffer как дисковую очередь и подготовку ограниченных пачек, relay использует normalize и spool.
 - Agent и relay используют общий crate [[Delivery/Spool]]; relay держит копию контракта агента, совместимость проверяет фикстура, закодированная агентом.
 - Конфигурация читается только из переменных окружения с префиксом `LOGNARA_`, с проверкой при старте.
 - Агент и relay требуют одинаковый `LOGNARA_RELAY_TOKEN`; ключ без пробелов, управляющих и не-ASCII символов. Секреты скрыты в диагностике конфигурации. Relay сравнивает SHA-256 ключей через `subtle`, возвращает `401` с `WWW-Authenticate: Bearer` без изменения буфера/dropped/spool при отказе.
@@ -69,3 +69,5 @@ Parent: [[Index]]
 [[Core/LognaraCore]] использует WAL, Arrow/Parquet + ZSTD, Tantivy, DataFusion и SQLite-каталог. Приём совместим с relay, время в наносекундах.
 
 Core запускается отдельно за TLS-прокси, ingest и query используют разные токены. SIGTERM/SIGINT дорабатывает WAL. HTTP API, эксплуатация и нагрузочный стенд документированы в `Lognara-core/README.md` и `Lognara-core/docs/`.
+
+Agent и relay требуют постоянные отдельные volumes. Agent резервирует 64 MiB под индекс, источник, приём и подготовку отправки; payload ограничен 2 MiB, пачки 8 MiB. Дисковая квота каждого процесса 1 GiB; у agent отдельно до 8 MiB под pending. Переполнение возвращает `503`, HTTP-отказы удерживают очередь. Подробности и гарантия в [[Delivery/Spool]], [[Agent/LognaraAgent]] и README.

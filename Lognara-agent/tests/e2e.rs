@@ -28,6 +28,8 @@ struct FakeRelay {
     url: Url,
     batches: mpsc::UnboundedReceiver<Batch>,
     requests: Arc<AtomicUsize>,
+    bodies: Arc<Mutex<Vec<Bytes>>>,
+    failures: Arc<Mutex<VecDeque<StatusCode>>>,
 }
 
 #[derive(Clone)]
@@ -35,6 +37,7 @@ struct RelayState {
     batches: mpsc::UnboundedSender<Batch>,
     failures: Arc<Mutex<VecDeque<StatusCode>>>,
     requests: Arc<AtomicUsize>,
+    bodies: Arc<Mutex<Vec<Bytes>>>,
 }
 
 async fn fake_relay(failures: &[StatusCode]) -> FakeRelay {
@@ -43,8 +46,11 @@ async fn fake_relay(failures: &[StatusCode]) -> FakeRelay {
         batches,
         failures: Arc::new(Mutex::new(failures.iter().copied().collect())),
         requests: Arc::default(),
+        bodies: Arc::default(),
     };
     let requests = state.requests.clone();
+    let bodies = state.bodies.clone();
+    let failures = state.failures.clone();
     let app = Router::new()
         .route("/v1/batches", post(receive))
         .with_state(state);
@@ -57,12 +63,15 @@ async fn fake_relay(failures: &[StatusCode]) -> FakeRelay {
         url: url.parse().unwrap(),
         batches: receiver,
         requests,
+        bodies,
+        failures,
     }
 }
 
 async fn receive(State(state): State<RelayState>, headers: HeaderMap, body: Bytes) -> StatusCode {
     assert_eq!(headers["authorization"], "Bearer relay-secret");
     state.requests.fetch_add(1, Ordering::SeqCst);
+    state.bodies.lock().unwrap().push(body.clone());
     if let Some(status) = state.failures.lock().unwrap().pop_front() {
         return status;
     }
@@ -81,9 +90,11 @@ struct Agent {
     addr: SocketAddr,
     shutdown: CancellationToken,
     task: JoinHandle<io::Result<()>>,
+    _dir: tempfile::TempDir,
 }
 
 async fn start_agent(relay_url: Url, batch_size: usize, flush_interval: Duration) -> Agent {
+    let dir = tempfile::tempdir().unwrap();
     let config = Config {
         service: "api".into(),
         server: "eu-prod-01".into(),
@@ -93,6 +104,11 @@ async fn start_agent(relay_url: Url, batch_size: usize, flush_interval: Duration
         batch_size,
         flush_interval,
         max_buffer: 10_000,
+        max_buffer_bytes: 64 << 20,
+        max_batch_bytes: 8 << 20,
+        max_record_bytes: 2 << 20,
+        spool_dir: dir.path().to_path_buf(),
+        spool_max_bytes: 1 << 30,
         listen_addr: "127.0.0.1:0".parse().unwrap(),
         relay_url,
         relay_token: "relay-secret".into(),
@@ -106,6 +122,7 @@ async fn start_agent(relay_url: Url, batch_size: usize, flush_interval: Duration
         addr,
         shutdown,
         task,
+        _dir: dir,
     }
 }
 
@@ -226,29 +243,27 @@ async fn retries_while_relay_is_unavailable() {
 
     assert_eq!(payloads(next_batch(&mut relay).await), [text("eventually")]);
     assert_eq!(relay.requests.load(Ordering::SeqCst), 3);
+    let bodies = relay.bodies.lock().unwrap();
+    assert!(bodies.windows(2).all(|v| v[0] == v[1]));
 }
 
 #[tokio::test]
-async fn drops_batch_rejected_by_relay() {
+async fn retains_batch_rejected_by_relay() {
     let mut relay = fake_relay(&[StatusCode::BAD_REQUEST]).await;
     let agent = start_agent(relay.url.clone(), 1, Duration::from_secs(60)).await;
 
     send_log(&agent, "text/plain", "rejected").await;
-    send_log(&agent, "text/plain", "accepted").await;
-
-    assert_eq!(payloads(next_batch(&mut relay).await), [text("accepted")]);
+    assert_eq!(payloads(next_batch(&mut relay).await), [text("rejected")]);
     assert_eq!(relay.requests.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
-async fn drops_unauthorized_batch_without_retrying() {
+async fn retains_unauthorized_batch_for_retry() {
     let mut relay = fake_relay(&[StatusCode::UNAUTHORIZED]).await;
     let agent = start_agent(relay.url.clone(), 1, Duration::from_secs(60)).await;
 
     send_log(&agent, "text/plain", "rejected").await;
-    send_log(&agent, "text/plain", "accepted").await;
-
-    assert_eq!(payloads(next_batch(&mut relay).await), [text("accepted")]);
+    assert_eq!(payloads(next_batch(&mut relay).await), [text("rejected")]);
     assert_eq!(relay.requests.load(Ordering::SeqCst), 2);
 }
 
@@ -271,4 +286,83 @@ async fn delivers_remaining_records_on_shutdown() {
         .try_recv()
         .expect("remaining records were not sent");
     assert_eq!(payloads(batch), [text("one"), text("two")]);
+}
+
+struct ProcessAgent(std::process::Child);
+impl Drop for ProcessAgent {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+async fn process_agent(dir: &std::path::Path, relay: &Url, addr: SocketAddr) -> ProcessAgent {
+    let child = std::process::Command::new(env!("CARGO_BIN_EXE_lognara-agent"))
+        .env("LOGNARA_SERVICE", "api")
+        .env("LOGNARA_SERVER", "server")
+        .env("LOGNARA_BACKEND", "backend")
+        .env("LOGNARA_RELAY_TOKEN", "relay-secret")
+        .env("LOGNARA_RELAY_URL", relay.as_str())
+        .env("LOGNARA_SPOOL_DIR", dir)
+        .env("LOGNARA_LISTEN_ADDR", addr.to_string())
+        .env("LOGNARA_BATCH_SIZE", "1")
+        .env("LOGNARA_FLUSH_INTERVAL_MS", "100")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let process = ProcessAgent(child);
+    timeout(WAIT, async {
+        loop {
+            if reqwest::get(format!("http://{addr}/v1/logs")).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("process did not listen");
+    process
+}
+#[tokio::test]
+async fn sigkill_after_202_restores_every_accepted_record_and_exact_pending_bytes() {
+    let mut relay = fake_relay(&vec![StatusCode::SERVICE_UNAVAILABLE; 1000]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = socket.local_addr().unwrap();
+    drop(socket);
+    let process = process_agent(dir.path(), &relay.url, addr).await;
+    let response = reqwest::Client::new()
+        .post(format!("http://{addr}/v1/logs"))
+        .header("content-type", "application/json")
+        .body(r#"["one",{"two":2},3]"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    timeout(WAIT, async {
+        while relay.requests.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let original = relay.bodies.lock().unwrap()[0].clone();
+    drop(process); // SIGKILL, никакого graceful shutdown
+    assert!(dir.path().join("pending/body").exists());
+    relay.failures.lock().unwrap().clear();
+    let _restarted = process_agent(dir.path(), &relay.url, addr).await;
+    let mut received = Vec::new();
+    for _ in 0..3 {
+        received.extend(payloads(next_batch(&mut relay).await));
+    }
+    assert_eq!(
+        received,
+        [
+            Payload::Json(r#""one""#.into()),
+            Payload::Json(r#"{"two":2}"#.into()),
+            Payload::Json("3".into())
+        ]
+    );
+    let bodies = relay.bodies.lock().unwrap();
+    assert!(bodies.iter().skip(1).any(|body| *body == original));
 }

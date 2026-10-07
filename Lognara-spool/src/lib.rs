@@ -1,5 +1,7 @@
 //! Атомарная файловая очередь. Синхронные операции выполняются в blocking-работнике.
 
+pub mod wire_budget;
+
 use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -45,6 +47,7 @@ pub struct Queue {
     events: u64,
     max_bytes: u64,
     max_events: u64,
+    max_entries: usize,
     next_seq: u64,
     // Каталог принадлежит одному процессу, в том числе во время восстановления.
     _lock: File,
@@ -52,6 +55,16 @@ pub struct Queue {
 
 impl Queue {
     pub fn open(dir: &Path, max_bytes: u64, max_events: u64) -> Result<Self, Error> {
+        Self::open_limited(dir, max_bytes, max_events, 100_000)
+    }
+
+    pub fn open_limited(
+        dir: &Path,
+        max_bytes: u64,
+        max_events: u64,
+        max_entries: usize,
+    ) -> Result<Self, Error> {
+        let max_entries = max_entries.min(100_000);
         fs::create_dir_all(dir)?;
         let dir = fs::canonicalize(dir)?;
         let lock = OpenOptions::new()
@@ -78,6 +91,9 @@ impl Queue {
                     path: PathBuf::from(item.file_name()),
                 });
             } else if path.extension().is_some_and(|ext| ext == "group") {
+                if path.file_stem().is_none_or(|name| name.len() > 20) {
+                    return Err(invalid("invalid spool group name").into());
+                }
                 let seq = path
                     .file_stem()
                     .and_then(|s| s.to_str())
@@ -95,12 +111,12 @@ impl Queue {
                         size: part.metadata()?.len(),
                         path: path.strip_prefix(&dir).unwrap().join(part.file_name()),
                     });
-                    if files.len() > max_events.min(100_000) as usize {
+                    if files.len() > max_entries {
                         return Err(Error::TooLarge);
                     }
                 }
             }
-            if files.len() > max_events.min(100_000) as usize {
+            if files.len() > max_entries {
                 return Err(Error::TooLarge);
             }
         }
@@ -135,6 +151,7 @@ impl Queue {
             events,
             max_bytes,
             max_events,
+            max_entries,
             next_seq,
             _lock: lock,
         };
@@ -155,7 +172,7 @@ impl Queue {
     pub fn available(&self) -> bool {
         self.bytes < self.max_bytes
             && self.events < self.max_events
-            && self.files.len() < self.max_events.min(100_000) as usize
+            && self.files.len() < self.max_entries
     }
 
     /// Все части публикуются одним rename; ошибка любой части отменяет всю группу.
@@ -186,7 +203,7 @@ impl Queue {
                 }
                 if bytes > self.max_bytes.saturating_sub(self.bytes)
                     || events > self.max_events.saturating_sub(self.events)
-                    || self.files.len() + entries.len() >= self.max_events.min(100_000) as usize
+                    || self.files.len() + entries.len() >= self.max_entries
                 {
                     return Err(Error::Full);
                 }
@@ -313,7 +330,7 @@ impl Queue {
             return Err(Error::TooLarge);
         }
         let id_size = fs::metadata(dir.join("entries"))?.len();
-        if id_size == 0 || id_size % 16 != 0 || id_size / 16 > self.max_events.min(100_000) {
+        if id_size == 0 || id_size % 16 != 0 || id_size / 16 > self.max_entries as u64 {
             return Err(Error::TooLarge);
         }
         let mut ids = File::open(dir.join("entries"))?;
@@ -383,7 +400,7 @@ fn atomic_file(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
     sync_dir(dir)
 }
 fn parse_part(path: &Path) -> Option<(u64, u64)> {
-    if path.extension()? != "batch" {
+    if path.file_name()?.len() > 64 || path.extension()? != "batch" {
         return None;
     }
     let (seq, events) = path.file_stem()?.to_str()?.split_once('-')?;
@@ -500,5 +517,113 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let _queue = Queue::open(dir.path(), 100, 100).unwrap();
         assert!(Queue::open(dir.path(), 100, 100).is_err());
+    }
+
+    #[test]
+    fn crash_worker() {
+        let Ok(dir) = std::env::var("LOGNARA_TEST_CRASH_DIR") else {
+            return;
+        };
+        let phase = std::env::var("LOGNARA_TEST_CRASH_PHASE").unwrap();
+        let dir = PathBuf::from(dir);
+        let mut queue = Queue::open(&dir, 100, 100).unwrap();
+        if phase == "before-publication" {
+            let mut first = true;
+            let _ = queue.append_group(std::iter::from_fn(|| {
+                if first {
+                    first = false;
+                    Some(Ok((b"unconfirmed".to_vec(), 1)))
+                } else {
+                    fs::write(dir.join("ready"), b"ready").unwrap();
+                    loop {
+                        std::thread::park();
+                    }
+                }
+            }));
+        } else {
+            queue
+                .append_group([Ok((b"durable-before-response".to_vec(), 1))])
+                .unwrap();
+            fs::write(dir.join("ready"), b"ready").unwrap();
+            loop {
+                std::thread::park();
+            }
+        }
+    }
+
+    #[test]
+    fn sigkill_before_publication_and_after_commit_recovers_atomic_groups() {
+        for phase in ["before-publication", "after-commit"] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "tests::crash_worker", "--nocapture"])
+                .env("LOGNARA_TEST_CRASH_DIR", dir.path())
+                .env("LOGNARA_TEST_CRASH_PHASE", phase)
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !dir.path().join("ready").exists() {
+                if std::time::Instant::now() > deadline {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!("crash worker not ready");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            child.kill().unwrap();
+            child.wait().unwrap();
+            let queue = Queue::open(dir.path(), 100, 100).unwrap();
+            if phase == "before-publication" {
+                assert!(queue.entries().is_empty());
+            } else {
+                assert_eq!(
+                    queue.read(&queue.entries()[0], 100).unwrap(),
+                    b"durable-before-response"
+                );
+            }
+        }
+    }
+    #[test]
+    fn write_and_ack_errors_keep_previously_accepted_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = Queue::open(dir.path(), 100, 100).unwrap();
+        queue
+            .append_group([Ok((b"confirmed".to_vec(), 1))])
+            .unwrap();
+        fs::create_dir(dir.path().join(".next.tmp")).unwrap();
+        assert!(matches!(
+            queue.append_group([Ok((b"new".to_vec(), 1))]),
+            Err(Error::Io(_))
+        ));
+        assert_eq!(queue.events(), 1);
+        let entry = queue.entries()[0].clone();
+        fs::rename(
+            queue.dir.join(&entry.path),
+            queue.dir.join(entry.path.with_extension("hidden")),
+        )
+        .unwrap();
+        assert!(matches!(queue.ack(&[entry]), Err(Error::Io(_))));
+        assert_eq!(queue.events(), 1);
+    }
+    #[test]
+    fn metadata_quota_is_enforced_without_losing_existing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = Queue::open_limited(dir.path(), 100, 100, 2).unwrap();
+        queue
+            .append_group([Ok((b"one".to_vec(), 1)), Ok((b"two".to_vec(), 1))])
+            .unwrap();
+        assert!(!queue.available());
+        assert!(matches!(
+            queue.append_group([Ok((b"three".to_vec(), 1))]),
+            Err(Error::Full)
+        ));
+        drop(queue);
+        assert_eq!(
+            Queue::open_limited(dir.path(), 100, 100, 2)
+                .unwrap()
+                .events(),
+            2
+        );
     }
 }

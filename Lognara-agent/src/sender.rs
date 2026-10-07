@@ -1,67 +1,45 @@
-//! Отправка накопленных записей в lognara-relay.
+//! Повторяет сохранённые байты до подтверждения relay; ничего не отбрасывает.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::header::{CONTENT_ENCODING, CONTENT_TYPE};
-use reqwest::{Client, StatusCode, Url};
+use reqwest::{Client, Url};
 use tokio::time::{self, Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
 
-use crate::buffer::Buffer;
+use crate::buffer::{Buffer, Pending};
 use crate::config::Config;
-use crate::wire::{self, Batch, Record};
-
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-const MIN_BACKOFF: Duration = Duration::from_millis(100);
-const MAX_BACKOFF: Duration = Duration::from_secs(10);
-/// Сколько после остановки ждать доставки остатка.
-const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct Sender {
     buffer: Arc<Buffer>,
-    relay: Relay,
-    /// Поля идентификации источника, общие для всех пачек.
-    template: Batch,
+    client: Client,
+    url: Url,
+    token: String,
     flush_interval: Duration,
     shutdown: CancellationToken,
-    /// Пачка, доставку которой прервала остановка агента.
-    pending: Option<Batch>,
+    pending: Option<Pending>,
 }
-
 impl Sender {
     pub fn new(config: &Config, buffer: Arc<Buffer>, shutdown: CancellationToken) -> Self {
-        let client = Client::builder()
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .expect("HTTP client without TLS always builds");
         Self {
             buffer,
-            relay: Relay {
-                client,
-                url: config.relay_url.clone(),
-                token: config.relay_token.clone(),
-            },
-            template: Batch {
-                service: config.service.clone(),
-                server: config.server.clone(),
-                backend: config.backend.clone(),
-                environment: config.environment.clone(),
-                service_instance: config.service_instance.clone(),
-                sent_at: 0,
-                dropped: 0,
-                records: Vec::new(),
-            },
+            client: Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .expect("HTTP client"),
+            url: config.relay_url.clone(),
+            token: config.relay_token.clone(),
             flush_interval: config.flush_interval,
             shutdown,
             pending: None,
         }
     }
-
-    /// Отправляет пачку, как только набран `batch_size`, и всё накопленное
-    /// раз в `flush_interval`. После остановки отправляет остаток и завершается.
     pub async fn run(mut self) {
+        if self.buffer.len() > 0 {
+            self.flush(true).await;
+        }
         let mut ticker =
             time::interval_at(Instant::now() + self.flush_interval, self.flush_interval);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -72,98 +50,70 @@ impl Sender {
                 _ = self.buffer.full() => self.flush(false).await,
             }
         }
-
-        if time::timeout(SHUTDOWN_TIMEOUT, self.flush(true))
-            .await
-            .is_err()
-        {
-            warn!("timed out delivering remaining records to relay");
-        }
-        let lost = self.buffer.len() + self.pending.as_ref().map_or(0, |batch| batch.records.len());
-        if lost > 0 {
-            warn!(lost, "records were not delivered to relay before shutdown");
+        self.shutdown = CancellationToken::new();
+        // Отмена HTTP/worker безопасна: исходные записи и pending уже на диске.
+        let _ = time::timeout(Duration::from_secs(5), self.flush(true)).await;
+        self.pending = None;
+        if self.buffer.len() > 0 {
+            warn!(
+                queued = self.buffer.len(),
+                "agent stopped with durable backlog"
+            );
         }
     }
-
-    /// Отправляет пачки по одной, пока они есть; при `partial = false` только полные.
     async fn flush(&mut self, partial: bool) {
+        let mut backoff = Duration::from_millis(100);
         loop {
             if self.pending.is_none() {
-                self.pending = self
-                    .buffer
-                    .take(partial)
-                    .map(|(records, dropped)| self.batch(records, dropped));
+                match self.buffer.prepare_async(partial).await {
+                    Ok(pending) => self.pending = pending,
+                    Err(e) => {
+                        self.buffer.set_ready(false);
+                        error!(error = %e, "agent spool read failed; data retained");
+                        return;
+                    }
+                }
             }
-            let Some(batch) = self.pending.as_mut() else {
+            let Some(pending) = &self.pending else {
                 return;
             };
-            if !self.relay.deliver(batch, &self.shutdown).await {
-                return;
-            }
-            self.pending = None;
-        }
-    }
-
-    fn batch(&self, records: Vec<Record>, dropped: u64) -> Batch {
-        if dropped > 0 {
-            warn!(dropped, "buffer overflowed, oldest records were dropped");
-        }
-        Batch {
-            records,
-            dropped,
-            ..self.template.clone()
-        }
-    }
-}
-
-struct Relay {
-    client: Client,
-    url: Url,
-    token: String,
-}
-
-impl Relay {
-    /// Доставляет пачку, повторяя попытки при недоступности relay.
-    /// Возвращает `false`, только если попытки прервала остановка агента.
-    async fn deliver(&self, batch: &mut Batch, shutdown: &CancellationToken) -> bool {
-        let mut backoff = MIN_BACKOFF;
-        loop {
-            batch.sent_at = wire::unix_nanos();
-            match self.post(wire::encode(batch)).await {
-                Ok(status) if status.is_success() => return true,
-                Ok(status) if is_permanent(status) => {
-                    // Повтор не поможет, а застрявшая пачка остановила бы всю отправку.
-                    error!(%status, records = batch.records.len(), "relay rejected batch, dropping it");
-                    return true;
+            let request = self
+                .client
+                .post(self.url.clone())
+                .bearer_auth(&self.token)
+                .header(CONTENT_TYPE, "application/msgpack")
+                .header(CONTENT_ENCODING, "zstd")
+                .body(pending.body.clone())
+                .send();
+            let response = tokio::select! {
+                result = request => result,
+                _ = self.shutdown.cancelled() => return,
+            };
+            match response {
+                Ok(response) if response.status().is_success() => {
+                    let pending = self.pending.take().unwrap();
+                    if let Err(e) = self.buffer.ack_async(pending).await {
+                        self.buffer.set_ready(false);
+                        error!(error = %e, "agent spool ACK failed; delivery paused");
+                        return;
+                    }
+                    self.buffer.set_ready(true);
+                    backoff = Duration::from_millis(100);
+                    continue;
                 }
-                Ok(status) => warn!(%status, "relay is unavailable"),
-                Err(err) => warn!(error = %err, "relay is unavailable"),
+                Ok(response) => {
+                    if response.status().is_client_error() {
+                        self.buffer.set_ready(false);
+                    }
+                    warn!(status = %response.status(), "relay rejected batch; exact bytes retained");
+                }
+                Err(e) => warn!(error = %e, "relay unavailable; exact bytes retained"),
             }
-
             tokio::select! {
-                _ = time::sleep(backoff) => {}
-                _ = shutdown.cancelled() => return false,
+                _ = time::sleep(backoff) => {},
+                _ = self.shutdown.cancelled() => return,
             }
-            backoff = (backoff * 2).min(MAX_BACKOFF);
+            backoff = (backoff * 2).min(Duration::from_secs(10));
         }
     }
-
-    async fn post(&self, body: Vec<u8>) -> reqwest::Result<StatusCode> {
-        let response = self
-            .client
-            .post(self.url.clone())
-            .bearer_auth(&self.token)
-            .header(CONTENT_TYPE, "application/msgpack")
-            .header(CONTENT_ENCODING, "zstd")
-            .body(body)
-            .send()
-            .await?;
-        Ok(response.status())
-    }
-}
-
-fn is_permanent(status: StatusCode) -> bool {
-    status.is_client_error()
-        && status != StatusCode::REQUEST_TIMEOUT
-        && status != StatusCode::TOO_MANY_REQUESTS
 }

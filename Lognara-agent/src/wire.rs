@@ -19,7 +19,7 @@ pub struct Batch {
     pub service_instance: Option<String>,
     /// Момент отправки пачки, Unix-время в наносекундах.
     pub sent_at: i64,
-    /// Сколько записей вытеснено из переполненного буфера с прошлой пачки.
+    /// Счётчик совместимости со старыми агентами; новые пачки содержат 0.
     pub dropped: u64,
     pub records: Vec<Record>,
 }

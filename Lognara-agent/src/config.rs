@@ -2,10 +2,14 @@
 
 use std::fmt;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
 use reqwest::Url;
+
+pub const INDEX_BYTES: usize = 8 << 20;
+pub const INDEX_ENTRIES: usize = INDEX_BYTES / 768;
 
 const DEFAULT_BATCH_SIZE: usize = 1000;
 const DEFAULT_FLUSH_INTERVAL_MS: u64 = 5000;
@@ -24,8 +28,13 @@ pub struct Config {
     pub batch_size: usize,
     /// Через сколько отправить накопленное, даже если пачка не набрана.
     pub flush_interval: Duration,
-    /// Сколько записей держать в памяти; при переполнении вытесняются самые старые.
+    /// Сколько подтверждённых записей держать в очереди; сверх лимита 503.
     pub max_buffer: usize,
+    pub max_buffer_bytes: usize,
+    pub max_batch_bytes: usize,
+    pub max_record_bytes: usize,
+    pub spool_dir: PathBuf,
+    pub spool_max_bytes: u64,
     pub listen_addr: SocketAddr,
     pub relay_url: Url,
     pub relay_token: String,
@@ -42,6 +51,11 @@ impl fmt::Debug for Config {
             .field("batch_size", &self.batch_size)
             .field("flush_interval", &self.flush_interval)
             .field("max_buffer", &self.max_buffer)
+            .field("max_buffer_bytes", &self.max_buffer_bytes)
+            .field("max_batch_bytes", &self.max_batch_bytes)
+            .field("max_record_bytes", &self.max_record_bytes)
+            .field("spool_dir", &self.spool_dir)
+            .field("spool_max_bytes", &self.spool_max_bytes)
             .field("listen_addr", &self.listen_addr)
             .field("relay_url", &self.relay_url)
             .field("relay_token", &"[redacted]")
@@ -105,7 +119,7 @@ impl Config {
         let flush_interval_ms =
             positive(&get, "LOGNARA_FLUSH_INTERVAL_MS", DEFAULT_FLUSH_INTERVAL_MS)?;
 
-        Ok(Self {
+        let config = Self {
             service: required("LOGNARA_SERVICE")?,
             server: required("LOGNARA_SERVER")?,
             backend: required("LOGNARA_BACKEND")?,
@@ -114,6 +128,19 @@ impl Config {
             batch_size,
             flush_interval: Duration::from_millis(flush_interval_ms),
             max_buffer,
+            max_buffer_bytes: positive(&get, "LOGNARA_MAX_BUFFER_BYTES", 64usize << 20)?,
+            max_batch_bytes: positive(&get, "LOGNARA_MAX_BATCH_BYTES", 8usize << 20)?,
+            max_record_bytes: positive(&get, "LOGNARA_MAX_RECORD_BYTES", 2usize << 20)?,
+            spool_dir: get("LOGNARA_SPOOL_DIR")
+                .unwrap_or_else(|| "/var/lib/lognara-agent/spool".into())
+                .into(),
+            spool_max_bytes: positive(&get, "LOGNARA_SPOOL_MAX_MB", 1024u64)?
+                .checked_mul(1 << 20)
+                .ok_or(ConfigError::Invalid {
+                    var: "LOGNARA_SPOOL_MAX_MB",
+                    value: "[overflow]".into(),
+                    expected: "a byte quota without overflow",
+                })?,
             listen_addr: parse(
                 &get,
                 "LOGNARA_LISTEN_ADDR",
@@ -122,7 +149,70 @@ impl Config {
             )?,
             relay_url: parse(&get, "LOGNARA_RELAY_URL", DEFAULT_RELAY_URL, "a URL")?,
             relay_token,
-        })
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        if self.flush_interval.is_zero()
+            || self.batch_size == 0
+            || self.max_buffer < self.batch_size
+            || self.spool_max_bytes == 0
+            || self.max_record_bytes == 0
+            || self.max_record_bytes > 2 << 20
+            || self.max_batch_bytes == 0
+            || self.max_batch_bytes > 8 << 20
+            || self.max_record_bytes >= self.max_batch_bytes
+            || self.max_buffer_bytes > u32::MAX as usize
+            || self.pipeline_bytes()
+                < self
+                    .max_batch_bytes
+                    .saturating_mul(2)
+                    .saturating_add(4 << 20)
+                    .saturating_add(8192)
+        {
+            return Err(ConfigError::Invalid {
+                var: "LOGNARA_MAX_BUFFER_BYTES",
+                value: self.max_buffer_bytes.to_string(),
+                expected: "positive limits: record <= 2 MiB, record < batch <= 8 MiB, memory covering two pipelines, and max buffer >= batch size",
+            });
+        }
+        let metadata = self.metadata_bytes();
+        if metadata
+            .saturating_add(self.max_record_bytes)
+            .saturating_add(128 << 10)
+            > self.max_batch_bytes
+            || metadata > self.max_buffer_bytes / 16
+        {
+            return Err(ConfigError::Invalid {
+                var: "LOGNARA_MAX_BATCH_BYTES",
+                value: self.max_batch_bytes.to_string(),
+                expected: "room for maximum record and source metadata",
+            });
+        }
+        Ok(())
+    }
+
+    pub fn metadata_bytes(&self) -> usize {
+        self.service
+            .capacity()
+            .saturating_add(self.server.capacity())
+            .saturating_add(self.backend.capacity())
+            .saturating_add(self.environment.as_ref().map_or(0, String::capacity))
+            .saturating_add(self.service_instance.as_ref().map_or(0, String::capacity))
+            .saturating_add(1024)
+    }
+    pub fn pipeline_bytes(&self) -> usize {
+        self.max_buffer_bytes
+            .saturating_sub(INDEX_BYTES)
+            .saturating_sub(self.metadata_bytes().saturating_mul(4))
+            / 2
+    }
+    pub fn input_record_limit(&self) -> usize {
+        self.pipeline_bytes()
+            .saturating_sub((4 << 20) + 2 * self.max_batch_bytes + 2 * self.metadata_bytes())
+            / 1024
     }
 }
 
@@ -358,5 +448,24 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(config.service_instance.as_deref(), Some("api-2"));
+    }
+    #[test]
+    fn validates_resource_partitions_and_checked_disk_quota() {
+        for (var, value) in [
+            ("LOGNARA_MAX_RECORD_BYTES", "2097153"),
+            ("LOGNARA_MAX_BATCH_BYTES", "8388609"),
+            ("LOGNARA_MAX_BUFFER_BYTES", "1048576"),
+            ("LOGNARA_SPOOL_MAX_MB", "18446744073709551615"),
+        ] {
+            assert!(with_required(&[(var, value)]).is_err(), "{var}");
+        }
+        let c = with_required(&[]).unwrap();
+        assert_eq!(c.max_buffer_bytes, 64 << 20);
+        assert_eq!(c.max_batch_bytes, 8 << 20);
+        assert_eq!(c.max_record_bytes, 2 << 20);
+        assert_eq!(c.spool_max_bytes, 1 << 30);
+        assert!(
+            2 * c.pipeline_bytes() + INDEX_BYTES + 4 * c.metadata_bytes() <= c.max_buffer_bytes
+        );
     }
 }
