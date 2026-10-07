@@ -88,16 +88,19 @@ async fn ingest(
                 IngestError::InvalidBody
             }
         })?;
-    crate::memory::run_blocking(permit, move || accept(&state.buffer, &body))
-        .await
-        .map_err(|error| {
-            tracing::error!(%error, "ingest worker failed");
-            IngestError::Unavailable
-        })?
+    crate::memory::run_blocking(permit, move || {
+        accept(&state.buffer, &body, state.resources.model_limit)
+    })
+    .await
+    .map_err(|error| {
+        tracing::error!(%error, "ingest worker failed");
+        IngestError::Unavailable
+    })?
 }
 
-fn accept(buffer: &Buffer, body: &[u8]) -> Result<StatusCode, IngestError> {
-    let batch = agent_wire::decode(body, MAX_DECODED as u64)?;
+fn accept(buffer: &Buffer, body: &[u8], model_limit: usize) -> Result<StatusCode, IngestError> {
+    let mut budget = crate::model_budget::ModelBudget::new(model_limit);
+    let batch = agent_wire::decode_with_budget(body, MAX_DECODED, &mut budget)?;
     let source = Source {
         environment: batch.environment,
         server: batch.server,
@@ -105,7 +108,21 @@ fn accept(buffer: &Buffer, body: &[u8]) -> Result<StatusCode, IngestError> {
         service: batch.service,
         service_instance: batch.service_instance,
     };
-    let events = batch.records.into_iter().map(normalize::event).collect();
+    budget
+        .charge(
+            batch
+                .records
+                .len()
+                .checked_mul(std::mem::size_of::<crate::core_wire::Event>())
+                .ok_or(IngestError::TooLarge)?,
+        )
+        .map_err(|_| IngestError::TooLarge)?;
+    let mut events = Vec::with_capacity(batch.records.len());
+    for record in batch.records {
+        events.push(
+            normalize::event_with_budget(record, &mut budget).map_err(|_| IngestError::TooLarge)?,
+        );
+    }
     buffer
         .push(source, batch.dropped, events)
         .map_err(|_| IngestError::BufferFull)?;
@@ -177,13 +194,56 @@ mod tests {
     use super::*;
 
     fn resources() -> Arc<Resources> {
+        resources_with_model(crate::memory::DEFAULT_MODEL)
+    }
+
+    fn resources_with_model(model: usize) -> Arc<Resources> {
         let config = crate::config::Config::from_lookup(|name| match name {
             "LOGNARA_CORE_URL" => Some("http://localhost/v1/batches".into()),
             "LOGNARA_CORE_TOKEN" | "LOGNARA_RELAY_TOKEN" => Some("secret".into()),
+            "LOGNARA_RELAY_MAX_MODEL_BYTES" => Some(model.to_string()),
             _ => None,
         })
         .unwrap();
         Resources::new(&config)
+    }
+
+    #[tokio::test]
+    async fn rejects_model_amplification_atomically_and_releases_admission() {
+        let resources = resources_with_model(32 << 10);
+        let buffer = Arc::new(Buffer::new(100, 100));
+        let app = router(buffer.clone(), "relay-secret", resources.clone());
+        let mut batch =
+            agent_wire::decode(include_bytes!("../tests/fixtures/agent-batch.bin"), 1024).unwrap();
+        batch.records = vec![
+            agent_wire::Record {
+                received_at: 1,
+                payload: agent_wire::Payload::Text("first".into()),
+            },
+            agent_wire::Record {
+                received_at: 2,
+                payload: agent_wire::Payload::Json(format!(
+                    "{{\"a\":[{}null]}}",
+                    "null,".repeat(1000)
+                )),
+            },
+        ];
+        let packed = rmp_serde::to_vec_named(&batch).unwrap();
+        let body = zstd::encode_all(&packed[..], 3).unwrap();
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/batches")
+            .header(AUTHORIZATION, "Bearer relay-secret")
+            .header(CONTENT_TYPE, "application/msgpack")
+            .header(CONTENT_ENCODING, "zstd")
+            .body(Body::from(body))
+            .unwrap();
+        assert_eq!(
+            app.oneshot(request).await.unwrap().status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert!(buffer.take(true).is_none());
+        assert_eq!(resources.slots.available_permits(), 1);
     }
 
     #[tokio::test]

@@ -18,6 +18,7 @@ Lognara-relay/
 │   ├── normalize.rs        разбор Record в Event
 │   ├── ingest.rs           Bearer-аутентификация до чтения тела, POST /v1/batches
 │   ├── memory.rs           резервы, admission и ожидание blocking-работников
+│   ├── model_budget.rs     общий бюджет Batch и нормализации JSON/base64
 │   ├── buffer.rs           группы событий в памяти
 │   ├── spool.rs            дисковая очередь пачек
 │   └── sender.rs           отправка в core, работа со spool, остановка

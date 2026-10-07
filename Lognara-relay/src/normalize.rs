@@ -11,6 +11,35 @@ use uuid::Uuid;
 
 use crate::agent_wire::{Payload, Record};
 use crate::core_wire::{Event, LogId, LogLevel, SpanId, TraceId};
+use crate::model_budget::{ModelBudget, TooLarge};
+
+/// Проверяет временные объекты и расширение payload до создания Event/Value.
+pub fn event_with_budget(record: Record, budget: &mut ModelBudget) -> Result<Event, TooLarge> {
+    budget.charge(4 * std::mem::size_of::<Event>())?;
+    let payload = match record.payload {
+        Payload::Text(text) => Payload::Text(text),
+        Payload::Binary(bytes) => {
+            let encoded = bytes
+                .len()
+                .checked_add(2)
+                .and_then(|n| (n / 3).checked_mul(4))
+                .ok_or(TooLarge)?;
+            budget.charge(encoded.checked_add(4096).ok_or(TooLarge)?)?;
+            Payload::Binary(bytes)
+        }
+        Payload::Json(json) => {
+            if crate::model_budget::validate_json(&json, budget)? {
+                Payload::Json(json)
+            } else {
+                Payload::Text(json)
+            }
+        }
+    };
+    Ok(event(Record {
+        received_at: record.received_at,
+        payload,
+    }))
+}
 
 /// Превращает запись агента в событие. Всё, что не легло в поля `Event`,
 /// остаётся в `attributes`, поэтому данные записи не теряются.
@@ -145,6 +174,51 @@ mod tests {
 
     fn attributes(value: Value) -> HashMap<String, Value> {
         serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn rejects_json_amplification_and_base64_before_materialization() {
+        let json = format!("{{\"items\":[{}null]}}", "null,".repeat(1000));
+        let record = Record {
+            received_at: 1,
+            payload: Payload::Json(json),
+        };
+        assert_eq!(
+            event_with_budget(record, &mut ModelBudget::new(32 << 10)),
+            Err(TooLarge)
+        );
+        let binary = Record {
+            received_at: 1,
+            payload: Payload::Binary(vec![0; 1024]),
+        };
+        assert_eq!(
+            event_with_budget(binary, &mut ModelBudget::new(2048)),
+            Err(TooLarge)
+        );
+    }
+
+    #[test]
+    fn budgets_are_cumulative_and_invalid_json_keeps_original_text() {
+        let make = || Record {
+            received_at: 1,
+            payload: Payload::Json(r#"{"message":"ok"}"#.into()),
+        };
+        let mut budget = ModelBudget::new(10_000);
+        assert_eq!(
+            event_with_budget(make(), &mut budget).unwrap().message,
+            "ok"
+        );
+        assert_eq!(event_with_budget(make(), &mut budget), Err(TooLarge));
+        let invalid = Record {
+            received_at: 1,
+            payload: Payload::Json("[1,".into()),
+        };
+        assert_eq!(
+            event_with_budget(invalid, &mut ModelBudget::new(10_000))
+                .unwrap()
+                .message,
+            "[1,"
+        );
     }
 
     #[test]

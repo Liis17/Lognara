@@ -4,6 +4,7 @@
 pub mod agent_wire;
 pub mod config;
 pub mod core_wire;
+pub mod model_budget;
 pub mod normalize;
 pub mod spool;
 

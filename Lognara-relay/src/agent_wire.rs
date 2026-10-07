@@ -6,6 +6,7 @@
 
 use std::io::Read;
 
+use crate::model_budget::ModelBudget;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -48,16 +49,50 @@ pub enum DecodeError {
 
 /// Распаковывает zstd не больше чем в `limit` байт и разбирает пачку из MessagePack.
 pub fn decode(body: &[u8], limit: u64) -> Result<Batch, DecodeError> {
-    let decoder = zstd::stream::read::Decoder::new(body).map_err(|_| DecodeError::Invalid)?;
-    let mut packed = Vec::new();
+    let limit = usize::try_from(limit).map_err(|_| DecodeError::TooLarge)?;
+    decode_with_budget(
+        body,
+        limit,
+        &mut ModelBudget::new(crate::wire_budget::DEFAULT_MODEL_BYTES),
+    )
+}
+
+pub fn decode_with_budget(
+    body: &[u8],
+    limit: usize,
+    budget: &mut ModelBudget,
+) -> Result<Batch, DecodeError> {
+    let mut decoder = zstd::stream::read::Decoder::new(body).map_err(|_| DecodeError::Invalid)?;
     decoder
-        .take(limit + 1)
-        .read_to_end(&mut packed)
+        .window_log_max(25)
         .map_err(|_| DecodeError::Invalid)?;
-    if packed.len() as u64 > limit {
+    let capacity = limit.checked_add(1).ok_or(DecodeError::TooLarge)?;
+    let mut packed = vec![0; capacity];
+    let mut length = 0;
+    while length < capacity {
+        let read = decoder
+            .read(&mut packed[length..])
+            .map_err(|_| DecodeError::Invalid)?;
+        if read == 0 {
+            break;
+        }
+        length += read;
+    }
+    if length > limit {
         return Err(DecodeError::TooLarge);
     }
-    rmp_serde::from_slice(&packed).map_err(|_| DecodeError::Invalid)
+    packed.truncate(length);
+    let estimated =
+        crate::wire_budget::estimate(&packed, budget.remaining()).map_err(|error| match error {
+            crate::wire_budget::BudgetError::TooLarge => DecodeError::TooLarge,
+            crate::wire_budget::BudgetError::Invalid => DecodeError::Invalid,
+        })?;
+    budget
+        .charge(estimated)
+        .map_err(|_| DecodeError::TooLarge)?;
+    let mut decoder = rmp_serde::Deserializer::from_read_ref(&packed);
+    decoder.set_max_depth(64);
+    Batch::deserialize(&mut decoder).map_err(|_| DecodeError::Invalid)
 }
 
 #[cfg(test)]
@@ -66,6 +101,25 @@ mod tests {
 
     /// Пачка, закодированная `wire::encode` из lognara-agent.
     const AGENT_BATCH: &[u8] = include_bytes!("../tests/fixtures/agent-batch.bin");
+
+    #[test]
+    fn enforces_decoded_boundary_model_budget_and_window_before_serde() {
+        let length = zstd::decode_all(AGENT_BATCH).unwrap().len();
+        assert!(decode(AGENT_BATCH, length as u64).is_ok());
+        assert_eq!(
+            decode(AGENT_BATCH, length as u64 - 1),
+            Err(DecodeError::TooLarge)
+        );
+        assert_eq!(
+            decode_with_budget(AGENT_BATCH, 1024, &mut ModelBudget::new(128)),
+            Err(DecodeError::TooLarge)
+        );
+        // Пустой zstd frame с окном 128 MiB (window descriptor 0x88).
+        let excessive_window = [0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x88, 0x01, 0x00, 0x00];
+        assert_eq!(decode(&excessive_window, 1024), Err(DecodeError::Invalid));
+        let forged = zstd::encode_all(&[0xdd, 0xff, 0xff, 0xff, 0xff][..], 3).unwrap();
+        assert_eq!(decode(&forged, 1024), Err(DecodeError::Invalid));
+    }
 
     #[test]
     fn decodes_batch_encoded_by_agent() {

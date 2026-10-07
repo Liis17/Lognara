@@ -122,6 +122,8 @@ struct LogId(Uuid); struct TraceId([u8; 16]); struct SpanId([u8; 8]);  // bin 16
 | `Config::fmt(f: &mut fmt::Formatter<'_>): fmt::Result` | Форматирует `Debug` конфигурации со скрытыми ключами relay и core. |
 | `agent_wire::decode(body: &[u8], limit: u64): Result<Batch, DecodeError>` | Распаковывает zstd не больше `limit` байт и разбирает пачку агента. |
 | `normalize::event(record: Record): Event` | Превращает запись агента в событие по правилам разбора. |
+| `agent_wire::decode_with_budget(body: &[u8], limit: usize, budget: &mut ModelBudget): Result<Batch, DecodeError>` | Проверяет распаковку и модель до serde. |
+| `normalize::event_with_budget(record: Record, budget: &mut ModelBudget): Result<Event, TooLarge>` | Проверяет JSON/base64 и возвращает ресурсную ошибку. |
 | `core_wire::encode(batch: &CoreBatch): Vec<u8>` | MessagePack + zstd. |
 | `core_wire::encode_split(batch: CoreBatch, body_limit: usize, decoded_limit: usize, model_limit: usize): (Vec<EncodedBatch>, u64)` | Делит по байтовым лимитам и бюджету модели, возвращает готовые тела и число неотправляемых событий. |
 | ~~`ingest::router(buffer: Arc<Buffer>): Router`~~ (удалён: 2026-10-07) | Заменён вариантом с обязательным ключом. |

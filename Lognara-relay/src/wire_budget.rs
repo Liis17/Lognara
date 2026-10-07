@@ -11,6 +11,10 @@ pub enum BudgetError {
 /// На каждый MessagePack-узел резервируется 128 байт плюс длина string/bin.
 /// Запас покрывает Value, Vec capacity, ключи HashMap/BTreeMap и структуры wire.
 pub fn validate(bytes: &[u8], budget: usize) -> Result<(), BudgetError> {
+    estimate(bytes, budget).map(|_| ())
+}
+
+pub fn estimate(bytes: &[u8], budget: usize) -> Result<usize, BudgetError> {
     let mut scan = Scan {
         bytes,
         position: 0,
@@ -20,7 +24,7 @@ pub fn validate(bytes: &[u8], budget: usize) -> Result<(), BudgetError> {
     if scan.position != bytes.len() {
         return Err(BudgetError::Invalid);
     }
-    Ok(())
+    Ok(budget - scan.remaining)
 }
 
 struct Scan<'a> {
