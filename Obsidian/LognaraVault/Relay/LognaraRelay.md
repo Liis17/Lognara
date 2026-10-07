@@ -6,7 +6,7 @@ Parent: [[Index]]
 
 Rust-процесс, один на машину. Принимает пачки от [[Agent/LognaraAgent]] всех микросервисов, разбирает сырые записи в события, группирует их по источнику и сжатыми пачками отправляет в lognara-core раз в интервал. Пока core недоступен, пачки ждут на диске (spool) и потом уходят от старых к новым. Метрики пока не поддерживаются.
 
-Поток: агент → `POST /v1/batches` → разбор в `Event` → группы в памяти → пачка MessagePack + zstd → `POST` в core (при неудаче в spool).
+Поток: агент → `POST /v1/batches` → проверка общего Bearer-токена до чтения тела → разбор в `Event` → группы в памяти → пачка MessagePack + zstd → `POST` в core (при неудаче в spool).
 
 Файлы, модули и связи между ними описаны в [[Relay/LognaraRelay-ProjectMap]].
 
@@ -14,14 +14,17 @@ Rust-процесс, один на машину. Принимает пачки �
 
 Правила как у агента: переменные в верхнем регистре, пустое значение считается незаданным, при ошибке relay завершается с кодом 1 и называет переменную.
 
+`LOGNARA_RELAY_TOKEN` должен содержать только печатные ASCII-символы без пробелов и управляющих символов. Он скрыт в ошибках валидации; `Debug` конфигурации скрывает ключи relay и core.
+
 | Переменная | Обяз. | По умолчанию | Назначение |
 |---|---|---|---|
 | `LOGNARA_CORE_URL` | да | - | адрес core, схема `http` или `https` |
 | `LOGNARA_CORE_TOKEN` | да | - | Bearer-токен для core |
+| `LOGNARA_RELAY_TOKEN` | да | - | общий Bearer-токен агентов |
 | `LOGNARA_FLUSH_INTERVAL_MS` | нет | `60000` | интервал отправки в core |
 | `LOGNARA_BATCH_SIZE` | нет | `10000` | при таком числе событий пачка уходит раньше интервала |
 | `LOGNARA_MAX_BUFFER` | нет | `100000` | лимит событий в памяти, не меньше `BATCH_SIZE`; сверх него агенты получают `503` |
-| `LOGNARA_LISTEN_ADDR` | нет | `0.0.0.0:7401` | адрес приёма от агентов |
+| `LOGNARA_LISTEN_ADDR` | нет | `127.0.0.1:7401` | адрес приёма от агентов; для Docker явно `0.0.0.0:7401` |
 | `LOGNARA_SPOOL_DIR` | нет | `/var/lib/lognara-relay/spool` | каталог spool на volume |
 | `LOGNARA_SPOOL_MAX_MB` | нет | `1024` | лимит spool на диске |
 | `LOGNARA_CORE_MAX_BODY_BYTES` | нет | `67108864` | максимум сжатой исходящей пачки, не больше лимита core |
@@ -36,21 +39,29 @@ services:
     image: lognara-relay
     environment:
       LOGNARA_CORE_URL: https://core.example.com/v1/batches
-      LOGNARA_CORE_TOKEN: ${LOGNARA_CORE_TOKEN}
+      LOGNARA_CORE_TOKEN: ${LOGNARA_CORE_TOKEN:?Задайте LOGNARA_CORE_TOKEN}
+      LOGNARA_RELAY_TOKEN: ${LOGNARA_RELAY_TOKEN:?Задайте LOGNARA_RELAY_TOKEN}
+      LOGNARA_LISTEN_ADDR: "0.0.0.0:7401"
       LOGNARA_FLUSH_INTERVAL_MS: "60000"
     volumes:
       - lognara-spool:/var/lib/lognara-relay/spool
+    networks: [lognara-ingest]
+networks:
+  lognara-ingest:
+    driver: bridge
 volumes:
   lognara-spool:
 ```
 
-Агенты по умолчанию шлют на `http://lognara-relay:7401/v1/batches`, то есть на сервис с этим именем в той же сети.
+Агенты по умолчанию шлют на `http://lognara-relay:7401/v1/batches`, то есть на сервис с этим именем в той же сети. Все агенты получают тот же `LOGNARA_RELAY_TOKEN` через `environment`. Порт `7401` на хост не публикуется, `network_mode: host` не используется. `.env.example` находится в корне репозитория, а фрагмент для контейнера приложения с агентом показан в корневом README. После смены ключа пересоздаются relay и все агенты.
 
 ## Приём: `POST /v1/batches`
 
-Нужны `Content-Type: application/msgpack` и `Content-Encoding: zstd`; тело — `Batch` агента (см. «Контракт с relay» в [[Agent/LognaraAgent]]). Relay держит копию этих типов, совместимость проверяет фикстура `tests/fixtures/agent-batch.bin`, закодированная кодом агента.
+Нужен единственный `Authorization: Bearer {LOGNARA_RELAY_TOKEN}`. Middleware проверяет SHA-256 ключа сравнением через `subtle` до чтения тела и распаковки; схема Bearer без учёта регистра. Затем проверяются `Content-Type: application/msgpack` и `Content-Encoding: zstd`; тело — `Batch` агента (см. «Контракт с relay» в [[Agent/LognaraAgent]]). Relay держит копию этих типов, совместимость проверяет фикстура `tests/fixtures/agent-batch.bin`, закодированная кодом агента.
 
-Ответы: `202` пачка принята, `415` другие заголовки, `413` сжатое тело больше 64 MiB или распакованное больше 256 MiB, `400` тело не zstd с MessagePack, `503` буфер заполнен до `MAX_BUFFER` (агент повторит и продержит записи у себя). Пачку больше лимита relay принимает только в пустой буфер.
+Ответы: `401` отсутствующий/неверный ключ либо некорректная/дублированная авторизация (с `WWW-Authenticate: Bearer`), `202` пачка принята, `415` другие заголовки типа/кодирования, `413` сжатое тело больше 64 MiB или распакованное больше 256 MiB, `400` тело не zstd с MessagePack, `503` буфер заполнен до `MAX_BUFFER` (агент повторит и продержит записи у себя). Пачку больше лимита relay принимает только в пустой буфер. Отказ в авторизации не меняет буфер, dropped и spool.
+
+Все владельцы общего ключа считаются доверенными. Поля `service/server/backend` принимаются от них без проверки принадлежности, поэтому новый контейнер с агентом не требует регистрации в relay.
 
 ## Разбор записей в события
 
@@ -101,12 +112,16 @@ struct LogId(Uuid); struct TraceId([u8; 16]); struct SpanId([u8; 8]);  // bin 16
 |---|---|
 | `run(config: Config, listener: TcpListener, spool: Spool, shutdown: CancellationToken): io::Result<()>` | Запускает приём и отправку; после `shutdown` доставляет или сохраняет в spool накопленное. |
 | `Config::from_env(): Result<Config, ConfigError>` | Читает параметры `LOGNARA_*` из окружения. |
-| `Config::from_lookup(lookup: impl Fn(&str) -> Option<String>): Result<Config, ConfigError>` | Собирает конфиг из произвольного источника, нужен для тестов. |
+| `Config::from_lookup(lookup: impl Fn(&str) -> Option<String>): Result<Config, ConfigError>` | Собирает конфиг из произвольного источника и проверяет обязательный ключ агентов. |
+| `Config::fmt(f: &mut fmt::Formatter<'_>): fmt::Result` | Форматирует `Debug` конфигурации со скрытыми ключами relay и core. |
 | `agent_wire::decode(body: &[u8], limit: u64): Result<Batch, DecodeError>` | Распаковывает zstd не больше `limit` байт и разбирает пачку агента. |
 | `normalize::event(record: Record): Event` | Превращает запись агента в событие по правилам разбора. |
 | `core_wire::encode(batch: &CoreBatch): Vec<u8>` | MessagePack + zstd. |
 | `core_wire::encode_split(batch: CoreBatch, body_limit: usize, decoded_limit: usize, model_limit: usize): (Vec<EncodedBatch>, u64)` | Делит по байтовым лимитам и бюджету модели, возвращает готовые тела и число неотправляемых событий. |
-| `ingest::router(buffer: Arc<Buffer>): Router` | Роутер с `POST /v1/batches`. |
+| ~~`ingest::router(buffer: Arc<Buffer>): Router`~~ (удалён: 2026-10-07) | Заменён вариантом с обязательным ключом. |
+| `ingest::router(buffer: Arc<Buffer>, token: &str): Router` | Роутер с защищённым `POST /v1/batches`. |
+| `ingest::token_hash(token: &str): [u8; 32]` | Вычисляет SHA-256 для сравнения ключей. |
+| `ingest::authorize(State(expected): State<[u8; 32]>, request: Request, next: Next): Response` | Отклоняет неверную авторизацию до чтения тела запроса. |
 | `Buffer::push(source: Source, dropped: u64, events: Vec<Event>): Result<(), Full>` | Добавляет события в группу источника; `Full`, если не помещаются в лимит. |
 | `Buffer::take(partial: bool): Option<(Vec<Group>, usize)>` | Забирает все группы и число событий; без `partial` только набранную пачку. |
 | `Buffer::full()` | Ждёт, пока наберётся `batch_size` событий. |
@@ -124,6 +139,6 @@ struct LogId(Uuid); struct TraceId([u8; 16]); struct SpanId([u8; 8]);  // bin 16
 
 ## Зависимости
 
-- Использует: `tokio`, `tokio-util`, `axum`, `reqwest` (rustls), `serde`, `serde_json`, `rmp-serde`, `serde_bytes`, `zstd`, `uuid` (v7), `time`, `base64`, `bytes`, `tracing`, `tracing-subscriber`; в тестах `tempfile`.
+- Использует: `tokio`, `tokio-util`, `axum`, `reqwest` (rustls), `serde`, `serde_json`, `rmp-serde`, `serde_bytes`, `zstd`, `uuid` (v7), `time`, `base64`, `bytes`, `sha2`, `subtle`, `tracing`, `tracing-subscriber`; в тестах `tempfile`, `http-body`, `tower` (`util`).
 - Принимает пачки от: [[Agent/LognaraAgent]].
 - Используется в: [[Architecture]].

@@ -2,6 +2,7 @@
 //!
 //! Тело запроса: `Batch` в MessagePack (поля по именам), сжатый zstd.
 //! Заголовки: `Content-Type: application/msgpack`, `Content-Encoding: zstd`.
+//! Авторизация: `Authorization: Bearer <LOGNARA_RELAY_TOKEN>`.
 
 use std::io::Read;
 

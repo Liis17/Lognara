@@ -7,7 +7,7 @@ Parent: [[Index]]
 | Область | Текущее состояние |
 |---------|-------------------|
 | Язык и runtime | Rust (edition 2024) и tokio подтверждены для `Lognara-agent/` и `Lognara-relay/`. Core также использует Rust 2024 и tokio; MSRV 1.94. |
-| Зависимости | `Lognara-agent/Cargo.toml`: axum, reqwest, tokio, tokio-util, serde, serde_json, rmp-serde, serde_bytes, zstd, tracing. Подробности в [[Agent/LognaraAgent]]. `Lognara-relay/Cargo.toml`: те же, reqwest с rustls, а также uuid, time, base64, bytes. Подробности в [[Relay/LognaraRelay]]. |
+| Зависимости | `Lognara-agent/Cargo.toml`: axum, reqwest, tokio, tokio-util, serde, serde_json, rmp-serde, serde_bytes, zstd, tracing. Подробности в [[Agent/LognaraAgent]]. `Lognara-relay/Cargo.toml`: те же, reqwest с rustls, а также uuid, time, base64, bytes, sha2 и subtle для аутентификации агентов. Подробности в [[Relay/LognaraRelay]]. |
 | Лицензия | MIT, см. `LICENSE`. |
 
 ## Компоненты и сервисы
@@ -28,7 +28,8 @@ Parent: [[Index]]
 | `Lognara-relay/src/main.rs` | Точка входа relay. Параметры задаются переменными `LOGNARA_*`, spool хранится в `LOGNARA_SPOOL_DIR`. |
 | `Lognara-core/src/main.rs` | Точка входа core; отдельный crate, конфигурация `LOGNARA_*`. |
 | `README.md` | Обзор проекта: схема потока, быстрый старт, порты и параметры, API core, статус. |
-| `.gitignore` | Исключает сборки Cargo (`target`) и артефакты агента в корневом `/build/`, резервные файлы rustfmt, PDB, Cargo Mutants, `default.profraw`, `.DS_Store`. |
+| `.gitignore` | Исключает сборки Cargo (`target`) и артефакты агента в корневом `/build/`, резервные файлы rustfmt, PDB, Cargo Mutants, `default.profraw`, `.DS_Store`, локальный `.env` с ключом. |
+| `.env.example` | Пустой обязательный `LOGNARA_RELAY_TOKEN` и инструкция генерации ключа для Compose. |
 | `LICENSE` | Текст лицензии MIT. |
 
 Каждый сервис собирается отдельным crate, общего Cargo workspace нет.
@@ -37,8 +38,8 @@ Parent: [[Index]]
 
 1. Приложение (или библиотека lognara) отправляет лог на `POST http://127.0.0.1:7400/v1/logs` агента в своём контейнере: text, JSON или бинарные данные.
 2. Агент добавляет время приёма, держит записи в памяти и отправляет пачку, как только набрано `LOGNARA_BATCH_SIZE` записей или прошёл `LOGNARA_FLUSH_INTERVAL_MS`.
-3. Пачка (MessagePack + zstd, идентификация источника: service, server, backend, environment, service_instance) уходит в lognara-relay на той же машине.
-4. Relay разбирает записи в события, группирует их по источнику и раз в `LOGNARA_FLUSH_INTERVAL_MS` (или сразу по `LOGNARA_BATCH_SIZE` событий) отправляет пачки MessagePack + zstd в lognara-core с Bearer-токеном. Перед первой отправкой делит по согласованным байтовым лимитам core; повторяет исходные байты.
+3. Пачка (MessagePack + zstd, идентификация источника: service, server, backend, environment, service_instance) уходит в lognara-relay на той же машине с `Authorization: Bearer {LOGNARA_RELAY_TOKEN}` при каждой попытке.
+4. Relay проверяет общий ключ до чтения тела и распаковки, затем разбирает записи в события, группирует их по источнику и раз в `LOGNARA_FLUSH_INTERVAL_MS` (или сразу по `LOGNARA_BATCH_SIZE` событий) отправляет пачки MessagePack + zstd в lognara-core с Bearer-токеном core. Перед первой отправкой делит по согласованным байтовым лимитам core; повторяет исходные байты.
 5. Пока core недоступен, пачки relay ждут в spool на volume и затем уходят от старых к новым. Core подтверждает пачку после fsync WAL, затем публикует поиск и аналитику по открытым и закрытым сегментам.
 
 Формат пачки агента описан в разделе «Контракт с relay» заметки [[Agent/LognaraAgent]], формат пачки для core — в разделе «Контракт с core» заметки [[Relay/LognaraRelay]].
@@ -48,6 +49,9 @@ Parent: [[Index]]
 - Модули агента и relay разделены по стадиям конвейера: config, ingest, buffer, wire, sender; у relay добавлены normalize и spool.
 - Сервисы не делят код: relay держит копию контракта агента, совместимость проверяет фикстура, закодированная агентом.
 - Конфигурация читается только из переменных окружения с префиксом `LOGNARA_`, с проверкой при старте.
+- Агент и relay требуют одинаковый `LOGNARA_RELAY_TOKEN`; ключ без пробелов, управляющих и не-ASCII символов. Секреты скрыты в диагностике конфигурации. Relay сравнивает SHA-256 ключей через `subtle`, возвращает `401` с `WWW-Authenticate: Bearer` без изменения буфера/dropped/spool при отказе.
+- Relay по умолчанию слушает `127.0.0.1:7401`. В выделенной Docker-сети явно слушает `0.0.0.0:7401`, порт на хост не публикуется, `network_mode: host` не используется. Ключ из `.env` передаётся обоим сервисам через `environment`; бинарники `.env` не читают. Пример в корневом README.
+- Все владельцы общего ключа доверенные: принадлежность `service/server/backend` не проверяется. Добавление агента не требует регистрации в relay; смена ключа требует пересоздания relay и всех агентов.
 - Остановка идёт через `CancellationToken`: сначала прекращается приём, затем выполняется финальная отправка.
 
 ## Как добавлять компоненты

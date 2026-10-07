@@ -33,8 +33,8 @@ flowchart LR
 ```
 
 1. Приложение отправляет лог (text, JSON или байты) на `POST http://127.0.0.1:7400/v1/logs` агента.
-2. Агент копит записи в памяти и отправляет пачку в relay, когда набрался `LOGNARA_BATCH_SIZE` или прошёл `LOGNARA_FLUSH_INTERVAL_MS`.
-3. Relay разбирает записи в события, группирует по источнику и раз в интервал отправляет в core с Bearer-токеном. Пока core недоступен, пачки ждут в spool на диске.
+2. Агент копит записи в памяти и отправляет пачку в relay с общим Bearer-токеном, когда набрался `LOGNARA_BATCH_SIZE` или прошёл `LOGNARA_FLUSH_INTERVAL_MS`.
+3. Relay проверяет ключ до чтения тела, разбирает записи в события, группирует по источнику и раз в интервал отправляет в core с Bearer-токеном core. Пока core недоступен, пачки ждут в spool на диске.
 4. Core подтверждает пачку (`204`) только после fsync WAL, затем материализует её в сегмент и публикует для поиска и аналитики.
 
 ## Возможности
@@ -74,6 +74,7 @@ Lognara-core/target/release/lognara-core
 # 2. relay
 LOGNARA_CORE_URL=http://127.0.0.1:7402/v1/batches \
 LOGNARA_CORE_TOKEN=ingest-secret \
+LOGNARA_RELAY_TOKEN=relay-secret \
 LOGNARA_SPOOL_DIR=/tmp/lognara-demo/spool \
 LOGNARA_FLUSH_INTERVAL_MS=1000 \
 Lognara-relay/target/release/lognara-relay
@@ -82,6 +83,7 @@ Lognara-relay/target/release/lognara-relay
 LOGNARA_SERVICE=api \
 LOGNARA_SERVER=local \
 LOGNARA_BACKEND=demo \
+LOGNARA_RELAY_TOKEN=relay-secret \
 LOGNARA_RELAY_URL=http://127.0.0.1:7401/v1/batches \
 LOGNARA_FLUSH_INTERVAL_MS=1000 \
 Lognara-agent/target/release/lognara-agent
@@ -109,8 +111,8 @@ curl -X POST http://127.0.0.1:7402/v1/logs/search \
 
 | Сервис | Порт по умолчанию | Обязательные | Главные необязательные |
 |--------|-------------------|--------------|------------------------|
-| agent | `127.0.0.1:7400` | `LOGNARA_SERVICE`, `LOGNARA_SERVER`, `LOGNARA_BACKEND` | `LOGNARA_RELAY_URL`, `LOGNARA_BATCH_SIZE` (1000), `LOGNARA_FLUSH_INTERVAL_MS` (5000) |
-| relay | `0.0.0.0:7401` | `LOGNARA_CORE_URL`, `LOGNARA_CORE_TOKEN` | `LOGNARA_SPOOL_DIR`, `LOGNARA_SPOOL_MAX_MB` (1024), `LOGNARA_FLUSH_INTERVAL_MS` (60000), `LOGNARA_BATCH_SIZE` (10000) |
+| agent | `127.0.0.1:7400` | `LOGNARA_SERVICE`, `LOGNARA_SERVER`, `LOGNARA_BACKEND`, `LOGNARA_RELAY_TOKEN` | `LOGNARA_RELAY_URL`, `LOGNARA_BATCH_SIZE` (1000), `LOGNARA_FLUSH_INTERVAL_MS` (5000) |
+| relay | `127.0.0.1:7401` | `LOGNARA_CORE_URL`, `LOGNARA_CORE_TOKEN`, `LOGNARA_RELAY_TOKEN` | `LOGNARA_SPOOL_DIR`, `LOGNARA_SPOOL_MAX_MB` (1024), `LOGNARA_FLUSH_INTERVAL_MS` (60000), `LOGNARA_BATCH_SIZE` (10000) |
 | core | `127.0.0.1:7402` | `LOGNARA_INGEST_TOKEN`, `LOGNARA_QUERY_TOKEN` | `LOGNARA_DATA_DIR`, `LOGNARA_RETENTION_SECONDS` (604800) |
 
 <details>
@@ -130,6 +132,7 @@ curl -X POST http://127.0.0.1:7402/v1/logs/search \
 | `LOGNARA_MAX_BUFFER` | `100000` | лимит записей в памяти, не меньше `BATCH_SIZE` |
 | `LOGNARA_LISTEN_ADDR` | `127.0.0.1:7400` | адрес приёма |
 | `LOGNARA_RELAY_URL` | `http://lognara-relay:7401/v1/batches` | адрес relay |
+| `LOGNARA_RELAY_TOKEN` | обязательна | общий Bearer-токен для отправки в relay |
 
 **relay**
 
@@ -137,10 +140,11 @@ curl -X POST http://127.0.0.1:7402/v1/logs/search \
 |---|---|---|
 | `LOGNARA_CORE_URL` | обязательна | адрес core, схема `http` или `https` |
 | `LOGNARA_CORE_TOKEN` | обязательна | Bearer-токен для core |
+| `LOGNARA_RELAY_TOKEN` | обязательна | общий Bearer-токен агентов |
 | `LOGNARA_FLUSH_INTERVAL_MS` | `60000` | интервал отправки в core |
 | `LOGNARA_BATCH_SIZE` | `10000` | при таком числе событий пачка уходит раньше интервала |
 | `LOGNARA_MAX_BUFFER` | `100000` | лимит событий в памяти; сверх него агенты получают `503` |
-| `LOGNARA_LISTEN_ADDR` | `0.0.0.0:7401` | адрес приёма от агентов |
+| `LOGNARA_LISTEN_ADDR` | `127.0.0.1:7401` | адрес приёма от агентов; для Docker задайте `0.0.0.0:7401` |
 | `LOGNARA_SPOOL_DIR` | `/var/lib/lognara-relay/spool` | каталог spool |
 | `LOGNARA_SPOOL_MAX_MB` | `1024` | лимит spool на диске |
 | `LOGNARA_CORE_MAX_BODY_BYTES` | `67108864` | максимум сжатой пачки, не больше лимита core |
@@ -150,6 +154,52 @@ curl -X POST http://127.0.0.1:7402/v1/logs/search \
 Параметры core (лимиты, память, сегменты, retention) описаны в [эксплуатации core](Lognara-core/docs/operations.md#конфигурация).
 
 </details>
+
+## Общий ключ и Docker-сеть
+
+Агент добавляет `Authorization: Bearer <LOGNARA_RELAY_TOKEN>` к каждой пачке и повторной попытке. Relay проверяет единственный заголовок авторизации до чтения тела и распаковки zstd. Без ключа, с неверным ключом или некорректной/дублированной авторизацией он отвечает `401` и `WWW-Authenticate: Bearer`; пачка не попадает в буфер или spool. Агент считает `401` постоянной ошибкой и отбрасывает пачку с диагностикой.
+
+Ключ обязателен для обоих сервисов: пустые значения, пробелы, управляющие и не-ASCII символы вызывают ошибку запуска. Секрет не выводится в ошибках конфигурации и `Debug`. Для своей установки сгенерируйте случайный ключ:
+
+```sh
+cp .env.example .env
+openssl rand -hex 32
+# Впишите результат в LOGNARA_RELAY_TOKEN в .env.
+```
+
+`.env` исключён из git. Compose использует его для подстановки `${...}`; передачу значения в контейнер задаёт `environment`. При запуске бинарников `.env` автоматически не читается: задайте переменные в окружении. [Документация Docker](https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation)
+
+Ниже фрагмент для ваших существующих сервисов с настроенными `image`/`build`. `app-with-agent` обозначает контейнер приложения, в котором работает агент и принимает логи по localhost. Готовых образов и Dockerfile в репозитории пока нет. Задайте `LOGNARA_CORE_TOKEN` для своего core отдельно от общего ключа агентов.
+
+```yaml
+services:
+  lognara-relay:
+    environment:
+      LOGNARA_RELAY_TOKEN: ${LOGNARA_RELAY_TOKEN:?Задайте LOGNARA_RELAY_TOKEN}
+      LOGNARA_LISTEN_ADDR: "0.0.0.0:7401"
+      LOGNARA_CORE_URL: https://core.example.com/v1/batches
+      LOGNARA_CORE_TOKEN: ${LOGNARA_CORE_TOKEN:?Задайте LOGNARA_CORE_TOKEN}
+    volumes:
+      - lognara-spool:/var/lib/lognara-relay/spool
+    networks: [lognara-ingest]
+  app-with-agent:
+    environment:
+      LOGNARA_SERVICE: api
+      LOGNARA_SERVER: docker-host
+      LOGNARA_BACKEND: demo
+      LOGNARA_RELAY_URL: http://lognara-relay:7401/v1/batches
+      LOGNARA_RELAY_TOKEN: ${LOGNARA_RELAY_TOKEN:?Задайте LOGNARA_RELAY_TOKEN}
+    networks: [lognara-ingest]
+networks:
+  lognara-ingest:
+    driver: bridge
+volumes:
+  lognara-spool:
+```
+
+В контейнере relay нужен `0.0.0.0`, чтобы принимать соединения от соседних контейнеров. Порт `7401` не публикуйте через `ports`, а `network_mode: host` не используйте. Агенты обращаются к контейнерному порту по имени `lognara-relay` в выделенной Docker-сети; доступ к этой сети предоставляйте доверенным контейнерам. [Документация Docker](https://docs.docker.com/compose/how-tos/networking/)
+
+Все владельцы общего ключа доверенные: relay принимает заявленные ими `service/server/backend` без проверки принадлежности. Новому контейнеру достаточно подключения к сети и того же ключа; изменять конфигурацию relay не нужно. При смене ключа пересоздайте контейнеры relay и всех агентов с новым значением; автоматической ротации нет.
 
 ## HTTP API core
 

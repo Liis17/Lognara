@@ -6,7 +6,7 @@ Parent: [[Index]]
 
 Rust-процесс, который живёт в контейнере рядом с основным приложением. Принимает логи по localhost (от библиотеки lognara или напрямую от приложения), копит их в оперативной памяти и сжатыми пачками отправляет в lognara-relay на той же машине. Поля `LogEvent` (level, message, trace_id, id и т. д.) агент не разбирает: он только добавляет идентификацию источника и время приёма, а структурирует данные relay. Метрики пока не поддерживаются.
 
-Поток: приложение → `POST /v1/logs` → буфер в памяти → пачка MessagePack + zstd → `POST` в relay → lognara-core.
+Поток: приложение → `POST /v1/logs` → буфер в памяти → пачка MessagePack + zstd с общим Bearer-токеном → `POST` в relay → lognara-core.
 
 ## Файлы
 
@@ -26,6 +26,8 @@ Rust-процесс, который живёт в контейнере рядо�
 
 Переменные окружения в верхнем регистре. Пустое значение считается незаданным. Если значение отсутствует или некорректно, агент завершается с кодом 1 и называет переменную.
 
+`LOGNARA_RELAY_TOKEN` должен содержать только печатные ASCII-символы без пробелов и управляющих символов. Ключ скрыт в `Debug` конфигурации и ошибках валидации.
+
 | Переменная | Обяз. | По умолчанию | Назначение |
 |---|---|---|---|
 | `LOGNARA_SERVICE` | да | - | `service` |
@@ -38,6 +40,7 @@ Rust-процесс, который живёт в контейнере рядо�
 | `LOGNARA_MAX_BUFFER` | нет | `100000` | лимит записей в памяти, не меньше `BATCH_SIZE` |
 | `LOGNARA_LISTEN_ADDR` | нет | `127.0.0.1:7400` | адрес приёма |
 | `LOGNARA_RELAY_URL` | нет | `http://lognara-relay:7401/v1/batches` | адрес relay |
+| `LOGNARA_RELAY_TOKEN` | да | - | общий Bearer-токен для отправки в relay |
 
 ## Приём: `POST /v1/logs`
 
@@ -51,7 +54,7 @@ Rust-процесс, который живёт в контейнере рядо�
 
 ## Контракт с relay
 
-`POST {LOGNARA_RELAY_URL}`, заголовки `Content-Type: application/msgpack`, `Content-Encoding: zstd`. Тело: `Batch` в MessagePack с именованными полями, сжатый zstd (уровень 3).
+`POST {LOGNARA_RELAY_URL}`, заголовки `Content-Type: application/msgpack`, `Content-Encoding: zstd`, `Authorization: Bearer {LOGNARA_RELAY_TOKEN}`. Один и тот же ключ передаётся при каждой попытке, включая повторы. Тело: `Batch` в MessagePack с именованными полями, сжатый zstd (уровень 3).
 
 ```rust
 struct Batch { service, server, backend: String, environment, service_instance: Option<String>,
@@ -63,6 +66,8 @@ enum Payload { Text(String), Json(String), Binary(Vec<u8>) }
 - `sent_at`, `received_at` — Unix-время в наносекундах.
 - `dropped` — сколько записей вытеснено из переполненного буфера с прошлой пачки.
 - Ответ relay `2xx` означает, что пачка доставлена. На `4xx`, кроме `408` и `429`, агент отбрасывает пачку с ошибкой в логе. На остальные ответы и сетевые ошибки идёт повтор с backoff от 100 мс до 10 с.
+- `401` также означает постоянный отказ: пачка отбрасывается без повторов. Relay проверяет авторизацию до чтения тела и распаковки.
+- Владельцы общего ключа считаются доверенными; relay не проверяет принадлежность `service/server/backend`. При добавлении контейнера менять конфигурацию relay не нужно. Docker-сеть и передача ключа из `.env` показаны в корневом README; после смены ключа контейнеры relay и агентов пересоздаются.
 
 ## Отправка
 
@@ -77,7 +82,8 @@ enum Payload { Text(String), Json(String), Binary(Vec<u8>) }
 |---|---|
 | `run(config: Config, listener: TcpListener, shutdown: CancellationToken): io::Result<()>` | Запускает приём и отправку; после `shutdown` дожидается финальной отправки. |
 | `Config::from_env(): Result<Config, ConfigError>` | Читает параметры `LOGNARA_*` из окружения. |
-| `Config::from_lookup(lookup: impl Fn(&str) -> Option<String>): Result<Config, ConfigError>` | Собирает конфиг из произвольного источника, нужен для тестов. |
+| `Config::from_lookup(lookup: impl Fn(&str) -> Option<String>): Result<Config, ConfigError>` | Собирает конфиг из произвольного источника и проверяет обязательный ключ relay. |
+| `Config::fmt(f: &mut fmt::Formatter<'_>): fmt::Result` | Форматирует `Debug` конфигурации со скрытым ключом relay. |
 | `ingest::router(buffer: Arc<Buffer>): Router` | Роутер с `POST /v1/logs`. |
 | `ingest::parse_body(content_type: Option<&str>, body: &[u8]): Result<Vec<Payload>, IngestError>` | Превращает тело запроса в записи по Content-Type. |
 | `Buffer::push(records: impl IntoIterator<Item = Record>)` | Добавляет записи, вытесняет старые при переполнении, сигналит о полной пачке. |
@@ -85,6 +91,7 @@ enum Payload { Text(String), Json(String), Binary(Vec<u8>) }
 | `Buffer::full()` | Ждёт, пока наберётся `batch_size` записей. |
 | `Sender::run(self)` | Цикл отправки: полная пачка, интервал, остановка. |
 | `Relay::deliver(batch: &mut Batch, shutdown: &CancellationToken): bool` | Доставляет пачку с ретраями; `false`, если прервана остановкой. |
+| `Relay::post(body: Vec<u8>): reqwest::Result<StatusCode>` | Отправляет сжатую пачку с общим Bearer-токеном в relay. |
 | `wire::encode(batch: &Batch): Vec<u8>` | MessagePack + zstd. |
 | `wire::unix_nanos(): i64` | Текущее Unix-время в наносекундах. |
 

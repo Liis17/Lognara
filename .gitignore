@@ -22,3 +22,4 @@ target
 #.idea/
 default.profraw
 .DS_Store
+.env
