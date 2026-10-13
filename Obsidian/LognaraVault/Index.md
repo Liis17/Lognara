@@ -10,7 +10,7 @@ Lognara — система сбора логов: агент в контейне
 ### Agent
 | Файл | Компонент | Описание |
 |------|-----------|----------|
-| [[Agent/LognaraAgent]] | lognara-agent | HTTP, файлы, stdout/stderr, durable spool, отправка сжатых пачек в relay с общим ключом; параметры `LOGNARA_*` и контракт пачки. |
+| [[Agent/LognaraAgent]] | lognara-agent | HTTP, файлы, stdout/stderr, durable spool, отправка сжатых пачек в relay с персональным токеном; параметры `LOGNARA_*` и контракт пачки. |
 | [[Agent/LogSources]] | источники логов | JSON, форматы, checkpoint, ротация, потоки, потери и lifecycle программы. |
 | [[Agent/LognaraAgent-ProjectMap]] | lognara-agent | Карта модулей, публичных интерфейсов и проверок. |
 
@@ -24,14 +24,14 @@ Lognara — система сбора логов: агент в контейне
 ### Core
 | Файл | Компонент | Описание |
 |------|-----------|----------|
-| [[Core/LognaraCore]] | lognara-core | Контракт relay, хранилище, поиск и аналитика. |
+| [[Core/LognaraCore]] | lognara-core | Реестр relay/агентов, admin API, хранилище, поиск и аналитика. |
 | [[Core/LognaraCore-ProjectMap]] | lognara-core | Модули, конвейер и тесты. |
 
 ### Dock
 
 | Файл | Компонент | Описание |
 |------|-----------|----------|
-| [[Dock/LognaraDock]] | lognara-dock | Веб-интерфейс за nginx: вход по htpasswd и passkey, сессии в SQLite, логи core в реальном времени через SSE; параметры `LOGNARA_DOCK_*`. |
+| [[Dock/LognaraDock]] | lognara-dock | Веб-интерфейс за nginx: вход по htpasswd и passkey, сессии в SQLite, регистрация подключений, логи core в реальном времени через SSE; параметры `LOGNARA_DOCK_*`. |
 | [[Dock/LognaraDock-ProjectMap]] | lognara-dock | Дерево файлов Rust и React, связи модулей и тесты. |
 
 ### Delivery

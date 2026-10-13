@@ -8,7 +8,7 @@ Rust-процесс, который живёт в контейнере рядо�
 
 Источники и lifecycle описаны в [[Agent/LogSources]], карта модулей в [[Agent/LognaraAgent-ProjectMap]].
 
-Поток: HTTP, файл или pipe программы → общий Buffer → атомарная очередь [[Delivery/Spool]] → пачка MessagePack + zstd с общим Bearer-токеном → `POST` в relay → lognara-core.
+Поток: HTTP, файл или pipe программы → общий Buffer → атомарная очередь [[Delivery/Spool]] → пачка MessagePack + zstd с персональным Bearer-токеном → `POST` в relay → lognara-core.
 
 ## Файлы
 
@@ -50,7 +50,7 @@ Rust-процесс, который живёт в контейнере рядо�
 | `LOGNARA_SPOOL_MAX_MB` | нет | `1024` | квота тел очереди; отдельный pending до 8 MiB |
 | `LOGNARA_LISTEN_ADDR` | нет | `127.0.0.1:7400` | адрес приёма |
 | `LOGNARA_RELAY_URL` | нет | `http://lognara-relay:7401/v1/batches` | адрес relay |
-| `LOGNARA_RELAY_TOKEN` | да | - | общий Bearer-токен для отправки в relay |
+| `LOGNARA_RELAY_TOKEN` | да | - | персональный токен агента для его relay |
 
 ## Приём: `POST /v1/logs`
 
@@ -80,7 +80,7 @@ enum Payload { Text(String), Json(String), Binary(Vec<u8>) }
 - `records` содержит хотя бы одну запись; relay отклоняет `records=[]` с `400` при любом `dropped`. 
 - Ответ relay `2xx` разрешает удаление исходных частей. На любые другие HTTP-ответы и сетевые ошибки пачка остаётся и повторяется теми же байтами с backoff 100 мс–10 с. При `4xx` новый приём приостанавливается с диагностикой; успешная доставка возвращает готовность.
 - `sent_at` фиксируется при подготовке, тело хранится в `pending/` до ACK. Отдельный дисковый резерв позволяет подготовить отправку даже при полной основной квоте.
-- Владельцы общего ключа считаются доверенными; relay не проверяет принадлежность `service/server/backend`. При добавлении контейнера менять конфигурацию relay не нужно. Docker-сеть и передача ключа из `.env` показаны в корневом README; после смены ключа контейнеры relay и агентов пересоздаются.
+- Сначала зарегистрируйте агента в dock для выбранного relay. Токен показывается один раз: `.env` использует `LOGNARA_AGENT_TOKEN`, процесс получает его как `LOGNARA_RELAY_TOKEN`. Relay проверяет хеш по списку своих агентов из core; принадлежность `service/server/backend` не сверяется. При смене токена перезапустите этого агента с прежним spool. Код и контракт агентского HTTP не менялись.
 
 ## Отправка и память
 
@@ -110,7 +110,7 @@ enum Payload { Text(String), Json(String), Binary(Vec<u8>) }
 | `Buffer::full()` | Ждёт изменения очереди; отправка проверяет число и байты. |
 | `Sender::run(self)` | Цикл отправки: полная пачка, интервал, остановка. |
 | ~~`Relay::deliver(batch: &mut Batch, shutdown: &CancellationToken): bool`~~ (удалён: 2026-10-08) | Доставляет пачку с ретраями; `false`, если прервана остановкой. |
-| ~~`Relay::post(body: Vec<u8>): reqwest::Result<StatusCode>`~~ (удалён: 2026-10-08) | Отправляет сжатую пачку с общим Bearer-токеном в relay. |
+| ~~`Relay::post(body: Vec<u8>): reqwest::Result<StatusCode>`~~ (удалён: 2026-10-08) | Отправляет сжатую пачку с персональным Bearer-токеном в relay. |
 | `wire::encode(batch: &Batch): Vec<u8>` | MessagePack + zstd. |
 | `wire::unix_nanos(): i64` | Текущее Unix-время в наносекундах. |
 | `Config::validate(): Result<(), ConfigError>` | Проверяет квоты, два конвейера, metadata и размер записи при запуске. |

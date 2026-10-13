@@ -9,7 +9,7 @@
 
 Служебный контейнер `dock-init` перед первым запуском создаёт bcrypt-пароль пользователя `demo` и права на volumes dock. После инициализации он завершается с кодом `0`; это штатное состояние.
 
-Порты хоста привязаны к `127.0.0.1`; agent и relay наружу не публикуются. Сервисы общаются по внутренней Compose-сети. Ключи `local-relay-token`, `local-ingest-token`, `local-query-token` заданы в Compose для локального теста. Внешние базы данных не нужны.
+Порты хоста привязаны к `127.0.0.1`; agent и relay наружу не публикуются. Сервисы общаются по внутренней Compose-сети. Admin/query-токены `local-admin-token` и `local-query-token` заданы в Compose для локального теста. Персональные токены relay и агента выдаёт core после регистрации через dock. Внешние базы данных не нужны.
 
 ## Запуск
 
@@ -17,11 +17,42 @@
 
 ```sh
 docker compose -f Example/compose.yaml config --quiet
-docker compose -f Example/compose.yaml up --build -d --wait
-docker compose -f Example/compose.yaml ps
+docker compose -f Example/compose.yaml up --build -d --wait core dock
 ```
 
-Или из `Example`: `docker compose up --build -d --wait`. Dockerfile использует контекст корня репозитория, Rust 1.94 и Cargo.lock каждого сервиса; фронтенд dock собирается на Node.js 24 через `npm ci`. Первая сборка core с DataFusion/Arrow/Parquet длительная; нужны интернет для загрузки образов и crates, несколько GiB свободной RAM и места на диске. Число параллельных задач Cargo ограничено двумя; кеш сборки используется повторно.
+Откройте `http://localhost:7403`, войдите как `demo` / `demo-lognara-local`. На странице «Подключения» создайте relay (например, `local-relay`), затем агента (`python-example`) и выберите этот relay. Скопируйте показанные один раз строки в `Example/.env`:
+
+```dotenv
+LOGNARA_RELAY_CORE_TOKEN=lnr_...
+LOGNARA_AGENT_TOKEN=lna_...
+LOGNARA_RELAY_MEMORY_MB=2048
+```
+
+Потом поднимите всю цепочку и проверьте доставку:
+
+```sh
+docker compose -f Example/compose.yaml up --build -d --wait
+docker compose -f Example/compose.yaml ps
+python3 Example/smoke-test.py
+```
+
+Минимальный RAM relay — 2048 MiB. Один параметр задаёт резерв процесса и `mem_limit` контейнера. Если токен потерян, удалите профиль и создайте заново; сначала удаляются агенты, затем relay. При пересоздании профиля сохраняйте старые volumes очередей и обновите `.env`.
+
+Альтернатива регистрации через admin API на `127.0.0.1:7402` (`jq` нужен для извлечения полей):
+
+```sh
+RELAY=$(curl --fail-with-body -s http://127.0.0.1:7402/v1/admin/relays \
+  -H 'Authorization: Bearer local-admin-token' -H 'Content-Type: application/json' \
+  -d '{"name":"local-relay"}')
+RELAY_ID=$(printf '%s' "$RELAY" | jq -r '.relay.id')
+AGENT=$(curl --fail-with-body -s http://127.0.0.1:7402/v1/admin/agents \
+  -H 'Authorization: Bearer local-admin-token' -H 'Content-Type: application/json' \
+  -d "{\"name\":\"python-example\",\"relay_id\":$RELAY_ID}")
+printf 'LOGNARA_RELAY_CORE_TOKEN=%s\nLOGNARA_AGENT_TOKEN=%s\nLOGNARA_RELAY_MEMORY_MB=2048\n' \
+  "$(printf '%s' "$RELAY" | jq -r '.token')" "$(printf '%s' "$AGENT" | jq -r '.token')" > Example/.env
+```
+
+Или из `Example`: сначала `docker compose up --build -d --wait core dock`, после заполнения `.env` — `docker compose up --build -d --wait`. Dockerfile использует контекст корня репозитория, Rust 1.94 и Cargo.lock каждого сервиса; фронтенд dock собирается на Node.js 24 через `npm ci`. Первая сборка core с DataFusion/Arrow/Parquet длительная; нужны интернет для загрузки образов и crates, несколько GiB свободной RAM и места на диске. Число параллельных задач Cargo ограничено двумя; кеш сборки используется повторно.
 
 ## Просмотр логов в браузере
 
