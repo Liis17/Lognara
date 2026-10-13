@@ -39,6 +39,38 @@ flowchart LR
 3. Relay проверяет ключ до чтения тела, разбирает записи в события и сохраняет все допустимые части запроса на диск до `202`. По количеству событий или таймеру отправляет сохранённые тела в core с Bearer-токеном. Пока downstream недоступен, обе очереди остаются на диске.
 4. Core подтверждает пачку (`204`) только после fsync WAL, затем материализует её в сегмент и публикует для поиска и аналитики.
 
+### Serilog (.NET)
+
+Приложения на .NET отправляют логи через Serilog.Sinks.Http с форматтером из Serilog.Expressions (`ExpressionTemplate`). Установите пакеты `Serilog.Sinks.Http` и `Serilog.Expressions`. Агент работает в контейнере приложения, поэтому адрес всегда `http://127.0.0.1:7400/v1/logs`.
+
+Каждое событие должно быть в каноническом JSON Lognara: relay раскладывает по полям только канонические ключи, остальные уходят в `attributes`. Массив JSON агент делит на записи, по одной на элемент. Пачку держите меньше 1 MiB (`batchSizeLimitBytes`): агент принимает тело не больше 2 MiB.
+
+```csharp
+using Serilog;
+using Serilog.Templates;
+using Serilog.Sinks.Http.BatchFormatters;
+
+Log.Logger = new LoggerConfiguration()
+    .WriteTo.Http(
+        requestUri: "http://127.0.0.1:7400/v1/logs",
+        queueLimitBytes: null,
+        batchSizeLimitBytes: 1024 * 1024,
+        textFormatter: new ExpressionTemplate(
+            "{ {timestamp: UtcDateTime(@t), level: @l, message: @m, exception: @x, attributes: @p} }\n"),
+        batchFormatter: new ArrayBatchFormatter())
+    .CreateLogger();
+```
+
+Пример C# в этом репозитории не компилировался и не запускался. Перед использованием проверьте его в вашем приложении.
+
+| Поле Lognara | Откуда в шаблоне | Что попадает |
+|---|---|---|
+| `timestamp` | `@t` через `UtcDateTime` | время события |
+| `level` | `@l` | `Verbose`, `Information`, `Warning` и `Critical` понимаются как `trace`, `info`, `warn` и `fatal`; `Debug`, `Error`, `Fatal` совпадают с каноническими |
+| `message` | `@m` | текст события с подставленными значениями |
+| `attributes` | `@p` | все свойства Serilog; у сервисов с `ServiceMetrics` здесь окажется объект `Metrics` |
+| прочие ключи | `exception` (`@x`) | не канонические ключи уходят в `attributes` как есть |
+
 ## Возможности
 
 | Компонент | Что делает | Ключевые свойства |
