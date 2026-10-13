@@ -6,7 +6,7 @@
 
 ## Контракт relay
 
-`POST /v1/batches`, `Content-Type: application/msgpack`, `Content-Encoding: zstd`, `Authorization: Bearer <LOGNARA_INGEST_TOKEN>`.
+`POST /v1/batches`, `Content-Type: application/msgpack`, `Content-Encoding: zstd`, `Authorization: Bearer <персональный токен relay из dock>`.
 Формат повторяет `Lognara-relay/src/core_wire.rs`: `CoreBatch { dropped, groups: [{ source, dropped, events }] }`.
 Все времена в бинарном протоколе — i64 Unix **наносекунды**. `ingested_at` — время агента, core его не заменяет.
 UUID и trace ID — bin 16 байт; span ID — bin 8 байт. Уровень — lowercase строка, включая `unknown`.
@@ -26,6 +26,24 @@ Core принимает UUID независимо от версии. JSON API о
 cd Lognara-core
 cargo run --example relay_fixture -- tests/fixtures/relay-batch.bin
 ```
+
+## Профили relay и агентов
+
+Core запускается с обязательными разными `LOGNARA_ADMIN_TOKEN` и `LOGNARA_QUERY_TOKEN`. Dock использует admin-токен для страницы «Подключения». Реестр хранится в отдельном `access.sqlite3` внутри каталога данных, WAL/FULL, под общей блокировкой `core.lock`. Plaintext возвращается только в ответе создания; в БД хранится SHA-256.
+
+| Метод и путь | Токен | Тело / ответ |
+|---|---|---|
+| `GET /v1/admin/relays` | admin | `{"relays":[{"id":1,"name":"relay","created_at":"RFC3339"}]}` |
+| `POST /v1/admin/relays` | admin | `{"name":"relay"}` → `201 {"relay":{…},"token":"lnr_…"}` |
+| `DELETE /v1/admin/relays/{id}` | admin | `204`, `404 not_found`, `409 relay_has_agents` |
+| `GET /v1/admin/agents` | admin | `{"agents":[{"id":1,"name":"app","relay_id":1,"created_at":"RFC3339"}]}` |
+| `POST /v1/admin/agents` | admin | `{"name":"app","relay_id":1}` → `201 {"agent":{…},"token":"lna_…"}` |
+| `DELETE /v1/admin/agents/{id}` | admin | `204`, `404 not_found` |
+| `GET /v1/agents` | relay | `{"agents":["sha256 hex",…]}` только для этого relay |
+
+Имя после trim: 1..64 символа, без управляющих. Имя relay уникально глобально, агента — внутри relay. Ошибки JSON `{"error":"code"}`: `400 invalid_name/invalid_request`, `404 relay_not_found/not_found`, `409 name_taken/relay_has_agents`. Неизвестный или удалённый токен relay даёт `401`; admin/query-токены не дают права отправлять пачки. Поля `service/server/backend` не сверяются. Регистрируйте каждый процесс отдельно; потерянный токен требует пересоздания профиля.
+
+Прежний `LOGNARA_INGEST_TOKEN` удалён. Relay получает свой токен через `LOGNARA_CORE_TOKEN`; agent получает свой через `LOGNARA_RELAY_TOKEN`. Примеры регистрации — в [корневом README](../README.md#быстрый-старт).
 
 ## Поиск
 

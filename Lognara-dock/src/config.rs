@@ -25,6 +25,8 @@ pub struct Config {
     pub core_url: Url,
     /// Query-токен core, в браузер не передаётся.
     pub core_token: String,
+    /// Admin-токен core для выдачи и отзыва учётных данных, в браузер не передаётся.
+    pub core_admin_token: String,
     pub listen_addr: SocketAddr,
     pub htpasswd_file: PathBuf,
     pub data_dir: PathBuf,
@@ -44,6 +46,7 @@ impl fmt::Debug for Config {
             .field("rp_id", &self.rp_id)
             .field("core_url", &self.core_url.as_str())
             .field("core_token", &"[redacted]")
+            .field("core_admin_token", &"[redacted]")
             .field("listen_addr", &self.listen_addr)
             .field("htpasswd_file", &self.htpasswd_file)
             .field("data_dir", &self.data_dir)
@@ -125,12 +128,13 @@ impl Config {
                 });
             }
         };
-        let core_token = required("LOGNARA_DOCK_CORE_TOKEN")?;
-        if !core_token.bytes().all(|byte| byte.is_ascii_graphic()) {
+        let core_token = token(&required, "LOGNARA_DOCK_CORE_TOKEN")?;
+        let core_admin_token = token(&required, "LOGNARA_DOCK_CORE_ADMIN_TOKEN")?;
+        if core_admin_token == core_token {
             return Err(ConfigError::Invalid {
-                var: "LOGNARA_DOCK_CORE_TOKEN",
+                var: "LOGNARA_DOCK_CORE_ADMIN_TOKEN",
                 value: "[redacted]".into(),
-                expected: "an ASCII token without whitespace or control characters",
+                expected: "a token different from LOGNARA_DOCK_CORE_TOKEN",
             });
         }
 
@@ -149,6 +153,7 @@ impl Config {
             rp_id,
             core_url,
             core_token,
+            core_admin_token,
             listen_addr: parse(
                 &get,
                 "LOGNARA_DOCK_LISTEN_ADDR",
@@ -193,6 +198,22 @@ fn is_public_url(url: &Url) -> bool {
     scheme && url.path() == "/" && url.query().is_none() && url.fragment().is_none()
 }
 
+/// Обязательный токен: значение в ошибку не попадает.
+fn token(
+    required: &impl Fn(&'static str) -> Result<String, ConfigError>,
+    var: &'static str,
+) -> Result<String, ConfigError> {
+    let token = required(var)?;
+    if !token.bytes().all(|byte| byte.is_ascii_graphic()) {
+        return Err(ConfigError::Invalid {
+            var,
+            value: "[redacted]".into(),
+            expected: "an ASCII token without whitespace or control characters",
+        });
+    }
+    Ok(token)
+}
+
 fn positive<T>(
     get: &impl Fn(&str) -> Option<String>,
     var: &'static str,
@@ -232,10 +253,11 @@ fn parse<T: FromStr>(
 mod tests {
     use super::*;
 
-    const REQUIRED: [(&str, &str); 3] = [
+    const REQUIRED: [(&str, &str); 4] = [
         ("LOGNARA_DOCK_PUBLIC_URL", "https://dock.example.com"),
         ("LOGNARA_DOCK_CORE_URL", "http://lognara-core:7402"),
         ("LOGNARA_DOCK_CORE_TOKEN", "query-secret"),
+        ("LOGNARA_DOCK_CORE_ADMIN_TOKEN", "admin-secret"),
     ];
 
     fn with_required(extra: &[(&'static str, &'static str)]) -> Result<Config, ConfigError> {
@@ -314,18 +336,28 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_token_without_exposing_it() {
-        for token in ["query secret", "секрет", "secret\n"] {
-            let err = with_required(&[("LOGNARA_DOCK_CORE_TOKEN", token)]).unwrap_err();
-            assert!(err.to_string().contains("LOGNARA_DOCK_CORE_TOKEN"));
-            assert!(!err.to_string().contains(token));
+    fn rejects_invalid_tokens_without_exposing_them() {
+        for var in ["LOGNARA_DOCK_CORE_TOKEN", "LOGNARA_DOCK_CORE_ADMIN_TOKEN"] {
+            for token in ["query secret", "секрет", "secret\n"] {
+                let err = with_required(&[(var, token)]).unwrap_err();
+                assert!(err.to_string().contains(var));
+                assert!(!err.to_string().contains(token));
+            }
         }
     }
 
     #[test]
-    fn debug_redacts_token() {
+    fn requires_admin_token_different_from_query_token() {
+        let err = with_required(&[("LOGNARA_DOCK_CORE_ADMIN_TOKEN", "query-secret")]).unwrap_err();
+        assert!(err.to_string().contains("LOGNARA_DOCK_CORE_ADMIN_TOKEN"));
+        assert!(!err.to_string().contains("query-secret"));
+    }
+
+    #[test]
+    fn debug_redacts_tokens() {
         let debug = format!("{:?}", with_required(&[]).unwrap());
         assert!(!debug.contains("query-secret"));
+        assert!(!debug.contains("admin-secret"));
         assert!(debug.contains("[redacted]"));
     }
 }

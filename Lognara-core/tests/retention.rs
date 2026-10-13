@@ -13,7 +13,7 @@ fn wait(mut condition: impl FnMut() -> bool) {
 fn retention_waits_for_readers_preserves_dedup_and_uses_core_receipt_time() {
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = Config::from_lookup(|key| match key {
-        "LOGNARA_INGEST_TOKEN" => Some("ingest".into()),
+        "LOGNARA_ADMIN_TOKEN" => Some("ingest".into()),
         "LOGNARA_QUERY_TOKEN" => Some("query".into()),
         _ => None,
     })

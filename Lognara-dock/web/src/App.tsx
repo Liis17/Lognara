@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Navigate, NavLink, Route, Routes, useNavigate } from "react-router";
 import { api, type Me } from "./api";
+import Access from "./pages/Access";
 import Login from "./pages/Login";
 import Logs from "./pages/Logs";
 import Settings from "./pages/Settings";
@@ -42,6 +43,7 @@ export default function App() {
         <strong>Lognara</strong>
         <nav>
           <NavLink to="/logs">Логи</NavLink>
+          <NavLink to="/access">Подключения</NavLink>
           <NavLink to="/settings">Настройки</NavLink>
         </nav>
         <span className="user">{me.username}</span>
@@ -50,6 +52,7 @@ export default function App() {
       <main>
         <Routes>
           <Route path="/logs" element={<Logs onUnauthorized={() => setMe(null)} />} />
+          <Route path="/access" element={<Access onUnauthorized={() => setMe(null)} />} />
           <Route path="/settings" element={<Settings onChange={refresh} />} />
           <Route path="*" element={<Navigate to="/logs" replace />} />
         </Routes>

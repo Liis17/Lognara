@@ -94,7 +94,7 @@ fn relay_splits_amplifying_attributes_to_the_same_model_budget_as_core() {
 fn configuration_requires_separate_tokens_and_valid_limits() {
     assert!(Config::from_lookup(|_| None).is_err());
     let lookup = |key: &str| match key {
-        "LOGNARA_INGEST_TOKEN" => Some("ingest".into()),
+        "LOGNARA_ADMIN_TOKEN" => Some("ingest".into()),
         "LOGNARA_QUERY_TOKEN" => Some("query".into()),
         _ => None,
     };

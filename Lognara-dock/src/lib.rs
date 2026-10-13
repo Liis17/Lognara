@@ -1,6 +1,7 @@
 //! lognara-dock: веб-интерфейс Lognara за nginx. Проверяет вход по htpasswd и passkey,
 //! хранит сессии в SQLite и показывает логи core в реальном времени.
 
+pub mod access;
 pub mod account;
 pub mod api;
 pub mod auth;

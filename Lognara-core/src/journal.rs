@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 
 use crate::{
+    access::Access,
     catalog::Catalog,
     config::Config,
     metrics::Metrics,
@@ -24,6 +25,7 @@ use crate::{
 
 pub struct Journal {
     pub config: Config,
+    pub access: Arc<Access>,
     pub(crate) wal: Mutex<Wal>,
     pub(crate) catalog: Mutex<Catalog>,
     pub healthy: AtomicBool,
@@ -59,6 +61,7 @@ impl Journal {
             .open(config.data_dir.join("core.lock"))?;
         lock.try_lock_exclusive()
             .map_err(|_| anyhow::anyhow!("data directory is already in use"))?;
+        let access = Arc::new(Access::open(&config.data_dir.join("access.sqlite3"))?);
         let catalog = Catalog::open(&config.data_dir.join("catalog.sqlite"))?;
         let (checkpoint, next_batch, next_sequence) = catalog.progress()?;
         let mut wal = Wal::open(&config.data_dir.join("wal"), next_batch, next_sequence)?;
@@ -68,6 +71,7 @@ impl Journal {
         let slots = (config.ingest_memory_bytes / config.ingest_request_bytes()).max(1);
         Ok(Arc::new(Self {
             config,
+            access,
             wal: Mutex::new(wal),
             catalog: Mutex::new(catalog),
             healthy: AtomicBool::new(true),

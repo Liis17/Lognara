@@ -590,7 +590,6 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "sha2",
- "subtle",
  "tempfile",
  "time",
  "tokio",

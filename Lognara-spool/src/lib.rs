@@ -171,6 +171,10 @@ impl Queue {
         Ok(queue)
     }
 
+    /// Реально открытый (канонический) каталог очереди.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
     pub fn entries(&self) -> &VecDeque<Entry> {
         &self.files
     }
@@ -403,7 +407,8 @@ fn remove(path: &Path) -> io::Result<()> {
         fs::remove_file(path)
     }
 }
-fn atomic_file(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
+/// Пишет `name` в `dir` через `<name>.tmp`, fsync и rename; `*.tmp` очищает `Queue::open`.
+pub fn atomic_file(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
     let tmp = dir.join(format!("{name}.tmp"));
     let mut file = File::create(&tmp)?;
     file.write_all(bytes)?;
@@ -525,6 +530,24 @@ mod tests {
         assert_eq!(queue.read(&queue.entries()[0], 100).unwrap(), b"legacy");
         assert_eq!(queue.read(&queue.entries()[1], 100).unwrap(), b"new");
         assert_eq!(queue.events(), 3);
+    }
+
+    #[test]
+    fn side_files_are_ignored_and_stale_tmp_is_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = Queue::open(dir.path(), 100, 100).unwrap();
+        atomic_file(queue.dir(), ".agents", b"{\"agents\":[]}").unwrap();
+        queue.append_group([Ok((b"first".to_vec(), 1))]).unwrap();
+        drop(queue);
+        fs::write(dir.path().join(".agents.tmp"), b"partial").unwrap();
+        let queue = Queue::open(dir.path(), 100, 100).unwrap();
+        assert_eq!(queue.entries().len(), 1);
+        assert_eq!(queue.events(), 1);
+        assert_eq!(
+            fs::read(queue.dir().join(".agents")).unwrap(),
+            b"{\"agents\":[]}"
+        );
+        assert!(!queue.dir().join(".agents.tmp").exists());
     }
 
     #[test]

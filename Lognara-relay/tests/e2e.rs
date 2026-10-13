@@ -11,13 +11,14 @@ use axum::Router;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
-use axum::routing::post;
+use axum::routing::{get, post};
 use lognara_relay::agent_wire::{Batch, Payload, Record};
 use lognara_relay::config::Config;
 use lognara_relay::core_wire::{self, CoreBatch, Group, LogLevel, Source};
 use lognara_relay::normalize;
 use lognara_relay::spool::Spool;
 use reqwest::Url;
+use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -45,6 +46,7 @@ async fn accepted_batch_is_on_disk_before_first_flush() {
     relay.stop().await;
 }
 const TOKEN: &str = "secret";
+const AGENT_TOKEN: &str = "relay-secret";
 const BATCH_HEADERS: [(&str, &str); 3] = [
     ("authorization", "Bearer relay-secret"),
     ("content-type", "application/msgpack"),
@@ -59,6 +61,8 @@ struct FakeCore {
     status: Arc<Mutex<StatusCode>>,
     bodies: Arc<Mutex<Vec<Bytes>>>,
     delay_ms: Arc<AtomicUsize>,
+    agents: Arc<Mutex<(StatusCode, Vec<String>)>>,
+    agent_requests: Arc<AtomicUsize>,
 }
 
 #[derive(Clone)]
@@ -68,6 +72,15 @@ struct CoreState {
     status: Arc<Mutex<StatusCode>>,
     bodies: Arc<Mutex<Vec<Bytes>>>,
     delay_ms: Arc<AtomicUsize>,
+    agents: Arc<Mutex<(StatusCode, Vec<String>)>>,
+    agent_requests: Arc<AtomicUsize>,
+}
+
+fn token_hash(token: &str) -> String {
+    Sha256::digest(token.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 impl FakeCore {
@@ -77,6 +90,15 @@ impl FakeCore {
 
     fn requests(&self) -> usize {
         self.requests.load(Ordering::SeqCst)
+    }
+
+    /// Токены агентов, которые core отдаёт в `GET /v1/agents`.
+    fn set_agents(&self, tokens: &[&str]) {
+        self.agents.lock().unwrap().1 = tokens.iter().map(|token| token_hash(token)).collect();
+    }
+
+    fn respond_agents(&self, status: StatusCode) {
+        self.agents.lock().unwrap().0 = status;
     }
 
     async fn next_batch(&mut self) -> CoreBatch {
@@ -95,13 +117,18 @@ async fn fake_core() -> FakeCore {
         status: Arc::new(Mutex::new(StatusCode::OK)),
         bodies: Arc::default(),
         delay_ms: Arc::default(),
+        agents: Arc::new(Mutex::new((StatusCode::OK, vec![token_hash(AGENT_TOKEN)]))),
+        agent_requests: Arc::default(),
     };
     let requests = state.requests.clone();
     let status = state.status.clone();
     let bodies = state.bodies.clone();
     let delay_ms = state.delay_ms.clone();
+    let agents = state.agents.clone();
+    let agent_requests = state.agent_requests.clone();
     let app = Router::new()
         .route("/v1/batches", post(receive))
+        .route("/v1/agents", get(list_agents))
         .with_state(state);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -115,7 +142,19 @@ async fn fake_core() -> FakeCore {
         status,
         bodies,
         delay_ms,
+        agents,
+        agent_requests,
     }
+}
+
+async fn list_agents(
+    State(state): State<CoreState>,
+    headers: HeaderMap,
+) -> (StatusCode, axum::Json<serde_json::Value>) {
+    state.agent_requests.fetch_add(1, Ordering::SeqCst);
+    assert_eq!(headers["authorization"], format!("Bearer {TOKEN}"));
+    let (status, hashes) = state.agents.lock().unwrap().clone();
+    (status, axum::Json(serde_json::json!({ "agents": hashes })))
 }
 
 async fn receive(State(state): State<CoreState>, headers: HeaderMap, body: Bytes) -> StatusCode {
@@ -164,7 +203,6 @@ fn config(core: &FakeCore, spool_dir: &Path) -> Config {
     Config {
         core_url: core.url.clone(),
         core_token: TOKEN.into(),
-        relay_token: "relay-secret".into(),
         flush_interval: Duration::from_millis(100),
         batch_size: 1000,
         max_buffer: 10_000,
@@ -174,7 +212,7 @@ fn config(core: &FakeCore, spool_dir: &Path) -> Config {
         core_max_body_bytes: 64 << 20,
         core_max_decoded_bytes: 256 << 20,
         core_max_model_bytes: 256 << 20,
-        memory_bytes: 1792 << 20,
+        memory_mb: 2048,
         max_model_bytes: 256 << 20,
         max_buffer_bytes: 256 << 20,
         max_ingest_concurrency: 1,
@@ -545,6 +583,120 @@ async fn rejects_unauthenticated_batches_without_delivering_or_spooling() {
     eventually(|| spooled(spool.path()) == 0).await;
 }
 
+async fn send_as(relay: &Relay, token: &str, batch: &Batch) -> StatusCode {
+    let body = zstd::encode_all(&rmp_serde::to_vec_named(batch).unwrap()[..], 3).unwrap();
+    let bearer = format!("Bearer {token}");
+    let headers = [
+        ("authorization", bearer.as_str()),
+        BATCH_HEADERS[1],
+        BATCH_HEADERS[2],
+    ];
+    post_body(relay, &headers, body).await
+}
+
+#[tokio::test]
+async fn unknown_agent_token_is_rejected_without_spooling_or_delivery() {
+    let core = fake_core().await;
+    let spool = tempfile::tempdir().unwrap();
+    let relay = start_relay(config(&core, spool.path())).await;
+    let batch = agent_batch("api", &["rejected"]);
+    // Токен для core и произвольный токен не дают доступа к приёму.
+    for token in [TOKEN, "lna_unknown", "RELAY-SECRET"] {
+        assert_eq!(
+            send_as(&relay, token, &batch).await,
+            StatusCode::UNAUTHORIZED,
+            "{token}"
+        );
+    }
+    assert_eq!(send(&relay, &batch).await, StatusCode::ACCEPTED);
+    relay.stop().await;
+}
+
+#[tokio::test]
+async fn agent_list_is_cached_in_spool_dir_and_used_while_core_is_down() {
+    let core = fake_core().await;
+    let spool = tempfile::tempdir().unwrap();
+    let relay = start_relay(config(&core, spool.path())).await;
+    eventually(|| spool.path().join(".agents").is_file()).await;
+    relay.stop().await;
+
+    // Кеш не мешает очереди и не считается пачкой.
+    core.respond_agents(StatusCode::SERVICE_UNAVAILABLE);
+    core.respond(StatusCode::SERVICE_UNAVAILABLE);
+    let relay = start_relay(config(&core, spool.path())).await;
+    assert_eq!(
+        send(&relay, &agent_batch("api", &["from cache"])).await,
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(
+        send_as(&relay, "other", &agent_batch("api", &["no"])).await,
+        StatusCode::UNAUTHORIZED
+    );
+    relay.stop().await;
+    assert!(spooled(spool.path()) > 0);
+
+    // Без кеша и без core список пуст, поэтому агенты не принимаются.
+    let empty = tempfile::tempdir().unwrap();
+    let relay = start_relay(config(&core, empty.path())).await;
+    assert_eq!(
+        send(&relay, &agent_batch("api", &["no cache"])).await,
+        StatusCode::UNAUTHORIZED
+    );
+    relay.stop().await;
+    assert_eq!(spooled(empty.path()), 0);
+}
+
+#[tokio::test]
+async fn startup_sync_replaces_cached_list_before_serving() {
+    let core = fake_core().await;
+    let spool = tempfile::tempdir().unwrap();
+    start_relay(config(&core, spool.path())).await.stop().await;
+
+    core.set_agents(&["new-agent"]);
+    let relay = start_relay(config(&core, spool.path())).await;
+    assert_eq!(
+        send(&relay, &agent_batch("api", &["revoked"])).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        send_as(&relay, "new-agent", &agent_batch("api", &["added"])).await,
+        StatusCode::ACCEPTED
+    );
+    relay.stop().await;
+}
+
+#[tokio::test]
+async fn background_sync_adds_and_revokes_agents_without_restart() {
+    let core = fake_core().await;
+    let spool = tempfile::tempdir().unwrap();
+    let relay = start_relay(config(&core, spool.path())).await;
+    let batch = agent_batch("api", &["x"]);
+    assert_eq!(
+        send_as(&relay, "late-agent", &batch).await,
+        StatusCode::UNAUTHORIZED
+    );
+
+    core.set_agents(&[AGENT_TOKEN, "late-agent"]);
+    timeout(Duration::from_secs(25), async {
+        while send_as(&relay, "late-agent", &batch).await != StatusCode::ACCEPTED {
+            sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("added agent was not accepted after background sync");
+
+    core.set_agents(&["late-agent"]);
+    timeout(Duration::from_secs(25), async {
+        while send(&relay, &batch).await != StatusCode::UNAUTHORIZED {
+            sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("revoked agent was still accepted after background sync");
+    assert!(core.agent_requests.load(Ordering::SeqCst) >= 3);
+    relay.stop().await;
+}
+
 #[tokio::test]
 async fn rejects_invalid_requests_and_overflow() {
     let core = fake_core().await;
@@ -697,7 +849,6 @@ async fn process_relay(dir: &Path, core: &Url, addr: SocketAddr) -> ProcessRelay
         std::process::Command::new(env!("CARGO_BIN_EXE_lognara-relay"))
             .env("LOGNARA_CORE_URL", core.as_str())
             .env("LOGNARA_CORE_TOKEN", TOKEN)
-            .env("LOGNARA_RELAY_TOKEN", "relay-secret")
             .env("LOGNARA_SPOOL_DIR", dir)
             .env("LOGNARA_LISTEN_ADDR", addr.to_string())
             .env("LOGNARA_BATCH_SIZE", "1")

@@ -10,7 +10,7 @@
                                        └─ /var/lib/lognara-dock/dock.sqlite3 (папка с хоста)
 ```
 
-Query-токен core хранится только в dock и не передаётся в браузер.
+Query- и admin-токены core хранятся только в dock и не передаются в браузер.
 
 ## Вход
 
@@ -45,6 +45,14 @@ docker run --rm httpd:2.4 htpasswd -Bbn liis 'пароль' >> auth/htpasswd
 
 **Ограничение.** Core ищет только по времени события. Если за один опрос в окне появилось больше 1000 новых событий, лента покажет самые свежие 1000. Полное решение требует tail-endpoint в core по порядку публикации.
 
+## Подключения relay и агентов
+
+После запуска core и dock войдите и откройте `/access` («Подключения»). Создайте relay по имени, затем агента по имени с выбором relay. Dock показывает токен только после создания и готовую строку `.env`: `LOGNARA_RELAY_CORE_TOKEN=lnr_…` либо `LOGNARA_AGENT_TOKEN=lna_…`. Сохраните её сразу; повторно показать секрет нельзя. Токены передаются процессам как `LOGNARA_CORE_TOKEN` relay и `LOGNARA_RELAY_TOKEN` агента.
+
+Реестр и SHA-256-хеши хранятся в core. Списки не содержат токенов. Перед удалением relay удалите его агентов. Core сразу отзывает relay-токен; relay применяет изменение списка агентов при следующем успешном обновлении (каждые 10 секунд). При недоступном core продолжает работать по кешу. Имя агента уникально внутри relay; метаданные источника не проверяются.
+
+API dock: GET/POST `/api/relays`, `/api/agents`, DELETE `/api/relays/{id}`, `/api/agents/{id}`. Требуется сессия, изменения требуют корректный Origin. Конфликты core возвращаются как 409, недоступность core — 502. Admin-токен core в браузер не попадает.
+
 ## Параметры
 
 Все параметры задаются переменными окружения и проверяются при старте. При ошибке процесс завершается с кодом 1 и называет переменную.
@@ -54,6 +62,7 @@ docker run --rm httpd:2.4 htpasswd -Bbn liis 'пароль' >> auth/htpasswd
 | `LOGNARA_DOCK_PUBLIC_URL` | обязательна | внешний адрес, например `https://dock.liis17.com`. Используется как origin для passkey и проверки `Origin`. `http` допускается только для `localhost` |
 | `LOGNARA_DOCK_CORE_URL` | обязательна | базовый адрес core, например `http://lognara-core:7402` |
 | `LOGNARA_DOCK_CORE_TOKEN` | обязательна | равен `LOGNARA_QUERY_TOKEN` core, ASCII без пробелов |
+| `LOGNARA_DOCK_CORE_ADMIN_TOKEN` | обязательна | равен `LOGNARA_ADMIN_TOKEN` core, ASCII без пробелов, отличается от query |
 | `LOGNARA_DOCK_LISTEN_ADDR` | `127.0.0.1:7403` | в контейнере `0.0.0.0:7403` (задано в образе) |
 | `LOGNARA_DOCK_HTPASSWD_FILE` | `/etc/lognara-dock/auth/htpasswd` | файл пользователей внутри смонтированной папки |
 | `LOGNARA_DOCK_DATA_DIR` | `/var/lib/lognara-dock` | SQLite с сессиями и passkey, lock-файл |

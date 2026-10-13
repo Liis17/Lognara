@@ -2,7 +2,7 @@
 //!
 //! Тело запроса: `Batch` в MessagePack (поля по именам), сжатый zstd.
 //! Заголовки: `Content-Type: application/msgpack`, `Content-Encoding: zstd`.
-//! Авторизация: `Authorization: Bearer <LOGNARA_RELAY_TOKEN>`.
+//! Авторизация: `Authorization: Bearer <токен агента>`; токен должен быть в списке агентов core..
 
 use std::io::Read;
 

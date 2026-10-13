@@ -24,6 +24,7 @@ hmac = "0.12"
 http-body-util = "0.1"
 lru = "0.16"
 parquet = { version = "59.2", default-features = false, features = ["arrow", "zstd"] }
+rand = "0.9"
 rmp-serde = "1"
 rusqlite = { version = "0.40", default-features = false, features = ["bundled", "cache", "libsqlite3-sys", "fallible_uint"] }
 serde = { version = "1", features = ["derive"] }

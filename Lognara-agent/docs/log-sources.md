@@ -118,6 +118,8 @@ python3 Lognara-agent/tests/check-memory-profile.py --sources --limit-mib 128
 
 ## Подключение приложений
 
+Сначала зарегистрируйте relay и отдельного агента в dock («Подключения»). Выданный токен агента сохраняется в `.env` как `LOGNARA_AGENT_TOKEN`, а в процесс передаётся как `LOGNARA_RELAY_TOKEN`. Для каждого агента используйте свой токен; поля источника не проверяются по профилю.
+
 Примеры JSON: [examples/log-sources](../examples/log-sources). Пути в них должны совпадать с настройками приложения и доступными агенту volumes. Готовых Docker-образов с агентом в репозитории нет.
 
 ### Nginx
@@ -139,7 +141,7 @@ services:
       LOGNARA_SERVER: docker-host
       LOGNARA_BACKEND: production
       LOGNARA_RELAY_URL: http://lognara-relay:7401/v1/batches
-      LOGNARA_RELAY_TOKEN: ${LOGNARA_RELAY_TOKEN:?Задайте ключ}
+      LOGNARA_RELAY_TOKEN: ${LOGNARA_AGENT_TOKEN:?Задайте персональный токен из dock}
     volumes:
       - nginx-agent-spool:/var/lib/lognara-agent/spool
 volumes:

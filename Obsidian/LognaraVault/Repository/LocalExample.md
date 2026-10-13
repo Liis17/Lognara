@@ -8,7 +8,7 @@ Parent: [[../Index]]
 
 | Файл | Назначение |
 |------|------------|
-| `Example/compose.yaml` | Сервисы `app`, `relay`, `core`, `dock`, инициализация `dock-init`, внутренние адреса, локальные токены, healthchecks и постоянные volumes. |
+| `Example/compose.yaml` | Сервисы `app`, `relay`, `core`, `dock`, инициализация `dock-init`, внутренние адреса, admin/query-токены, персональные токены из Example/.env, mem_limit relay, healthchecks и постоянные volumes. |
 | `Example/Dockerfile` | Отдельные стадии сборки agent/relay/core/dock из Cargo.lock на Rust 1.94 и фронтенда dock на Node.js 24; runtime Python 3.13 на Debian bookworm; конечные образы `app`, `relay`, `core`, `dock`. Для WebAuthn dock использует OpenSSL. |
 | `Example/Dockerfile.dockerignore` | Исключает локальные target, node_modules, dist, git, `.env`, Obsidian и кеши Python из контекста сборки. |
 | `Example/server.py` | HTTP-сервер на `0.0.0.0:8881`, JSON-логи в stdout и HTTP-передача в агент. |
@@ -29,7 +29,7 @@ Parent: [[../Index]]
 
 Источник: `service=python-example`, `server=local-machine`, `backend=example`, `environment=local`. IP из TCP-соединения может быть заменён Docker NAT; proxy-заголовки сохранены в массиве `headers`.
 
-Agent слушает localhost внутри контейнера приложения, relay, core и dock — `0.0.0.0` внутри Compose-сети. На хост публикуются только `127.0.0.1:8881`, `127.0.0.1:7402` и `127.0.0.1:7403`. Локальные тестовые токены явно заданы в Compose; ingest и query различаются. Origin dock — `http://localhost:7403`, для локального теста nginx и TLS не требуются.
+Agent слушает localhost внутри контейнера приложения, relay, core и dock — `0.0.0.0` внутри Compose-сети. На хост публикуются только `127.0.0.1:8881`, `127.0.0.1:7402` и `127.0.0.1:7403`. Локальные admin/query-токены явно заданы в Compose и различаются. Relay/agent-токены регистрируются в dock, сохраняются в `Example/.env`. Origin dock — `http://localhost:7403`, для локального теста nginx и TLS не требуются.
 
 ## Жизненный цикл и хранилища
 
@@ -53,4 +53,6 @@ Volumes `agent-spool`, `relay-spool`, `core-data`, `dock-auth`, `dock-data` со
 
 ## Проверка
 
-Из корня: `docker compose -f Example/compose.yaml config --quiet`, затем `docker compose -f Example/compose.yaml up --build -d --wait` и `python Example/smoke-test.py`. Тесты сервера: `python -B -m unittest discover -s Example/tests -v`. На Windows вместо `python` можно использовать `py`.
+Из корня: `docker compose -f Example/compose.yaml config --quiet`, затем `up --build -d --wait core dock`. Войдите в dock под demo, создайте relay и агента на странице «Подключения», впишите выданные строки `LOGNARA_RELAY_CORE_TOKEN`, `LOGNARA_AGENT_TOKEN` в `Example/.env`. Затем `up --build -d --wait` всей цепочки и `python Example/smoke-test.py`. Альтернатива регистрации через curl admin API — в Example/README.md. Пустые подстановки `${…:-}` позволяют стартовать core/dock до регистрации; relay/agent требуют свои токены при запуске. `LOGNARA_RELAY_MEMORY_MB=2048` задаёт RAM и `mem_limit` relay, минимум 2 GiB.
+
+Тесты сервера: `python -B -m unittest discover -s Example/tests -v`. На Windows вместо `python` можно использовать `py`.
