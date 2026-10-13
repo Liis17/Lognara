@@ -58,6 +58,13 @@ pub struct Queue {
     _lock: File,
 }
 
+impl Drop for Queue {
+    fn drop(&mut self) {
+        // fork может временно удерживать дескриптор после закрытия файла в родителе.
+        let _ = self._lock.unlock();
+    }
+}
+
 impl Queue {
     pub fn open(dir: &Path, max_bytes: u64, max_events: u64) -> Result<Self, Error> {
         Self::open_limited(dir, max_bytes, max_events, 100_000)
@@ -547,6 +554,28 @@ mod tests {
     fn exclusive_directory_lock_prevents_competing_writers() {
         let dir = tempfile::tempdir().unwrap();
         let _queue = Queue::open(dir.path(), 100, 100).unwrap();
+        assert!(Queue::open(dir.path(), 100, 100).is_err());
+    }
+
+    #[test]
+    fn dropping_queue_releases_lock_with_a_duplicated_descriptor() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = Queue::open(dir.path(), 100, 100).unwrap();
+        queue
+            .append_group([Ok((b"confirmed".to_vec(), 1))])
+            .unwrap();
+        // fork наследует тот же open file description, что и try_clone.
+        let inherited_lock = queue._lock.try_clone().unwrap();
+        assert!(Queue::open(dir.path(), 100, 100).is_err());
+        drop(queue);
+
+        let reopened = Queue::open(dir.path(), 100, 100);
+        drop(inherited_lock);
+        let reopened = reopened.expect("dropped queue must release its directory lock");
+        assert_eq!(
+            reopened.read(&reopened.entries()[0], 100).unwrap(),
+            b"confirmed"
+        );
         assert!(Queue::open(dir.path(), 100, 100).is_err());
     }
 

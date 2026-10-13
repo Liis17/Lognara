@@ -36,7 +36,9 @@ Rust-процесс, один на машину. Принимает пачки �
 
 Ресурсная конфигурация, admission до чтения тела и ожидание blocking-работников при остановке описаны в [[Relay/Memory]].
 
-Пример docker-compose (Dockerfile пока нет):
+`Lognara-relay/Dockerfile` собирается из корня репозитория и включает общий spool. Образ GHCR публикуется после успешного CI в `master`, работает от `1000:1000`; схема поставки и тегов в [[Repository/Images]].
+
+Пример docker-compose:
 
 ```yaml
 services:

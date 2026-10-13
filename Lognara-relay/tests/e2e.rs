@@ -365,12 +365,13 @@ async fn sends_early_when_batch_size_is_reached() {
     config.batch_size = 3;
     let relay = start_relay(config).await;
 
-    send(&relay, &agent_batch("api", &["1", "2"])).await;
-    send(&relay, &agent_batch("api", &["3"])).await;
+    assert_eq!(
+        send(&relay, &agent_batch("api", &["1", "2", "3"])).await,
+        StatusCode::ACCEPTED
+    );
 
     let batch = core.next_batch().await;
-    assert_eq!(messages(&batch.groups[0]), ["1", "2"]);
-    assert_eq!(messages(&core.next_batch().await.groups[0]), ["3"]);
+    assert_eq!(messages(&batch.groups[0]), ["1", "2", "3"]);
 }
 
 #[tokio::test]
@@ -422,21 +423,41 @@ async fn delivers_spool_left_from_previous_run_first() {
 
 #[tokio::test]
 async fn keeps_events_in_spool_on_shutdown_when_core_is_down() {
-    let core = fake_core().await;
-    core.respond(StatusCode::SERVICE_UNAVAILABLE);
-    let spool = tempfile::tempdir().unwrap();
-    let mut config = config(&core, spool.path());
-    config.flush_interval = Duration::from_secs(60);
-    let relay = start_relay(config).await;
+    for started_delivery in [false, true] {
+        let core = fake_core().await;
+        core.respond(StatusCode::SERVICE_UNAVAILABLE);
+        let spool = tempfile::tempdir().unwrap();
+        let mut config = config(&core, spool.path());
+        config.flush_interval = Duration::from_secs(60);
+        if started_delivery {
+            config.batch_size = 1;
+        }
+        let relay = start_relay(config).await;
 
-    send(&relay, &agent_batch("api", &["late"])).await;
-    relay.stop().await;
+        assert_eq!(
+            send(&relay, &agent_batch("api", &["late"])).await,
+            StatusCode::ACCEPTED
+        );
+        if started_delivery {
+            eventually(|| core.requests() >= 1).await;
+        }
+        relay.stop().await;
 
-    assert_eq!(core.requests(), 1);
-    let saved = Spool::open(spool.path(), u64::MAX).await.unwrap();
-    assert_eq!(saved.len(), 1);
-    let batch = decode(&saved.oldest().await.unwrap().unwrap());
-    assert_eq!(messages(&batch.groups[0]), ["late"]);
+        // Первый тик sender и финальная отправка при shutdown могут оба обратиться к core.
+        assert!(core.requests() >= if started_delivery { 2 } else { 1 });
+        let saved = Spool::open(spool.path(), u64::MAX).await.unwrap();
+        assert_eq!(saved.len(), 1);
+        let body = saved.oldest().await.unwrap().unwrap();
+        assert!(
+            core.bodies
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|request| request.as_ref() == body.as_slice())
+        );
+        let batch = decode(&body);
+        assert_eq!(messages(&batch.groups[0]), ["late"]);
+    }
 }
 
 #[tokio::test]
@@ -499,7 +520,8 @@ async fn retains_batch_rejected_by_core() {
     let relay = start_relay(config(&core, spool.path())).await;
 
     send(&relay, &agent_batch("api", &["rejected"])).await;
-    eventually(|| core.requests() == 1).await;
+    eventually(|| core.requests() >= 2).await;
+    assert_eq!(spooled(spool.path()), 1);
     core.respond(StatusCode::OK);
     send(&relay, &agent_batch("api", &["accepted"])).await;
 

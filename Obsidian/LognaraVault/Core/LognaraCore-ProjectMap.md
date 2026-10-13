@@ -5,6 +5,7 @@ Parent: [[Core/LognaraCore]]
 | Модуль | Ответственность |
 |---|---|
 | main, lib | Запуск и сборка сервиса |
+| Dockerfile | Release-сборка из корневого контекста, runtime Debian slim от 1000:1000; публикация в [[Repository/Images]] |
 | config | Проверяемые переменные окружения |
 | wire, wire_budget, model | Бинарный контракт, бюджет десериализации без аллокаций и JSON-представление |
 | api | Авторизация relay/query/admin и HTTP |

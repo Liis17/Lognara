@@ -205,13 +205,14 @@ Relay проверяет единственный Bearer-заголовок до
 
 Скопируйте `.env.example` в `.env`, сгенерируйте разные admin/query токены (`openssl rand -hex 32`), запустите центральные сервисы, затем впишите токены из dock на машине приложений. `.env` исключён из git. Compose подставляет `${...}`, контейнер получает значение через `environment`. Бинарники `.env` автоматически не читают.
 
-Фрагменты ниже дополняют ваши `image`/`build`. Сборка всех сервисов есть в `Example/Dockerfile`.
+Фрагменты ниже используют образы core, relay и dock из GHCR, доступные после успешного CI в `master`, с общим `LOGNARA_IMAGE_TAG`. `app-with-agent` обозначает ваш контейнер приложения с настроенным `image`/`build`: agent собирается вместе с ним и принимает логи по localhost. Сборка всех сервисов есть в `Example/Dockerfile`.
 
 Центральный сервер: core + dock (для dock подготовьте htpasswd и каталог данных по его [руководству](Lognara-dock/README.md)):
 
 ```yaml
 services:
   lognara-core:
+    image: ghcr.io/liis17/lognara-core:${LOGNARA_IMAGE_TAG:-master}
     environment:
       LOGNARA_LISTEN_ADDR: "0.0.0.0:7402"
       LOGNARA_ADMIN_TOKEN: ${LOGNARA_CORE_ADMIN_TOKEN:?Задайте LOGNARA_CORE_ADMIN_TOKEN}
@@ -219,6 +220,7 @@ services:
     volumes:
       - ${LOGNARA_CORE_DATA:-lognara-core-data}:/var/lib/lognara-core
   lognara-dock:
+    image: ghcr.io/liis17/lognara-dock:${LOGNARA_IMAGE_TAG:-master}
     environment:
       LOGNARA_DOCK_LISTEN_ADDR: "0.0.0.0:7403"
       LOGNARA_DOCK_PUBLIC_URL: https://dock.example.com
@@ -237,6 +239,7 @@ volumes:
 ```yaml
 services:
   lognara-relay:
+    image: ghcr.io/liis17/lognara-relay:${LOGNARA_IMAGE_TAG:-master}
     environment:
       LOGNARA_LISTEN_ADDR: "0.0.0.0:7401"
       LOGNARA_CORE_URL: https://core.example.com/v1/batches
@@ -270,6 +273,26 @@ volumes:
 
 ## Обновление
 
+Образы core, relay и dock публикуются из `master` после успешного прохождения всех проверок CI:
+
+- `ghcr.io/liis17/lognara-core`
+- `ghcr.io/liis17/lognara-relay`
+- `ghcr.io/liis17/lognara-dock`
+
+Для каждого образа публикуются `master` (обновляемый тег ветки) и `sha-<полный SHA коммита>` (привязка к исходникам для конкретной сборки). Для согласованного обновления всех компонентов задайте один `LOGNARA_IMAGE_TAG=sha-...` в `.env`, затем выполните `docker compose pull` и `docker compose up -d`. Для точной фиксации содержимого образа можно использовать digest `@sha256:...`: повторная сборка того же коммита может получить другой digest при обновлении базовых образов. Отдельный образ agent не публикуется: он собирается в контейнере вашего приложения; библиотека spool входит в зависимые бинарники.
+
+Предлагаемая схема будущих релизов: общий Git-тег `v0.1.0` для всех компонентов и тег образа `0.1.0`, затем `0.1.1` для исправлений и `0.2.0` для следующего набора возможностей. Релизные теги и `latest` текущий workflow не публикует; версии из `Cargo.toml` не перезаписываются каждым коммитом.
+
+Образы собираются для `linux/amd64` в несколько стадий: Rust release без `crash-tests`, затем Debian slim с бинарником; dock также включает React-сборку. Процессы работают от UID/GID `1000:1000`; папки данных на хосте должны быть доступны этому пользователю. Локальная сборка из корня репозитория:
+
+```sh
+docker build -f Lognara-core/Dockerfile -t lognara-core .
+docker build -f Lognara-relay/Dockerfile -t lognara-relay .
+docker build -f Lognara-dock/Dockerfile -t lognara-dock Lognara-dock
+```
+
+CI входит в GHCR с автоматически выданным `GITHUB_TOKEN`; отдельный PAT для публикации не нужен. После первой публикации проверьте видимость пакетов: новые пакеты по умолчанию приватные, для публичного скачивания включите Public в настройках каждого пакета. Приватные образы требуют авторизации при скачивании. [Документация GHCR](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry).
+
 1. Сначала восстановите downstream и доставьте остатки старых очередей в RAM: старые версии не сохраняют подтверждённую очередь полностью.
 2. Поднимите обновлённые core и dock с разными admin/query-токенами. В dock зарегистрируйте relay и его агентов, сохраните персональные токены в `.env`. Старые `LOGNARA_INGEST_TOKEN` core и `LOGNARA_RELAY_TOKEN` relay больше не используются.
 3. Обновите relay, сохранив его spool volume и согласованные лимиты core. Проверьте доставку старых `.batch`.
@@ -301,6 +324,17 @@ volumes:
 - [Нагрузочная проверка](Lognara-core/docs/benchmark.md): стенд и критерии.
 
 ## Разработка
+
+GitHub Actions [CI](.github/workflows/ci.yml) запускается после `push` в любую ветку, при открытии, обновлении и повторном открытии pull request, а также вручную из Actions. Фильтров по изменённым файлам нет: каждый запуск проверяет весь проект. Локальный коммит запускает CI после отправки на GitHub. Новый запуск отменяет предыдущий незавершённый запуск того же события и ветки/PR. [События GitHub Actions](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows).
+
+На GitHub-hosted runner `ubuntu-24.04` выполняются:
+
+- Для всех пяти crate: `cargo fmt --all --check`, Clippy для всех targets/features с запретом предупреждений, обычная сборка без тестовых features и `cargo test --all-features` (unit, интеграционные, e2e и doc-тесты). Cargo использует `--locked` для сборки, Clippy и тестов.
+- Для core: в тестах включается `crash-tests`, проверяющий аварийное завершение и восстановление после ACK.
+- Для agent и relay: отдельные проверки памяти через `check-memory-profile.py`, включая обычно игнорируемые нагрузочные тесты; лимиты RSS 256 MiB и 2048 MiB соответственно.
+- Для `Lognara-dock/web`: Node.js 24, `npm ci` и `npm run build`, который проверяет TypeScript и собирает Vite. Отдельного набора frontend unit-тестов пока нет.
+
+Rust-компоненты проверяются независимо; зависимости Cargo и npm кешируются. Проверки не требуют секретов или внешних сервисов. Итоговая проверка **`CI passed`** успешна только при успешном завершении всех Rust-проверок и веб-сборки. Чтобы запретить merge при ошибках, добавьте `CI passed` в обязательные status checks правил защищённой ветки или ruleset; сам workflow не изменяет настройки репозитория. [Обязательные status checks](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches#require-status-checks-before-merging).
 
 Тесты, форматирование и линтер запускаются для каждого сервиса отдельно:
 
