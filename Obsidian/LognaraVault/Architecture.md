@@ -8,7 +8,7 @@ Parent: [[Index]]
 |---------|-------------------|
 | Язык и runtime | Rust (edition 2024) и tokio подтверждены для `Lognara-agent/` и `Lognara-relay/`. Core также использует Rust 2024 и tokio; MSRV 1.94. |
 | Зависимости | `Lognara-agent/Cargo.toml`: axum, reqwest, tokio, tokio-util, serde, serde_json, rmp-serde, serde_bytes, zstd, tracing, http-body, glob, regex, sha2, libc, общий lognara-spool. Подробности в [[Agent/LognaraAgent]]. `Lognara-relay/Cargo.toml`: общие HTTP/runtime/serde/zstd зависимости, reqwest с rustls, а также uuid, time, base64, bytes, http-body для ограниченного чтения, sha2 для проверки хешей агентов из core. Подробности в [[Relay/LognaraRelay]]. |
-| Веб-интерфейс | `Lognara-dock/Cargo.toml`: axum, tower-http (ServeDir), reqwest, rusqlite (bundled), bcrypt, webauthn-rs 0.5 (`conditional-ui`, требует OpenSSL), fs2, time. Фронтенд `Lognara-dock/web/`: React, react-router, TypeScript, Vite. Подробности в [[Dock/LognaraDock]]. |
+| Веб-интерфейс | `Lognara-dock/Cargo.toml`: axum, tower-http (ServeDir), reqwest, rusqlite (bundled), bcrypt, webauthn-rs 0.5 (`conditional-ui`, требует OpenSSL), fs2, time. Фронтенд `Lognara-dock/web/`: React, react-router, TypeScript, Vite; локальные Commissioner и IBM Plex Mono с лицензиями OFL. Подробности в [[Dock/LognaraDock]]. |
 | Лицензия | MIT, см. `LICENSE`. |
 | Локальный стенд | Docker Compose и Python 3.13 (стандартная библиотека без сторонних Python-пакетов) в `Example/`; сборка Rust-сервисов в Docker на Rust 1.94. Подробнее в [[Repository/LocalExample]]. |
 

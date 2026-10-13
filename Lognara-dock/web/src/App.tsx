@@ -20,7 +20,9 @@ export default function App() {
     refresh();
   }, []);
 
-  if (me === undefined) return null;
+  if (me === undefined) {
+    return <div className="session-state" role="status">Проверяем сессию…</div>;
+  }
 
   if (me === null) {
     return (
@@ -39,15 +41,17 @@ export default function App() {
 
   return (
     <div className="app">
-      <header>
-        <strong>Lognara</strong>
-        <nav>
+      <header className="topbar">
+        <NavLink className="brand" to="/logs" aria-label="Lognara Dock, логи">
+          lognara<span>/</span>dock
+        </NavLink>
+        <nav aria-label="Разделы">
           <NavLink to="/logs">Логи</NavLink>
           <NavLink to="/access">Подключения</NavLink>
           <NavLink to="/settings">Настройки</NavLink>
         </nav>
         <span className="user">{me.username}</span>
-        <button onClick={logout}>Выйти</button>
+        <button className="quiet" onClick={logout}>Выйти</button>
       </header>
       <main>
         <Routes>

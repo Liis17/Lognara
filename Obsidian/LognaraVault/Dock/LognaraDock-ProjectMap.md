@@ -33,6 +33,8 @@ Lognara-dock/
     live.rs                   поддельный core: дедупликация, ошибки, остановка опроса
     static.rs                 SPA fallback и 404 для /api
   web/
+    public/fonts/             локальные Commissioner / IBM Plex Mono, OFL, provenance
+    src/index.css             общая тёмная палитра, формы, панели и адаптивные таблицы
     src/api.ts                fetch-обёртка и тексты ошибок
     src/webauthn.ts           base64url ↔ ArrayBuffer для navigator.credentials
     src/App.tsx               проверка /api/me, маршруты /login, /logs, /access, /settings
