@@ -50,6 +50,7 @@ fn default_timeout() -> u64 {
 impl Multiline {
     pub(crate) fn compile(&self) -> io::Result<Regex> {
         RegexBuilder::new(&self.start_pattern)
+            .unicode(false)
             .size_limit(64 << 10)
             .dfa_size_limit(64 << 10)
             .build()

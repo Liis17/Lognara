@@ -7,6 +7,7 @@ pub mod sources;
 pub mod wire;
 
 mod buffer;
+mod files;
 mod ingest;
 mod sender;
 
@@ -27,19 +28,27 @@ pub async fn run(
     listener: TcpListener,
     shutdown: CancellationToken,
 ) -> io::Result<()> {
+    config.sources.validate(false)?;
     config.validate().map_err(io::Error::other)?;
+    let _cancel_sources = shutdown.clone().drop_guard();
     let buffer = Buffer::open(config.clone())
         .await
         .map_err(io::Error::other)?;
+    let files = files::Files::open(&config).await?;
+    let file_task = tokio::spawn(files.run(buffer.clone(), shutdown.clone()));
     // Отправка останавливается только после приёма, чтобы последние записи попали в финальную пачку.
     let stop_sending = CancellationToken::new();
     let _cancel_sender = stop_sending.clone().drop_guard();
     let sender = tokio::spawn(Sender::new(&config, buffer.clone(), stop_sending.clone()).run());
 
     let served = axum::serve(listener, ingest::router(buffer.clone()))
-        .with_graceful_shutdown(shutdown.cancelled_owned())
+        .with_graceful_shutdown(shutdown.clone().cancelled_owned())
         .await;
 
+    shutdown.cancel();
+    if let Err(err) = file_task.await {
+        error!(error = %err, "file collector task failed");
+    }
     stop_sending.cancel();
     if let Err(err) = sender.await {
         error!(error = %err, "sender task failed");

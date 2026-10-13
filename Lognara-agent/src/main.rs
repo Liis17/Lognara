@@ -10,13 +10,20 @@ use tracing::{error, info};
 async fn main() -> ExitCode {
     tracing_subscriber::fmt().with_target(false).init();
 
-    let config = match Config::from_env() {
+    let mut config = match Config::from_env() {
         Ok(config) => config,
         Err(err) => {
             error!("{err}");
             return ExitCode::FAILURE;
         }
     };
+    let sources_path = std::env::var_os("LOGNARA_SOURCES_FILE")
+        .filter(|path| !path.is_empty())
+        .map(std::path::PathBuf::from);
+    if let Err(err) = config.load_sources(sources_path.as_deref(), false) {
+        error!("LOGNARA_SOURCES_FILE: {err}");
+        return ExitCode::FAILURE;
+    }
     let listener = match TcpListener::bind(config.listen_addr).await {
         Ok(listener) => listener,
         Err(err) => {

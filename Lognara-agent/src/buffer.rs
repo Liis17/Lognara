@@ -140,9 +140,12 @@ impl Buffer {
     }
 
     pub(crate) fn file_pressure(&self) -> bool {
-        self.events.load(Ordering::Acquire) >= (self.config.max_buffer as u64).saturating_mul(3) / 4
+        self.events.load(Ordering::Acquire)
+            >= (self.config.max_buffer as u64)
+                .saturating_mul(3)
+                .div_ceil(4)
             || self.bytes.load(Ordering::Acquire)
-                >= self.config.spool_max_bytes.saturating_mul(3) / 4
+                >= self.config.spool_max_bytes.saturating_mul(3).div_ceil(4)
     }
 
     pub(crate) fn source_record_limit(&self) -> usize {
