@@ -9,6 +9,7 @@ Parent: [[Index]]
 | Язык и runtime | Rust (edition 2024) и tokio подтверждены для `Lognara-agent/` и `Lognara-relay/`. Core также использует Rust 2024 и tokio; MSRV 1.94. |
 | Зависимости | `Lognara-agent/Cargo.toml`: axum, reqwest, tokio, tokio-util, serde, serde_json, rmp-serde, serde_bytes, zstd, tracing, http-body, общий lognara-spool. Подробности в [[Agent/LognaraAgent]]. `Lognara-relay/Cargo.toml`: те же, reqwest с rustls, а также uuid, time, base64, bytes, http-body для ограниченного чтения, sha2 и subtle для аутентификации агентов. Подробности в [[Relay/LognaraRelay]]. |
 | Лицензия | MIT, см. `LICENSE`. |
+| Локальный стенд | Docker Compose и Python 3.13 (стандартная библиотека без сторонних Python-пакетов) в `Example/`; сборка Rust-сервисов в Docker на Rust 1.94. Подробнее в [[Repository/LocalExample]]. |
 
 ## Компоненты и сервисы
 
@@ -18,6 +19,7 @@ Parent: [[Index]]
 | [[Relay/LognaraRelay]] | `Lognara-relay/` | Реализованы приём пачек агентов, разбор в события, группировка по источнику, отправка в core и spool на диске. Структура в [[Relay/LognaraRelay-ProjectMap]]. |
 | [[Core/LognaraCore]] | `Lognara-core/` | Реализованы HTTP-приём, WAL, Arrow/Parquet, каталог SQLite, поиск Tantivy, аналитика DataFusion и retention. |
 | [[Delivery/Spool]] | `Lognara-spool/` | Общая атомарная файловая очередь; оба процесса подтверждают приём только после durable commit. |
+| [[Repository/LocalExample]] | `Example/` | Локальный Compose: Python-сервер на 8881 и agent в одном контейнере, relay и core отдельно. |
 
 Корневые файлы описаны в [[Repository/RootFiles]].
 
@@ -28,6 +30,9 @@ Parent: [[Index]]
 | `Lognara-agent/src/main.rs` | Точка входа агента. Параметры задаются переменными `LOGNARA_*`. |
 | `Lognara-relay/src/main.rs` | Точка входа relay. Параметры задаются переменными `LOGNARA_*`, spool хранится в `LOGNARA_SPOOL_DIR`. |
 | `Lognara-core/src/main.rs` | Точка входа core; отдельный crate, конфигурация `LOGNARA_*`. |
+| `Example/compose.yaml` | Запуск трёх контейнеров на одной машине; на хост публикуются localhost:8881 и localhost:7402. |
+| `Example/entrypoint.py` | Запускает agent и Python-сервер внутри `app`, передаёт остановку обоим процессам. |
+| `Example/server.py` | Любой корректный HTTP-метод и путь; данные клиента в JSON/stdout и на локальный agent. |
 | `README.md` | Обзор проекта: схема потока, быстрый старт, порты и параметры, API core, статус. |
 | `.gitignore` | Исключает сборки Cargo (`target`) и артефакты агента в корневом `/build/`, резервные файлы rustfmt, PDB, Cargo Mutants, `default.profraw`, `.DS_Store`, локальный `.env` с ключом. |
 | `.env.example` | Пустой обязательный `LOGNARA_RELAY_TOKEN` и инструкция генерации ключа для Compose. |
@@ -71,3 +76,5 @@ Parent: [[Index]]
 Core запускается отдельно за TLS-прокси, ingest и query используют разные токены. SIGTERM/SIGINT дорабатывает WAL. HTTP API, эксплуатация и нагрузочный стенд документированы в `Lognara-core/README.md` и `Lognara-core/docs/`.
 
 Agent и relay требуют постоянные отдельные volumes. Agent резервирует 64 MiB под индекс, источник, приём и подготовку отправки; payload ограничен 2 MiB, пачки 8 MiB. Дисковая квота каждого процесса 1 GiB; у agent отдельно до 8 MiB под pending. Переполнение возвращает `503`, HTTP-отказы удерживают очередь. Подробности и гарантия в [[Delivery/Spool]], [[Agent/LognaraAgent]] и README.
+
+В тестовом [[Repository/LocalExample]] core запускается без TLS-прокси в изолированной Compose-сети и публикует API только на `127.0.0.1:7402`. App публикует `127.0.0.1:8881`, agent остаётся на localhost своего контейнера, relay наружу не публикуется. Тестовые токены задаются в Compose, отдельные volumes хранят обе очереди и core. Запрос → Python JSON/stdout → agent → relay → core проверяется `Example/smoke-test.py`.
