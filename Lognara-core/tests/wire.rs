@@ -117,4 +117,21 @@ fn configuration_requires_separate_tokens_and_valid_limits() {
         })
         .is_err()
     );
+    assert!(config.admin_token.is_none());
+    let with_admin = |token: &'static str| {
+        Config::from_lookup(|key| {
+            if key == "LOGNARA_ADMIN_TOKEN" {
+                Some(token.into())
+            } else {
+                lookup(key)
+            }
+        })
+    };
+    assert_eq!(
+        with_admin("admin").unwrap().admin_token.as_deref(),
+        Some("admin")
+    );
+    assert!(with_admin("").unwrap().admin_token.is_none());
+    assert!(with_admin("ingest").is_err());
+    assert!(with_admin("query").is_err());
 }

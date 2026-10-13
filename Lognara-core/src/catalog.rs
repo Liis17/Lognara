@@ -1,5 +1,6 @@
 //! Каталог и checkpoint фиксируются одной FULL-синхронной транзакцией SQLite.
 use crate::{
+    definitions::Definition,
     series::SeriesFileMeta,
     wal::{Position, Receipt, sync_dir},
 };
@@ -52,6 +53,7 @@ impl Catalog {
             CREATE INDEX IF NOT EXISTS receipts_age ON receipts(received_at);
             CREATE TABLE IF NOT EXISTS series_files (id TEXT PRIMARY KEY, metadata TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('ready','deleting')));
             CREATE TABLE IF NOT EXISTS series_names (service TEXT NOT NULL, name TEXT NOT NULL, origin TEXT NOT NULL, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, PRIMARY KEY(service, name, origin));
+            CREATE TABLE IF NOT EXISTS series_definitions (id TEXT PRIMARY KEY, service TEXT NOT NULL, name TEXT NOT NULL, body TEXT NOT NULL, UNIQUE(service, name));
             PRAGMA user_version=2;")?;
         sync_dir(path.parent().expect("catalog has a parent"))?;
         Ok(Self { connection })
@@ -121,6 +123,60 @@ impl Catalog {
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Есть ли у (service, name) native-точки counter или gauge; точки правил не считаются.
+    pub fn has_native_name(&self, service: &str, name: &str) -> Result<bool> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM series_names WHERE service=?1 AND name=?2 AND origin IN ('counter','gauge'))",
+            params![service, name],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn definitions(&self) -> Result<Vec<Definition>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT body FROM series_definitions ORDER BY service,name")?;
+        let json = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        json.iter()
+            .map(|json| Ok(serde_json::from_str(json)?))
+            .collect()
+    }
+
+    pub fn insert_definition(&self, definition: &Definition) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO series_definitions VALUES(?1,?2,?3,?4)",
+            params![
+                definition.id.to_string(),
+                definition.service,
+                definition.name,
+                serde_json::to_string(definition)?
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// false - определения с таким id нет.
+    pub fn update_definition(&self, definition: &Definition) -> Result<bool> {
+        Ok(self.connection.execute(
+            "UPDATE series_definitions SET service=?2,name=?3,body=?4 WHERE id=?1",
+            params![
+                definition.id.to_string(),
+                definition.service,
+                definition.name,
+                serde_json::to_string(definition)?
+            ],
+        )? == 1)
+    }
+
+    pub fn delete_definition(&self, id: &str) -> Result<bool> {
+        Ok(self
+            .connection
+            .execute("DELETE FROM series_definitions WHERE id=?1", [id])?
+            == 1)
     }
 
     pub fn receipt(&self, hash: &[u8; 32]) -> Result<Option<Receipt>> {

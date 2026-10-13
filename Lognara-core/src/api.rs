@@ -11,13 +11,14 @@ use axum::{
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use crate::{
-    analytics::{self, GroupRequest, HistogramRequest},
+    analytics::{self, GroupRequest, HistogramRequest, PreviewRequest},
+    definitions::{self, DefinitionInput},
     journal::{IngestError, Journal},
     query::{self, QueryError, SearchRequest},
     storage::Core,
@@ -35,7 +36,12 @@ pub fn router(core: Arc<Core>) -> Router {
             authorize,
         ))
         .with_state(core.clone());
-    ingest_router(core.journal.clone()).merge(queries)
+    let router = ingest_router(core.journal.clone()).merge(queries);
+    match &core.journal.config.admin_token {
+        Some(token) => router.merge(admin_router(core.clone(), token)),
+        // Без токена администратора маршрутов нет, и они отвечают 404.
+        None => router,
+    }
 }
 
 async fn histogram(
@@ -87,6 +93,94 @@ async fn run_analytics<T: serde::Serialize>(
             error.into_response()
         }
     }
+}
+
+fn admin_router(core: Arc<Core>, token: &str) -> Router {
+    Router::new()
+        .route(
+            "/v1/admin/series/definitions",
+            get(list_definitions).post(create_definition),
+        )
+        .route(
+            "/v1/admin/series/definitions/{id}",
+            put(update_definition).delete(delete_definition),
+        )
+        .route("/v1/admin/series/preview", post(preview))
+        .route_layer(middleware::from_fn_with_state(token_hash(token), authorize))
+        .with_state(core)
+}
+
+async fn list_definitions(State(core): State<Arc<Core>>) -> Response {
+    match blocking(core, definitions::list).await {
+        Ok(definitions) => Json(serde_json::json!({"definitions": definitions})).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn create_definition(
+    State(core): State<Arc<Core>>,
+    request: Result<Json<DefinitionInput>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let input = match request {
+        Ok(Json(input)) => input,
+        Err(error) => return QueryError::Invalid(error.body_text()).into_response(),
+    };
+    match blocking(core, move |core| definitions::create(core, input)).await {
+        Ok(definition) => (StatusCode::CREATED, Json(definition)).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn update_definition(
+    State(core): State<Arc<Core>>,
+    Path(id): Path<String>,
+    request: Result<Json<DefinitionInput>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let input = match request {
+        Ok(Json(input)) => input,
+        Err(error) => return QueryError::Invalid(error.body_text()).into_response(),
+    };
+    match blocking(core, move |core| definitions::update(core, &id, input)).await {
+        Ok(Some(definition)) => Json(definition).into_response(),
+        Ok(None) => definition_not_found(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn delete_definition(State(core): State<Arc<Core>>, Path(id): Path<String>) -> Response {
+    match blocking(core, move |core| definitions::delete(core, &id)).await {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => definition_not_found(),
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn preview(
+    State(core): State<Arc<Core>>,
+    request: Result<Json<PreviewRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    match request {
+        Ok(Json(request)) => run_analytics(&core, analytics::preview(&core, request)).await,
+        Err(error) => QueryError::Invalid(error.body_text()).into_response(),
+    }
+}
+
+/// Работа с каталогом вне async executor; сбой задачи считается ошибкой хранилища.
+async fn blocking<T: Send + 'static>(
+    core: Arc<Core>,
+    work: impl FnOnce(&Core) -> Result<T, QueryError> + Send + 'static,
+) -> Result<T, QueryError> {
+    tokio::task::spawn_blocking(move || work(&core))
+        .await
+        .map_err(|error| QueryError::Storage(error.into()))?
+}
+
+fn definition_not_found() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({"error": "definition not found"})),
+    )
+        .into_response()
 }
 
 pub fn ingest_router(journal: Arc<Journal>) -> Router {

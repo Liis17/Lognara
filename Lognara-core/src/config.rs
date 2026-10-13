@@ -10,6 +10,7 @@ pub struct Config {
     pub data_dir: PathBuf,
     pub ingest_token: String,
     pub query_token: String,
+    pub admin_token: Option<String>,
     pub max_body_bytes: usize,
     pub max_decoded_bytes: usize,
     pub max_model_bytes: usize,
@@ -54,6 +55,7 @@ impl Config {
                 .into(),
             ingest_token: required("LOGNARA_INGEST_TOKEN")?,
             query_token: required("LOGNARA_QUERY_TOKEN")?,
+            admin_token: get("LOGNARA_ADMIN_TOKEN"),
             max_body_bytes: number("LOGNARA_MAX_BODY_BYTES", 64 << 20)? as usize,
             max_decoded_bytes: number("LOGNARA_MAX_DECODED_BYTES", 256 << 20)? as usize,
             max_model_bytes: number(
@@ -76,6 +78,13 @@ impl Config {
         };
         if config.ingest_token == config.query_token {
             bail!("LOGNARA_INGEST_TOKEN and LOGNARA_QUERY_TOKEN must differ");
+        }
+        if let Some(admin) = &config.admin_token
+            && (*admin == config.ingest_token || *admin == config.query_token)
+        {
+            bail!(
+                "LOGNARA_ADMIN_TOKEN must differ from LOGNARA_INGEST_TOKEN and LOGNARA_QUERY_TOKEN"
+            );
         }
         if config.max_body_bytes > u32::MAX as usize
             || config.max_decoded_bytes > u32::MAX as usize

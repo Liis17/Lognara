@@ -5,6 +5,7 @@ pub mod api;
 pub mod catalog;
 pub mod columns;
 pub mod config;
+pub mod definitions;
 pub mod extract;
 pub mod index;
 pub mod journal;

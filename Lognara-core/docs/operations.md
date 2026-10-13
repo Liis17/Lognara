@@ -10,6 +10,7 @@
 |---|---|---|
 | `LOGNARA_INGEST_TOKEN` | обязательна | Bearer для `/v1/batches` |
 | `LOGNARA_QUERY_TOKEN` | обязательна | Другой Bearer для поиска, статистики и `/metrics` |
+| `LOGNARA_ADMIN_TOKEN` | не задан | Bearer для `/v1/admin/series/*`; без него маршруты отвечают 404; отличается от ingest и query |
 | `LOGNARA_LISTEN_ADDR` | `127.0.0.1:7402` | HTTP listener |
 | `LOGNARA_DATA_DIR` | `/var/lib/lognara-core` | WAL, SQLite, сегменты |
 | `LOGNARA_MAX_BODY_BYTES` | `67108864` | Сжатое тело |

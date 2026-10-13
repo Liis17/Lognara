@@ -3,6 +3,7 @@ use crate::{
     catalog::{SegmentMeta, SeriesName},
     columns,
     config::Config,
+    definitions::{LabelGuard, RuleSet},
     extract,
     index::{ActiveIndex, IndexCache},
     journal::Journal,
@@ -55,6 +56,7 @@ pub struct Snapshot {
 pub struct Core {
     pub journal: Arc<Journal>,
     snapshot: RwLock<Arc<Snapshot>>,
+    pub rules: RwLock<Arc<RuleSet>>,
     pub indexes: IndexCache,
     pub instance: Uuid,
     pub(crate) cursor_key: [u8; 32],
@@ -78,6 +80,7 @@ impl Core {
             .with_object_list_cache_limit(8 << 20)
             .build_arc()?;
         let journal = Journal::open(config)?;
+        let rules = RuleSet::load(&journal.catalog.lock().unwrap().definitions()?)?;
         let mut key = [0; 32];
         key[..16].copy_from_slice(Uuid::new_v4().as_bytes());
         key[16..].copy_from_slice(Uuid::new_v4().as_bytes());
@@ -88,6 +91,7 @@ impl Core {
             ),
             journal,
             snapshot: RwLock::new(Arc::new(Snapshot::default())),
+            rules: RwLock::new(Arc::new(rules)),
             instance: Uuid::new_v4(),
             cursor_key: key,
             search_slots: Arc::new(Semaphore::new(4)),
@@ -143,7 +147,13 @@ struct ActiveSegment {
 
 impl ActiveSegment {
     /// Извлекает точки из строк пачки; ошибки разбора только считаются в метриках.
-    fn add_points(&mut self, rows: &[StoredEvent], metrics: &Metrics) -> Result<()> {
+    fn add_points(
+        &mut self,
+        rows: &[StoredEvent],
+        rules: &RuleSet,
+        guard: &mut LabelGuard,
+        metrics: &Metrics,
+    ) -> Result<()> {
         let mut points = vec![];
         for row in rows {
             let (found, invalid) = extract::native(row);
@@ -151,7 +161,22 @@ impl ActiveSegment {
                 metrics.series_parse_errors.fetch_add(1, Ordering::Relaxed);
             }
             points.extend(found);
+            let (found, invalid) = extract::rules(row, rules);
+            if invalid {
+                metrics.series_parse_errors.fetch_add(1, Ordering::Relaxed);
+            }
+            points.extend(found);
         }
+        let extracted = points.len();
+        points.retain(|point| {
+            point
+                .rule_id
+                .as_ref()
+                .is_none_or(|rule_id| guard.admit(rule_id, &point.labels))
+        });
+        metrics
+            .series_dropped_points
+            .fetch_add((extracted - points.len()) as u64, Ordering::Relaxed);
         if points.is_empty() {
             return Ok(());
         }
@@ -188,6 +213,7 @@ struct Materializer {
     position: Position,
     watermark: u64,
     generation: u64,
+    guard: LabelGuard,
     last_publish: Instant,
     last_retention: Instant,
 }
@@ -299,6 +325,7 @@ impl Materializer {
             position,
             watermark,
             generation: 0,
+            guard: LabelGuard::default(),
             last_publish: Instant::now(),
             last_retention: Instant::now() - Duration::from_secs(60),
         })
@@ -391,6 +418,8 @@ impl Materializer {
         if self.active.is_none() {
             self.active = Some(self.new_segment(&rows[0])?);
         }
+        // Один снимок правил на пачку: изменение в середине пачки не разделяет её строки.
+        let rules = self.core.rules.read().unwrap().clone();
         let active = self.active.as_mut().unwrap();
         let batch = columns::encode(rows)?;
         for row in rows {
@@ -403,7 +432,7 @@ impl Materializer {
         }
         active.meta.uncompressed_bytes += batch.get_array_memory_size();
         active.batches.push(batch);
-        active.add_points(rows, &self.core.journal.metrics)?;
+        active.add_points(rows, &rules, &mut self.guard, &self.core.journal.metrics)?;
         self.position.offset += rows.len() as u64;
         self.watermark = rows.last().unwrap().sequence;
         active.meta.checkpoint = self.position;

@@ -60,6 +60,16 @@ cargo run --example relay_fixture -- tests/fixtures/relay-batch.bin
 
 Ответ: `groups: [{values: {service: "api", level: "error"}, count}]`, `as_of`. Разрешены 1–2 разных поля: environment, server, backend, service, service_instance, level, action. Отсутствующее значение — JSON null. Сортировка count DESC, затем ключи группы. Limit 1..1000, по умолчанию 100. Фильтры совпадают с поиском; `text`, `attributes` и SQL отклоняются.
 
+## Определения метрик
+
+Маршруты доступны только с `LOGNARA_ADMIN_TOKEN` (Bearer); без токена отвечают `404`.
+
+- `GET /v1/admin/series/definitions` возвращает `{"definitions": [...]}` в порядке service, name.
+- `POST /v1/admin/series/definitions` отвечает `201`, `PUT /v1/admin/series/definitions/{id}` — `200`, `DELETE` — `204`; неизвестный id — `404`.
+- `POST /v1/admin/series/preview` с `service`, `environment`, `rule` и `minutes` (1..60, по умолчанию 60) возвращает `scanned`, `matched` и до 50 последних `samples`.
+
+Определение без `rule` описывает native-метрику с тем же service и name. С `rule` core извлекает точку из `message`: `contains` — подстрока, `pattern` — регулярное выражение, `value_group` — именованная группа значения (без неё значение 1), `label_groups` — именованные группы меток. Правило действует на строки, материализованные после изменения; историю не пересчитывает. Точки хранятся сырыми, `kind` и `aggregation` применяются при запросе.
+
 ## Запуск и проверка
 
 Настройка, HTTPS-прокси, graceful shutdown, восстановление и метрики: [эксплуатация](docs/operations.md).

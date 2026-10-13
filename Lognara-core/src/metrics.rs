@@ -16,6 +16,7 @@ pub struct Metrics {
     pub deleted_segments: AtomicU64,
     pub series_points: AtomicU64,
     pub series_parse_errors: AtomicU64,
+    pub series_dropped_points: AtomicU64,
     pub queries: AtomicU64,
     pub query_errors: AtomicU64,
     pub query_duration_us: AtomicU64,
@@ -49,6 +50,11 @@ impl Metrics {
             (
                 "series_parse_errors_total",
                 &self.series_parse_errors,
+                "counter",
+            ),
+            (
+                "series_dropped_points_total",
+                &self.series_dropped_points,
                 "counter",
             ),
             ("queries_total", &self.queries, "counter"),
