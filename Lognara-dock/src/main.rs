@@ -1,5 +1,6 @@
 use std::process::ExitCode;
 
+use lognara_dock::api::App;
 use lognara_dock::config::Config;
 use tokio::net::TcpListener;
 use tokio::signal::unix::{SignalKind, signal};
@@ -22,6 +23,19 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let app = match tokio::task::spawn_blocking({
+        let config = config.clone();
+        move || App::open(config)
+    })
+    .await
+    .expect("startup task")
+    {
+        Ok(app) => app,
+        Err(err) => {
+            error!("{err}");
+            return ExitCode::FAILURE;
+        }
+    };
     let listener = match TcpListener::bind(config.listen_addr).await {
         Ok(listener) => listener,
         Err(err) => {
@@ -37,9 +51,11 @@ async fn main() -> ExitCode {
         listen = %config.listen_addr,
         public_url = %config.public_url,
         core = %config.core_url,
+        htpasswd = %config.htpasswd_file.display(),
+        data = %config.data_dir.display(),
         "lognara-dock started"
     );
-    match lognara_dock::run(config, listener, shutdown).await {
+    match lognara_dock::run(app, listener, shutdown).await {
         Ok(()) => {
             info!("lognara-dock stopped");
             ExitCode::SUCCESS

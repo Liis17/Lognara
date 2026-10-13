@@ -9,8 +9,16 @@ publish = false
 
 [dependencies]
 axum = "0.8"
+base64 = "0.22"
+bcrypt = "0.19.3"
+fs2 = "0.4"
+rand = "0.9"
+rusqlite = { version = "0.40", default-features = false, features = ["bundled", "cache"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
+subtle = "2"
+thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync", "fs"] }
 tokio-util = "0.7"
 tracing = "0.1"
@@ -18,4 +26,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 
 [dev-dependencies]
+http-body-util = "0.1"
+tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
