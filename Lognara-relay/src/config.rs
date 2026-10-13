@@ -19,7 +19,6 @@ const DEFAULT_SPOOL_MAX_MB: u64 = 1024;
 pub struct Config {
     pub core_url: Url,
     pub core_token: String,
-    pub relay_token: String,
     /// Как часто отправлять накопленное в core.
     pub flush_interval: Duration,
     /// Сколько событий накопить, чтобы отправить их раньше интервала.
@@ -46,7 +45,6 @@ impl fmt::Debug for Config {
         f.debug_struct("Config")
             .field("core_url", &self.core_url)
             .field("core_token", &"[redacted]")
-            .field("relay_token", &"[redacted]")
             .field("flush_interval", &self.flush_interval)
             .field("batch_size", &self.batch_size)
             .field("max_buffer", &self.max_buffer)
@@ -99,15 +97,6 @@ impl Config {
         let get = |name: &str| lookup(name).filter(|value| !value.is_empty());
         let required = |var: &'static str| get(var).ok_or(ConfigError::Missing(var));
 
-        let relay_token = required("LOGNARA_RELAY_TOKEN")?;
-        if !relay_token.bytes().all(|byte| byte.is_ascii_graphic()) {
-            return Err(ConfigError::Invalid {
-                var: "LOGNARA_RELAY_TOKEN",
-                value: "[redacted]".into(),
-                expected: "an ASCII token without whitespace or control characters",
-            });
-        }
-
         let core_url = required("LOGNARA_CORE_URL")?;
         let core_url = match core_url.parse::<Url>() {
             Ok(url) if matches!(url.scheme(), "http" | "https") => url,
@@ -136,7 +125,6 @@ impl Config {
         let config = Self {
             core_url,
             core_token: required("LOGNARA_CORE_TOKEN")?,
-            relay_token,
             flush_interval: Duration::from_millis(flush_interval_ms),
             batch_size,
             max_buffer,
@@ -324,52 +312,16 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_token_without_exposing_it() {
-        for token in [
-            "relay secret",
-            " secret",
-            "secret ",
-            "secret\t",
-            "secret\r\n",
-            "secret\0",
-            "secret\u{7f}",
-            "секрет",
-        ] {
-            let err = with_required(&[("LOGNARA_RELAY_TOKEN", token)]).unwrap_err();
-            assert!(matches!(
-                &err,
-                ConfigError::Invalid {
-                    var: "LOGNARA_RELAY_TOKEN",
-                    ..
-                }
-            ));
-            assert!(!err.to_string().contains(token));
-            assert!(!format!("{err:?}").contains(token));
-            assert!(err.to_string().contains("LOGNARA_RELAY_TOKEN"));
-        }
-    }
-
-    #[test]
-    fn debug_redacts_tokens() {
-        let config = with_required(&[("LOGNARA_RELAY_TOKEN", "unique-relay-secret")]).unwrap();
+    fn debug_redacts_core_token() {
+        let config = with_required(&[("LOGNARA_CORE_TOKEN", "unique-core-secret")]).unwrap();
         let debug = format!("{config:?}");
-        assert!(!debug.contains("unique-relay-secret"));
-        assert!(!debug.contains(&config.core_token));
+        assert!(!debug.contains("unique-core-secret"));
         assert!(debug.contains("[redacted]"));
     }
 
-    #[test]
-    fn requires_relay_token() {
-        assert_eq!(
-            with_required(&[("LOGNARA_RELAY_TOKEN", "")]),
-            Err(ConfigError::Missing("LOGNARA_RELAY_TOKEN"))
-        );
-    }
-
-    const REQUIRED: [(&str, &str); 3] = [
+    const REQUIRED: [(&str, &str); 2] = [
         ("LOGNARA_CORE_URL", "https://core.example.com/v1/batches"),
         ("LOGNARA_CORE_TOKEN", "secret"),
-        ("LOGNARA_RELAY_TOKEN", "relay-secret"),
     ];
 
     fn config(vars: &[(&str, &str)]) -> Result<Config, ConfigError> {
@@ -394,7 +346,6 @@ mod tests {
             "https://core.example.com/v1/batches"
         );
         assert_eq!(config.core_token, "secret");
-        assert_eq!(config.relay_token, "relay-secret");
         assert_eq!(config.flush_interval, Duration::from_secs(60));
         assert_eq!(config.batch_size, 10_000);
         assert_eq!(config.max_buffer, 100_000);
@@ -413,7 +364,6 @@ mod tests {
     fn reads_all_variables() {
         let config = with_required(&[
             ("LOGNARA_CORE_URL", "http://127.0.0.1:9000/batches"),
-            ("LOGNARA_RELAY_TOKEN", "new-relay-secret"),
             ("LOGNARA_FLUSH_INTERVAL_MS", "250"),
             ("LOGNARA_BATCH_SIZE", "50"),
             ("LOGNARA_MAX_BUFFER", "500"),
@@ -424,7 +374,6 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.core_url.as_str(), "http://127.0.0.1:9000/batches");
-        assert_eq!(config.relay_token, "new-relay-secret");
         assert_eq!(config.flush_interval, Duration::from_millis(250));
         assert_eq!(config.batch_size, 50);
         assert_eq!(config.max_buffer, 500);

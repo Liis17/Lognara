@@ -8,17 +8,20 @@ pub mod model_budget;
 pub mod normalize;
 pub mod spool;
 
+mod agents;
 mod ingest;
 mod memory;
 mod sender;
 mod wire_budget;
 
 use std::io;
+use std::sync::Arc;
 
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
 
+use crate::agents::{AgentSync, Agents, SYNC_INTERVAL};
 use crate::config::Config;
 use crate::sender::Sender;
 use crate::spool::Spool;
@@ -51,13 +54,30 @@ pub async fn run(
         .run(),
     );
 
-    let served = axum::serve(
-        listener,
-        ingest::router(spool, &config.relay_token, resources.clone()),
-    )
-    .with_graceful_shutdown(shutdown.cancelled_owned())
-    .await;
+    // Приём начинается с кеша и одной синхронизации; дальше список обновляется в фоне.
+    let agents = Arc::new(Agents::default());
+    let mut agent_sync = AgentSync::new(
+        &config.core_url,
+        &config.core_token,
+        spool.dir(),
+        agents.clone(),
+    );
+    agent_sync.load_cache().await;
+    tokio::select! {
+        _ = shutdown.cancelled() => {}
+        _ = agent_sync.sync() => {}
+    }
+    let stop_agents = shutdown.child_token();
+    let agent_task = tokio::spawn(agent_sync.run(SYNC_INTERVAL, stop_agents.clone()));
 
+    let served = axum::serve(listener, ingest::router(spool, agents, resources.clone()))
+        .with_graceful_shutdown(shutdown.cancelled_owned())
+        .await;
+
+    stop_agents.cancel();
+    if let Err(err) = agent_task.await {
+        error!(error = %err, "agent sync task failed");
+    }
     resources.drain().await;
     stop_sending.cancel();
     if let Err(err) = sender.await {

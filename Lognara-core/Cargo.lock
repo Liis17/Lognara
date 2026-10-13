@@ -2235,7 +2235,6 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "sha2",
- "subtle",
  "time",
  "tokio",
  "tokio-util",

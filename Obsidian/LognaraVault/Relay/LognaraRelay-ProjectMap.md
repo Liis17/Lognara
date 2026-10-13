@@ -16,6 +16,7 @@ Lognara-relay/
 │   ├── core_wire.rs        контракт с core: CoreBatch, Group, Source, Event, encode()
 │   ├── wire_budget.rs      общая no-alloc оценка MessagePack из lognara-spool, идентичная core
 │   ├── normalize.rs        разбор Record в Event
+│   ├── agents.rs           список SHA-256 из core, атомарный кеш .agents, sync 10s
 │   ├── ingest.rs           Bearer-аутентификация до чтения тела, POST /v1/batches
 │   ├── memory.rs           резервы, admission и ожидание blocking-работников
 │   ├── model_budget.rs     общий бюджет Batch и нормализации JSON/base64
@@ -33,7 +34,7 @@ Lognara-relay/
 
 | Стадия | Модуль | Вход | Выход |
 |---|---|---|---|
-| Приём | `ingest` | HTTP-запрос агента с общим Bearer-токеном | отказ до тела или `Batch` через `agent_wire::decode_with_budget` |
+| Приём | `ingest` | HTTP-запрос агента с персональным токеном | отказ до тела или `Batch` через `agent_wire::decode_with_budget` |
 | Разбор | `normalize` | `Record` + `ModelBudget` | `Event` либо ресурсная ошибка |
 | Сохранение | `spool` | все закодированные части запроса | fsync и атомарная публикация до `202` |
 | Кодирование | `core_wire` | `CoreBatch` | одна часть через `BatchEncoder::next()` |
@@ -43,8 +44,8 @@ Lognara-relay/
 ## Связи модулей
 
 - `main` → `config`, `spool`, `lib::run`.
-- `lib::run` подключает общий `Spool`, запускает `Sender` в отдельной задаче и `ingest::router` через `axum::serve`. Отправка останавливается отдельным токеном только после приёма.
-- `ingest` → `agent_wire`, `normalize`, `core_wire`, `spool`.
+- `lib::run` загружает кеш Agents, выполняет стартовый GET core и запускает sync; подключает общий `Spool`, запускает `Sender` в отдельной задаче и `ingest::router` через `axum::serve`. Отправка останавливается отдельным токеном только после приёма.
+- `ingest` → `agents` (проверка токена), `agent_wire`, `normalize`, `core_wire`, `spool`.
 - `ingest` → `memory`: slot до чтения тела; blocking-задача владеет permit. Подробности в [[Relay/Memory]].
 - `sender` → `spool`; очередь делится с ingest, синхронные дисковые операции выполняются в blocking-работниках. Общая реализация в [[Delivery/Spool]].
 - Публичные модули (`agent_wire`, `config`, `core_wire`, `model_budget`, `normalize`, `spool`) используют сквозные тесты; `ingest`, `memory`, `sender` скрыты.
@@ -53,7 +54,8 @@ Lognara-relay/
 
 | Где | Что проверяет |
 |---|---|
-| `config.rs` | loopback по умолчанию, обязательные переменные и ключ, валидация ключа и скрытие секретов, проверки чисел, URL и адреса |
+| `config.rs` | loopback, обязательные core-параметры, скрытие секретов, RAM в MiB, checked reserve и concurrency, URL и адрес |
+| `agents.rs` | sync, кеш, ошибки/отзыв, неизменный список, ошибка записи, restart и shutdown |
 | `ingest.rs` | отказ до чтения непрочитываемого тела, неверная/дублированная авторизация, приоритет `401` над лимитом тела, сохранение проверок типа и тела при верном ключе, атомарный отказ группы, квоту и границы одной записи |
 | `agent_wire.rs` | разбор фикстуры агента, лимит распаковки, невалидное тело |
 | `core_wire.rs` | кодирование `CoreBatch`, оба лимита, обратный разбор, порядок/ID/dropped при разделении |

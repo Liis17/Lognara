@@ -43,7 +43,6 @@ async fn actual_pipeline_recovers_after_core_outage_and_public_routes_observe_lo
     let relay_config = RelayConfig::from_lookup(|key| match key {
         "LOGNARA_CORE_URL" => Some(format!("{url}/v1/batches")),
         "LOGNARA_CORE_TOKEN" => Some(registered.token.clone()),
-        "LOGNARA_RELAY_TOKEN" => Some(agent_token.clone()),
         "LOGNARA_FLUSH_INTERVAL_MS" => Some("20".into()),
         "LOGNARA_BATCH_SIZE" => Some("1".into()),
         _ => None,

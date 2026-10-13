@@ -170,7 +170,7 @@ mod tests {
     async fn shutdown_closes_admission_and_waits_for_a_detached_worker() {
         let config = Config::from_lookup(|name| match name {
             "LOGNARA_CORE_URL" => Some("http://localhost/v1/batches".into()),
-            "LOGNARA_CORE_TOKEN" | "LOGNARA_RELAY_TOKEN" => Some("secret".into()),
+            "LOGNARA_CORE_TOKEN" => Some("secret".into()),
             _ => None,
         })
         .unwrap();

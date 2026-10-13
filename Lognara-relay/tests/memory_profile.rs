@@ -5,11 +5,12 @@ use std::time::Duration;
 use axum::Router;
 use axum::body::Bytes;
 use axum::http::StatusCode;
-use axum::routing::post;
+use axum::routing::{get, post};
 use lognara_relay::agent_wire::{Batch, Payload, Record};
 use lognara_relay::config::Config;
 use lognara_relay::spool::Spool;
 use reqwest::Client;
+use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 use tokio::time::{sleep, timeout};
@@ -112,17 +113,28 @@ async fn bounded_relay_memory_profile() {
     let core_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let core_url = format!("http://{}/v1/batches", core_listener.local_addr().unwrap());
     let core = tokio::spawn(async move {
-        let app = Router::new().route(
-            "/v1/batches",
-            post(|| async { StatusCode::SERVICE_UNAVAILABLE }),
-        );
+        let agent_hash: String = Sha256::digest(b"relay-secret")
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let app =
+            Router::new()
+                .route(
+                    "/v1/batches",
+                    post(|| async { StatusCode::SERVICE_UNAVAILABLE }),
+                )
+                .route(
+                    "/v1/agents",
+                    get(move || async move {
+                        axum::Json(serde_json::json!({ "agents": [agent_hash] }))
+                    }),
+                );
         axum::serve(core_listener, app).await.unwrap();
     });
     let dir = tempfile::tempdir().unwrap();
     let config = Config::from_lookup(|name| match name {
         "LOGNARA_CORE_URL" => Some(core_url.clone()),
         "LOGNARA_CORE_TOKEN" => Some("core-secret".into()),
-        "LOGNARA_RELAY_TOKEN" => Some("relay-secret".into()),
         "LOGNARA_FLUSH_INTERVAL_MS" => Some("20".into()),
         _ => None,
     })

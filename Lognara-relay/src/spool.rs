@@ -1,7 +1,7 @@
 //! Подтверждённые тела запросов core: атомарные группы, без вытеснения.
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -17,6 +17,7 @@ pub struct Spool {
 }
 
 struct State {
+    dir: PathBuf,
     queue: Mutex<Queue>,
     events: AtomicU64,
     len: AtomicUsize,
@@ -46,6 +47,7 @@ impl Spool {
             .map_err(io::Error::other)?
             .map_err(io::Error::other)?;
         let state = Arc::new(State {
+            dir: queue.dir().to_owned(),
             queue: Mutex::new(queue),
             events: AtomicU64::new(0),
             len: AtomicUsize::new(0),
@@ -59,6 +61,11 @@ impl Spool {
             state,
             replay_limit: usize::MAX,
         })
+    }
+
+    /// Реально открытый каталог очереди: рядом с ней лежат служебные файлы relay.
+    pub fn dir(&self) -> &Path {
+        &self.state.dir
     }
 
     pub fn set_max_events(&self, limit: usize) {
