@@ -23,3 +23,7 @@ target
 default.profraw
 .DS_Store
 .env
+
+# Фронтенд lognara-dock
+node_modules/
+/Lognara-dock/web/dist/
