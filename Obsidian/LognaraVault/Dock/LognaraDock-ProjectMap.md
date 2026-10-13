@@ -8,7 +8,7 @@ Parent: [[Dock/LognaraDock]]
 Lognara-dock/
   Cargo.toml                  отдельный crate, Rust 2024, MSRV 1.94
   Dockerfile                  node (web) → rust (бинарник) → debian-slim с libssl3
-  docker-compose.example.yml  все переменные, тома ./auth и ./data
+  docker-compose.example.yml  образ GHCR с LOGNARA_IMAGE_TAG, все переменные, тома ./auth и ./data
   nginx.example.conf          TLS и отдельный location для SSE
   src/
     main.rs                   tracing, конфиг, App::open, SIGTERM/SIGINT
@@ -40,6 +40,8 @@ Lognara-dock/
 ```
 
 ## Связи модулей
+
+Публикация Dockerfile в GHCR из `master`, права каталогов данных и общие теги компонентов описаны в [[Repository/Images]].
 
 - `api::router` собирает обработчики `auth`, `account`, `passkey`, `live`; слой `session::require_origin` применяется ко всем `/api/*`.
 - `session::AuthUser` (extractor) использует `Sessions` и `Htpasswd::contains`.

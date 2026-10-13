@@ -191,11 +191,12 @@ openssl rand -hex 32
 
 `.env` исключён из git. Compose использует его для подстановки `${...}`; передачу значения в контейнер задаёт `environment`. При запуске бинарников `.env` автоматически не читается: задайте переменные в окружении. [Документация Docker](https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation)
 
-Ниже фрагмент для ваших существующих сервисов с настроенными `image`/`build`. `app-with-agent` обозначает контейнер приложения, в котором работает агент и принимает логи по localhost. Для agent, relay и core готовых образов и Dockerfile пока нет. `LOGNARA_CORE_TOKEN` это ingest-токен core, `LOGNARA_CORE_QUERY_TOKEN` его query-токен; оба отличаются от общего ключа агентов и друг от друга. Если core работает вне этого Compose, уберите сервис `lognara-core` и задайте relay его HTTPS-адрес в `LOGNARA_CORE_URL`.
+Ниже фрагмент с образами core и relay из GHCR, доступными после первого успешного CI в `master`. `app-with-agent` обозначает ваш контейнер приложения с настроенным `image`/`build`: agent собирается вместе с ним и принимает логи по localhost. `LOGNARA_CORE_TOKEN` это ingest-токен core, `LOGNARA_CORE_QUERY_TOKEN` его query-токен; оба отличаются от общего ключа агентов и друг от друга. Если core работает вне этого Compose, уберите сервис `lognara-core` и задайте relay его HTTPS-адрес в `LOGNARA_CORE_URL`.
 
 ```yaml
 services:
   lognara-core:
+    image: ghcr.io/liis17/lognara-core:${LOGNARA_IMAGE_TAG:-master}
     environment:
       LOGNARA_LISTEN_ADDR: "0.0.0.0:7402"
       LOGNARA_INGEST_TOKEN: ${LOGNARA_CORE_TOKEN:?Задайте LOGNARA_CORE_TOKEN}
@@ -204,6 +205,7 @@ services:
       - ${LOGNARA_CORE_DATA:-lognara-core-data}:/var/lib/lognara-core
     networks: [lognara-core]
   lognara-relay:
+    image: ghcr.io/liis17/lognara-relay:${LOGNARA_IMAGE_TAG:-master}
     environment:
       LOGNARA_RELAY_TOKEN: ${LOGNARA_RELAY_TOKEN:?Задайте LOGNARA_RELAY_TOKEN}
       LOGNARA_LISTEN_ADDR: "0.0.0.0:7401"
@@ -240,6 +242,26 @@ volumes:
 Все владельцы общего ключа доверенные: relay принимает заявленные ими `service/server/backend` без проверки принадлежности. Новому контейнеру достаточно подключения к сети и того же ключа; изменять конфигурацию relay не нужно. При смене ключа пересоздайте контейнеры relay и всех агентов с новым значением; автоматической ротации нет.
 
 ## Обновление
+
+Образы core, relay и dock публикуются из `master` после успешного прохождения всех проверок CI:
+
+- `ghcr.io/liis17/lognara-core`
+- `ghcr.io/liis17/lognara-relay`
+- `ghcr.io/liis17/lognara-dock`
+
+Для каждого образа публикуются `master` (обновляемый тег ветки) и `sha-<полный SHA коммита>` (привязка к исходникам для конкретной сборки). Для согласованного обновления всех компонентов задайте один `LOGNARA_IMAGE_TAG=sha-...` в `.env`, затем выполните `docker compose pull` и `docker compose up -d`. Для точной фиксации содержимого образа можно использовать digest `@sha256:...`: повторная сборка того же коммита может получить другой digest при обновлении базовых образов. Отдельный образ agent не публикуется: он собирается в контейнере вашего приложения; библиотека spool входит в зависимые бинарники.
+
+Предлагаемая схема будущих релизов: общий Git-тег `v0.1.0` для всех компонентов и тег образа `0.1.0`, затем `0.1.1` для исправлений и `0.2.0` для следующего набора возможностей. Релизные теги и `latest` текущий workflow не публикует; версии из `Cargo.toml` не перезаписываются каждым коммитом.
+
+Образы собираются для `linux/amd64` в несколько стадий: Rust release без `crash-tests`, затем Debian slim с бинарником; dock также включает React-сборку. Процессы работают от UID/GID `1000:1000`; папки данных на хосте должны быть доступны этому пользователю. Локальная сборка из корня репозитория:
+
+```sh
+docker build -f Lognara-core/Dockerfile -t lognara-core .
+docker build -f Lognara-relay/Dockerfile -t lognara-relay .
+docker build -f Lognara-dock/Dockerfile -t lognara-dock Lognara-dock
+```
+
+CI входит в GHCR с автоматически выданным `GITHUB_TOKEN`; отдельный PAT для публикации не нужен. После первой публикации проверьте видимость пакетов: новые пакеты по умолчанию приватные, для публичного скачивания включите Public в настройках каждого пакета. Приватные образы требуют авторизации при скачивании. [Документация GHCR](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry).
 
 1. Сначала восстановите downstream и доставьте остатки старых очередей в RAM: старые версии не сохраняют подтверждённую очередь полностью.
 2. Обновите relay, сохранив его spool volume и согласованные лимиты core. Проверьте доставку старых `.batch`.

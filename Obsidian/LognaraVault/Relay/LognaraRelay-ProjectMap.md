@@ -8,6 +8,7 @@ Parent: [[Relay/LognaraRelay]]
 Lognara-relay/
 ├── Cargo.toml              crate lognara-relay, edition 2024, MIT
 ├── Cargo.lock
+├── Dockerfile              release из корневого контекста, Debian slim от 1000:1000
 ├── src/
 │   ├── main.rs             точка входа: логирование, конфиг, spool, bind, SIGTERM/SIGINT
 │   ├── lib.rs              сборка компонентов и run()

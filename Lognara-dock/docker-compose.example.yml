@@ -5,7 +5,7 @@
 #   в .env: LOGNARA_QUERY_TOKEN=<query-токен core>
 services:
   lognara-dock:
-    build: .
+    image: ghcr.io/liis17/lognara-dock:${LOGNARA_IMAGE_TAG:-master}
     user: "1000:1000"                       # владелец ./auth и ./data на хосте
     environment:
       LOGNARA_DOCK_PUBLIC_URL: https://dock.liis17.com
