@@ -1,0 +1,1 @@
+{"sources":[{"id":"seq-diagnostics","type":"file","format":"ndjson","include":["/data/Logs/*"],"start_at":"beginning"}]}

@@ -30,6 +30,7 @@ fn batch_body(payloads: Vec<Payload>) -> Bytes {
             .into_iter()
             .map(|payload| Record {
                 received_at: 1,
+                origin: None,
                 payload,
             })
             .collect(),

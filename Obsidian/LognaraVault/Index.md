@@ -10,7 +10,9 @@ Lognara — система сбора логов: агент в контейне
 ### Agent
 | Файл | Компонент | Описание |
 |------|-----------|----------|
-| [[Agent/LognaraAgent]] | lognara-agent | Приём логов по HTTP, буфер в памяти, отправка сжатых пачек в relay с общим ключом; параметры `LOGNARA_*` и контракт пачки. |
+| [[Agent/LognaraAgent]] | lognara-agent | HTTP, файлы, stdout/stderr, durable spool, отправка сжатых пачек в relay с общим ключом; параметры `LOGNARA_*` и контракт пачки. |
+| [[Agent/LogSources]] | источники логов | JSON, форматы, checkpoint, ротация, потоки, потери и lifecycle программы. |
+| [[Agent/LognaraAgent-ProjectMap]] | lognara-agent | Карта модулей, публичных интерфейсов и проверок. |
 
 ### Relay
 | Файл | Компонент | Описание |
@@ -45,6 +47,7 @@ Lognara — система сбора логов: агент в контейне
 | [[Repository/RootFiles]] | Корневые файлы | README, `.env.example`, лицензия и конфигурация исключений. |
 | [[Repository/CI]] | GitHub Actions | Сборка, Rust-тесты, Clippy, форматирование, проверки памяти и веб-сборка для всех веток и PR. |
 | [[Repository/Images]] | Docker и GHCR | Сборка и публикация core/relay/dock из master, имена образов, теги и встраивание agent в контейнер приложения. |
+| [[Repository/LocalExample]] | Локальный Docker-стенд | Python HTTP-сервер на 8881 с агентом в контейнере, отдельные relay/core, постоянные volumes и проверка доставки. |
 | [[Repository/Audit]] | Аудит приложений | Исторический отчёт по agent, relay и core для коммита `acddb94`: 27 замечаний по приоритетам и типам, результаты и ограничения проверки. |
 
 ## Правила обновления базы знаний

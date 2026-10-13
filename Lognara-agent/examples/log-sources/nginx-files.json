@@ -1,0 +1,1 @@
+{"sources":[{"id":"nginx-access","type":"file","format":"text","include":["/var/log/lognara/nginx/access.log*"],"start_at":"beginning"},{"id":"nginx-error","type":"file","format":"text","include":["/var/log/lognara/nginx/error.log*"],"start_at":"beginning"}]}

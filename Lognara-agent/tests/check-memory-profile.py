@@ -8,12 +8,14 @@ import resource
 import subprocess
 import sys
 import time
+import tempfile
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", nargs="?", help="prebuilt test executable; otherwise build it first")
     parser.add_argument("--limit-mib", type=int, default=256)
+    parser.add_argument("--sources", action="store_true", help="include files and stdout/stderr")
     args = parser.parse_args()
     if args.limit_mib <= 0:
         parser.error("--limit-mib must be positive")
@@ -33,16 +35,20 @@ def main():
                 return subprocess.call([
                     sys.executable, str(Path(__file__).resolve()), artifact["executable"],
                     "--limit-mib", str(args.limit_mib),
+                    *(["--sources"] if args.sources else []),
                 ])
         parser.error("cargo did not produce the memory_profile test executable")
 
     limit = args.limit_mib * 1024 * 1024
     peak = 0
     exceeded = False
+    output = tempfile.TemporaryFile() if args.sources else None
     process = subprocess.Popen([
-        args.binary, "--exact", "bounded_agent_memory_profile", "--ignored",
+        args.binary, "--exact",
+        "bounded_source_memory_profile" if args.sources else "bounded_agent_memory_profile",
+        "--ignored",
         "--nocapture", "--test-threads=1",
-    ])
+    ], stdout=output, stderr=output)
     try:
         while process.poll() is None:
             sample = subprocess.run(
@@ -61,6 +67,11 @@ def main():
         if process.poll() is None:
             process.kill()
             process.wait()
+
+    if output:
+        output.seek(max(0, output.tell() - 4096))
+        print(output.read().decode("utf-8", errors="replace").replace("\0", ""), end="")
+        output.close()
 
     # Kernel high-water mark catches peaks between samples. macOS reports bytes;
     # Linux reports KiB. Only the prebuilt test and small ps children ran here.

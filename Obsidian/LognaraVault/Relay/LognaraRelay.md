@@ -87,6 +87,8 @@ volumes:
 
 Канонические ключи: `id` (UUID), `timestamp` (RFC 3339), `level` (`trace`/`debug`/`info`/`warn`/`error`/`fatal` без учёта регистра), `message`, `action`, `request_id` (строки), `trace_id` (32 hex), `span_id`, `parent_span_id` (16 hex), `attributes` (объект; его ключи перекрывают одноимённые ключи верхнего уровня). Значение неподходящего типа или формата остаётся в `attributes` под тем же ключом, поле получает значение по умолчанию. Ключи источника и `ingested_at` из JSON тоже попадают в `attributes`: источник всегда берётся от агента.
 
+Origin агента необязателен и совместим со старыми записями. До создания атрибутов нормализация резервирует их модельную память, проверяет ID/путь/поток и диапазон байтов, затем добавляет `lognara.source`, `log.file.path` или `log.stream`, `log.origin.offset/end`, `log.fragment.index/continued`. Служебные атрибуты имеют приоритет над payload. Детали происхождения в [[Agent/LogSources]]; core получает обычные attributes.
+
 ## Контракт с core
 
 `POST {LOGNARA_CORE_URL}`, заголовки `Content-Type: application/msgpack`, `Content-Encoding: zstd`, `Authorization: Bearer {LOGNARA_CORE_TOKEN}`. Тело: `CoreBatch` в MessagePack с именованными полями, сжатый zstd (уровень 3).

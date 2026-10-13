@@ -7,19 +7,21 @@ Parent: [[Index]]
 | Область | Текущее состояние |
 |---------|-------------------|
 | Язык и runtime | Rust (edition 2024) и tokio подтверждены для `Lognara-agent/` и `Lognara-relay/`. Core также использует Rust 2024 и tokio; MSRV 1.94. |
-| Зависимости | `Lognara-agent/Cargo.toml`: axum, reqwest, tokio, tokio-util, serde, serde_json, rmp-serde, serde_bytes, zstd, tracing, http-body, общий lognara-spool. Подробности в [[Agent/LognaraAgent]]. `Lognara-relay/Cargo.toml`: те же, reqwest с rustls, а также uuid, time, base64, bytes, http-body для ограниченного чтения, sha2 и subtle для аутентификации агентов. Подробности в [[Relay/LognaraRelay]]. |
+| Зависимости | `Lognara-agent/Cargo.toml`: axum, reqwest, tokio, tokio-util, serde, serde_json, rmp-serde, serde_bytes, zstd, tracing, http-body, glob, regex, sha2, libc, общий lognara-spool. Подробности в [[Agent/LognaraAgent]]. `Lognara-relay/Cargo.toml`: общие HTTP/runtime/serde/zstd зависимости, reqwest с rustls, а также uuid, time, base64, bytes, http-body для ограниченного чтения, sha2 и subtle для аутентификации агентов. Подробности в [[Relay/LognaraRelay]]. |
 | Веб-интерфейс | `Lognara-dock/Cargo.toml`: axum, tower-http (ServeDir), reqwest, rusqlite (bundled), bcrypt, webauthn-rs 0.5 (`conditional-ui`, требует OpenSSL), fs2, time. Фронтенд `Lognara-dock/web/`: React, react-router, TypeScript, Vite. Подробности в [[Dock/LognaraDock]]. |
 | Лицензия | MIT, см. `LICENSE`. |
+| Локальный стенд | Docker Compose и Python 3.13 (стандартная библиотека без сторонних Python-пакетов) в `Example/`; сборка Rust-сервисов в Docker на Rust 1.94. Подробнее в [[Repository/LocalExample]]. |
 
 ## Компоненты и сервисы
 
 | Компонент | Каталог | Состояние |
 |-----------|---------|-----------|
-| [[Agent/LognaraAgent]] | `Lognara-agent/` | Реализован приём логов, атомарная дисковая очередь до `202` и отправка в relay. |
+| [[Agent/LognaraAgent]] | `Lognara-agent/` | HTTP, файлы и stdout/stderr через `run --`, атомарная дисковая очередь и отправка в relay; [[Agent/LogSources]]. |
 | [[Relay/LognaraRelay]] | `Lognara-relay/` | Реализованы приём пачек агентов, разбор в события, группировка по источнику, отправка в core и spool на диске. Структура в [[Relay/LognaraRelay-ProjectMap]]. |
 | [[Core/LognaraCore]] | `Lognara-core/` | Реализованы HTTP-приём, WAL, Arrow/Parquet, каталог SQLite, поиск Tantivy, аналитика DataFusion и retention. |
 | [[Dock/LognaraDock]] | `Lognara-dock/` | Реализованы вход по htpasswd и passkey, сессии в SQLite, смена пароля, лента логов core через SSE и React-интерфейс. Структура в [[Dock/LognaraDock-ProjectMap]]. |
 | [[Delivery/Spool]] | `Lognara-spool/` | Общая атомарная файловая очередь; оба процесса подтверждают приём только после durable commit. |
+| [[Repository/LocalExample]] | `Example/` | Локальный Compose: Python-сервер на 8881 и agent в одном контейнере, relay, core и dock отдельно; веб-логи на localhost:7403. |
 
 Корневые файлы описаны в [[Repository/RootFiles]].
 
@@ -27,9 +29,12 @@ Parent: [[Index]]
 
 | Путь | Роль |
 |------|------|
-| `Lognara-agent/src/main.rs` | Точка входа агента. Параметры задаются переменными `LOGNARA_*`. |
+| `Lognara-agent/src/main.rs` | Точка входа агента. Параметры `LOGNARA_*`, JSON `LOGNARA_SOURCES_FILE`; обычный режим или `run -- программа аргументы`. |
 | `Lognara-relay/src/main.rs` | Точка входа relay. Параметры задаются переменными `LOGNARA_*`, spool хранится в `LOGNARA_SPOOL_DIR`. |
 | `Lognara-core/src/main.rs` | Точка входа core; отдельный crate, конфигурация `LOGNARA_*`. |
+| `Example/compose.yaml` | Запуск app, relay, core и dock на одной машине; dock-init создаёт тестовый вход, на хост публикуются localhost:8881, localhost:7402 и localhost:7403. |
+| `Example/entrypoint.py` | Запускает agent и Python-сервер внутри `app`, передаёт остановку обоим процессам. |
+| `Example/server.py` | Любой корректный HTTP-метод и путь; данные клиента в JSON/stdout и на локальный agent. |
 | `Lognara-dock/src/main.rs` | Точка входа веб-интерфейса; конфигурация `LOGNARA_DOCK_*`, порт `7403`, фронтенд из `LOGNARA_DOCK_WEB_DIR`. |
 | `README.md` | Обзор проекта: схема потока, быстрый старт, порты и параметры, API core, статус. |
 | `.gitignore` | Исключает сборки Cargo (`target`) и артефакты агента в корневом `/build/`, резервные файлы rustfmt, PDB, Cargo Mutants, `default.profraw`, `.DS_Store`, локальный `.env` с ключом. |
@@ -60,11 +65,12 @@ Parent: [[Index]]
 
 - Модули разделены по стадиям конвейера; agent использует buffer как дисковую очередь и подготовку ограниченных пачек, relay использует normalize и spool.
 - Agent и relay используют общий crate [[Delivery/Spool]]; relay держит копию контракта агента, совместимость проверяет фикстура, закодированная агентом.
-- Конфигурация читается только из переменных окружения с префиксом `LOGNARA_`, с проверкой при старте.
+- Основная конфигурация читается из `LOGNARA_*`; агент дополнительно загружает JSON источников из `LOGNARA_SOURCES_FILE`. Всё проверяется при старте до запуска дочерней программы.
+- HTTP, файлы и потоки идут напрямую в общий Buffer. Для файлов сначала fsync spool, затем атомарный checkpoint; после crash возможны повторы. Потоки при перегрузке продолжают чтение с учётом потерь. Origin переносится relay в attributes без изменения core. Подробности в [[Agent/LogSources]].
 - Агент и relay требуют одинаковый `LOGNARA_RELAY_TOKEN`; ключ без пробелов, управляющих и не-ASCII символов. Секреты скрыты в диагностике конфигурации. Relay сравнивает SHA-256 ключей через `subtle`, возвращает `401` с `WWW-Authenticate: Bearer` без изменения буфера/dropped/spool при отказе.
 - Relay по умолчанию слушает `127.0.0.1:7401`. В выделенной Docker-сети явно слушает `0.0.0.0:7401`, порт на хост не публикуется, `network_mode: host` не используется. Ключ из `.env` передаётся обоим сервисам через `environment`; бинарники `.env` не читают. Пример в корневом README; в нём же core в отдельной сети `lognara-core`, доступной только relay.
 - Все владельцы общего ключа доверенные: принадлежность `service/server/backend` не проверяется. Добавление агента не требует регистрации в relay; смена ключа требует пересоздания relay и всех агентов.
-- Остановка идёт через `CancellationToken`: сначала прекращается приём, затем выполняется финальная отправка.
+- В обычном режиме остановка идёт через `CancellationToken`: прекращается приём, затем финальная отправка. В `run` сначала завершается программа с продолжающимся сбором, затем ограниченное дочитывание pipe, остановка сборщиков и HTTP, финальная отправка; сигналы и сроки в [[Agent/LogSources]].
 - Relay проверяет сумму резервов памяти при запуске и ограничивает конкурентный приём до чтения тела. Входная модель и JSON нормализации проверяются до объектов; байтовые резервы удерживаются нормализованными событиями до атомарного сохранения; sender читает готовые тела с отдельным резервом. Перед финальной отправкой ждёт также blocking-работников отменённых запросов. Подтверждённая очередь хранится на диске; ошибки и переполнение не удаляют данные. Ресурсный контракт описан в [[Relay/Memory]].
 
 ## Как добавлять компоненты
@@ -80,5 +86,7 @@ Parent: [[Index]]
 [[Core/LognaraCore]] использует WAL, Arrow/Parquet + ZSTD, Tantivy, DataFusion и SQLite-каталог. Приём совместим с relay, время в наносекундах.
 
 Core запускается отдельно за TLS-прокси, ingest и query используют разные токены. Query-токен использует [[Dock/LognaraDock]]: браузер получает логи только через dock и его сессии. SIGTERM/SIGINT дорабатывает WAL. HTTP API, эксплуатация и нагрузочный стенд документированы в `Lognara-core/README.md` и `Lognara-core/docs/`.
+
+В тестовом [[Repository/LocalExample]] core запускается без TLS-прокси в изолированной Compose-сети и публикует API только на `127.0.0.1:7402`. App публикует `127.0.0.1:8881`, dock — `127.0.0.1:7403` с origin `http://localhost:7403`; agent остаётся на localhost своего контейнера, relay наружу не публикуется. Тестовые токены задаются в Compose, отдельные volumes хранят обе очереди, core, htpasswd и сессии/passkey dock. Запрос → Python JSON/stdout → agent → relay → core → SSE dock, включая вход, проверяется `Example/smoke-test.py`.
 
 Agent, relay и core требуют постоянное отдельное хранилище. В Compose источник задают `LOGNARA_AGENT_DATA`, `LOGNARA_RELAY_DATA`, `LOGNARA_CORE_DATA`: пусто означает Docker volume, абсолютный путь означает папку на хосте. Agent резервирует 64 MiB под индекс, источник, приём и подготовку отправки; payload ограничен 2 MiB, пачки 8 MiB. Дисковая квота каждого процесса 1 GiB; у agent отдельно до 8 MiB под pending. Переполнение возвращает `503`, HTTP-отказы удерживают очередь. Подробности и гарантия в [[Delivery/Spool]], [[Agent/LognaraAgent]] и README.

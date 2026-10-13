@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
+use crate::sources::Sources;
 use reqwest::Url;
 
 pub const INDEX_BYTES: usize = 8 << 20;
@@ -19,6 +20,7 @@ const DEFAULT_RELAY_URL: &str = "http://lognara-relay:7401/v1/batches";
 
 #[derive(Clone, PartialEq)]
 pub struct Config {
+    pub sources: Sources,
     pub service: String,
     pub server: String,
     pub backend: String,
@@ -58,6 +60,7 @@ impl fmt::Debug for Config {
             .field("spool_max_bytes", &self.spool_max_bytes)
             .field("listen_addr", &self.listen_addr)
             .field("relay_url", &self.relay_url)
+            .field("sources", &self.sources)
             .field("relay_token", &"[redacted]")
             .finish()
     }
@@ -93,6 +96,16 @@ impl Config {
         Self::from_lookup(|name| std::env::var(name).ok())
     }
 
+    /// Загружает источники и стандартные потоки для режима запуска программы.
+    pub fn load_sources(
+        &mut self,
+        path: Option<&std::path::Path>,
+        capture: bool,
+    ) -> std::io::Result<()> {
+        self.sources = Sources::load(path, capture)?;
+        self.validate().map_err(std::io::Error::other)
+    }
+
     /// Собирает конфигурацию через `lookup`; пустые значения считаются незаданными.
     pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
         let get = |name: &str| lookup(name).filter(|value| !value.is_empty());
@@ -120,6 +133,7 @@ impl Config {
             positive(&get, "LOGNARA_FLUSH_INTERVAL_MS", DEFAULT_FLUSH_INTERVAL_MS)?;
 
         let config = Self {
+            sources: Sources::default(),
             service: required("LOGNARA_SERVICE")?,
             server: required("LOGNARA_SERVER")?,
             backend: required("LOGNARA_BACKEND")?,
@@ -155,6 +169,13 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if !self.sources.sources.is_empty() && self.max_record_bytes < 4 {
+            return Err(ConfigError::Invalid {
+                var: "LOGNARA_MAX_RECORD_BYTES",
+                value: self.max_record_bytes.to_string(),
+                expected: "at least 4 bytes for file/stream framing",
+            });
+        }
         if self.flush_interval.is_zero()
             || self.batch_size == 0
             || self.max_buffer < self.batch_size
@@ -207,6 +228,7 @@ impl Config {
         self.max_buffer_bytes
             .saturating_sub(INDEX_BYTES)
             .saturating_sub(self.metadata_bytes().saturating_mul(4))
+            .saturating_sub(self.sources.reserved_bytes(self.max_record_bytes))
             / 2
     }
     pub fn input_record_limit(&self) -> usize {

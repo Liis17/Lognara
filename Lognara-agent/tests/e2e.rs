@@ -96,6 +96,7 @@ struct Agent {
 async fn start_agent(relay_url: Url, batch_size: usize, flush_interval: Duration) -> Agent {
     let dir = tempfile::tempdir().unwrap();
     let config = Config {
+        sources: Default::default(),
         service: "api".into(),
         server: "eu-prod-01".into(),
         backend: "barkcloud".into(),

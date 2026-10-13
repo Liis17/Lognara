@@ -17,6 +17,7 @@ fn main() -> anyhow::Result<()> {
             dropped: 3,
             events: vec![normalize::event(Record {
                 received_at: 1_790_678_511_894_000_001,
+                origin: None,
                 payload: Payload::Json(serde_json::json!({
                     "id": "019d3f8e-7c2a-7b3e-9f1d-2a4b6c8d0e1f",
                     "timestamp": "2026-09-29T10:41:51.871000001Z",

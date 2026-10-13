@@ -83,6 +83,7 @@ async fn ingest(
             .into_iter()
             .map(|payload| Record {
                 received_at,
+                origin: None,
                 payload,
             })
             .collect();

@@ -215,6 +215,7 @@ fn source(service: &str) -> Source {
 fn record(message: &str) -> Record {
     Record {
         received_at: 1,
+        origin: None,
         payload: Payload::Text(message.into()),
     }
 }
@@ -758,4 +759,60 @@ async fn sigkill_after_202_restores_confirmed_relay_parts_with_identical_bytes()
             .skip(1)
             .any(|body| *body == original)
     );
+}
+
+#[tokio::test]
+async fn provenance_survives_durable_relay_restart_and_reaches_core_attributes() {
+    use lognara_relay::agent_wire::Origin;
+    let mut core = fake_core().await;
+    let spool = tempfile::tempdir().unwrap();
+    let mut cfg = config(&core, spool.path());
+    cfg.flush_interval = Duration::from_secs(60);
+    let relay = start_relay(cfg.clone()).await;
+    let mut batch = agent_batch("api", &["file payload", "stream payload"]);
+    batch.records[0].origin = Some(Origin {
+        source: "access".into(),
+        path: Some("/var/log/app/access.log".into()),
+        stream: None,
+        offset: 10,
+        end: 24,
+        fragment: 1,
+        continued: true,
+    });
+    batch.records[1].origin = Some(Origin {
+        source: "errors".into(),
+        path: None,
+        stream: Some("stderr".into()),
+        offset: 0,
+        end: 15,
+        fragment: 0,
+        continued: false,
+    });
+    assert_eq!(send(&relay, &batch).await, StatusCode::ACCEPTED);
+    // Отмена handler не подтверждает downstream; сохранённая группа должна пережить restart.
+    core.respond(StatusCode::SERVICE_UNAVAILABLE);
+    relay.stop().await;
+    assert!(spooled(spool.path()) > 0);
+    while core.batches.try_recv().is_ok() {}
+    core.respond(StatusCode::OK);
+    cfg.flush_interval = Duration::from_millis(20);
+    let relay = start_relay(cfg).await;
+    let received = core.next_batch().await;
+    let events = &received.groups[0].events;
+    assert_eq!(
+        messages(&received.groups[0]),
+        ["file payload", "stream payload"]
+    );
+    assert_eq!(events[0].attributes["lognara.source"], "access");
+    assert_eq!(
+        events[0].attributes["log.file.path"],
+        "/var/log/app/access.log"
+    );
+    assert_eq!(events[0].attributes["log.origin.offset"], 10);
+    assert_eq!(events[0].attributes["log.origin.end"], 24);
+    assert_eq!(events[0].attributes["log.fragment.index"], 1);
+    assert_eq!(events[0].attributes["log.fragment.continued"], true);
+    assert_eq!(events[1].attributes["log.stream"], "stderr");
+    eventually(|| spooled(spool.path()) == 0).await;
+    relay.stop().await;
 }
