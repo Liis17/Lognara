@@ -182,20 +182,6 @@ fn config(core: &FakeCore, spool_dir: &Path) -> Config {
 }
 
 async fn start_relay(config: Config) -> Relay {
-    let lock_path = config.spool_dir.join(".lock");
-    if lock_path.exists() {
-        // Отменённый blocking-read может ещё завершать уничтожение владельца spool.
-        let lock = std::fs::OpenOptions::new()
-            .write(true)
-            .open(lock_path)
-            .unwrap();
-        eventually(|| match lock.try_lock() {
-            Ok(()) => true,
-            Err(std::fs::TryLockError::WouldBlock) => false,
-            Err(error) => panic!("spool lock failed: {error}"),
-        })
-        .await;
-    }
     let spool = Spool::open(&config.spool_dir, config.spool_max_bytes)
         .await
         .unwrap();
