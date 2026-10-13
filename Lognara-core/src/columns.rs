@@ -222,6 +222,16 @@ pub fn decode(batch: &RecordBatch) -> Result<Vec<StoredEvent>> {
 }
 
 pub fn write_parquet(path: &Path, batches: &[RecordBatch]) -> Result<()> {
+    write_parquet_with(path, schema(), batches, "segment_during_parquet")
+}
+
+/// Общая запись Parquet для логов и серий; failpoint_name срабатывает после каждой пачки.
+pub fn write_parquet_with(
+    path: &Path,
+    schema: SchemaRef,
+    batches: &[RecordBatch],
+    failpoint_name: &str,
+) -> Result<()> {
     let temp = path.with_extension("parquet.tmp");
     let file = File::create(&temp)?;
     let props = WriterProperties::builder()
@@ -229,10 +239,10 @@ pub fn write_parquet(path: &Path, batches: &[RecordBatch]) -> Result<()> {
         .set_dictionary_enabled(true)
         .set_max_row_group_row_count(Some(16_384))
         .build();
-    let mut writer = ArrowWriter::try_new(file.try_clone()?, schema(), Some(props))?;
+    let mut writer = ArrowWriter::try_new(file.try_clone()?, schema, Some(props))?;
     for batch in batches {
         writer.write(batch)?;
-        crate::wal::failpoint("segment_during_parquet");
+        crate::wal::failpoint(failpoint_name);
     }
     writer.close()?;
     file.sync_all()?;

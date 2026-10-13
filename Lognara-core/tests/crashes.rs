@@ -76,6 +76,10 @@ fn batch() -> Vec<u8> {
         .map(|i| {
             let mut event = event.clone();
             event.message = format!("crash row {i}");
+            event.attributes.insert(
+                "Metrics".into(),
+                serde_json::json!({"SchemaVersion": 2, "Counters": {"crash_runs": 1}, "Timestamp": "2026-10-13T15:14:00.4480321Z"}),
+            );
             event
         })
         .collect();
@@ -124,6 +128,7 @@ async fn crashes_at_each_publication_boundary_recover_without_loss_or_duplicates
         "wal_after_sync",
         "segment_during_parquet",
         "segment_after_parquet",
+        "series_after_parquet",
         "segment_before_catalog",
         "segment_after_catalog",
         "wal_after_prune",

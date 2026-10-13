@@ -14,6 +14,8 @@ pub struct Metrics {
     pub visibility_lag_ms: AtomicU64,
     pub sealed_segments: AtomicU64,
     pub deleted_segments: AtomicU64,
+    pub series_points: AtomicU64,
+    pub series_parse_errors: AtomicU64,
     pub queries: AtomicU64,
     pub query_errors: AtomicU64,
     pub query_duration_us: AtomicU64,
@@ -43,6 +45,12 @@ impl Metrics {
             ),
             ("sealed_segments_total", &self.sealed_segments, "counter"),
             ("deleted_segments_total", &self.deleted_segments, "counter"),
+            ("series_points_total", &self.series_points, "counter"),
+            (
+                "series_parse_errors_total",
+                &self.series_parse_errors,
+                "counter",
+            ),
             ("queries_total", &self.queries, "counter"),
             ("query_errors_total", &self.query_errors, "counter"),
             (

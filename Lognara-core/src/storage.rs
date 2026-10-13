@@ -1,18 +1,21 @@
 //! Материализация WAL и атомарные снимки открытых/закрытых сегментов.
 use crate::{
-    catalog::SegmentMeta,
+    catalog::{SegmentMeta, SeriesName},
     columns,
     config::Config,
+    extract,
     index::{ActiveIndex, IndexCache},
     journal::Journal,
+    metrics::Metrics,
     model::{StoredEvent, now_nanos},
+    series::{self, SeriesFile, SeriesFileMeta},
     wal::{Position, failpoint, sync_dir},
     wire,
 };
 use anyhow::{Context, Result, ensure};
 use datafusion::arrow::array::RecordBatch;
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
@@ -34,12 +37,15 @@ pub struct DiskSegment {
 pub struct ActiveView {
     pub meta: SegmentMeta,
     pub batches: Vec<RecordBatch>,
+    pub points: Vec<RecordBatch>,
+    pub names: BTreeMap<(String, String, &'static str), (i64, i64)>,
     pub searcher: Searcher,
 }
 
 #[derive(Default)]
 pub struct Snapshot {
     pub closed: Vec<Arc<DiskSegment>>,
+    pub series_files: Vec<Arc<SeriesFile>>,
     pub active: Option<ActiveView>,
     pub watermark: u64,
     pub generation: u64,
@@ -125,13 +131,58 @@ struct ActiveSegment {
     meta: SegmentMeta,
     path: PathBuf,
     batches: Vec<RecordBatch>,
+    points: Vec<RecordBatch>,
+    point_rows: usize,
+    point_min: i64,
+    point_max: i64,
+    names: BTreeMap<(String, String, &'static str), (i64, i64)>,
+    series_path: String,
     index: ActiveIndex,
     started: Instant,
+}
+
+impl ActiveSegment {
+    /// Извлекает точки из строк пачки; ошибки разбора только считаются в метриках.
+    fn add_points(&mut self, rows: &[StoredEvent], metrics: &Metrics) -> Result<()> {
+        let mut points = vec![];
+        for row in rows {
+            let (found, invalid) = extract::native(row);
+            if invalid {
+                metrics.series_parse_errors.fetch_add(1, Ordering::Relaxed);
+            }
+            points.extend(found);
+        }
+        if points.is_empty() {
+            return Ok(());
+        }
+        metrics
+            .series_points
+            .fetch_add(points.len() as u64, Ordering::Relaxed);
+        for point in &points {
+            self.names
+                .entry((
+                    point.source.service.clone(),
+                    point.name.clone(),
+                    point.origin.as_str(),
+                ))
+                .and_modify(|(first, last)| {
+                    *first = (*first).min(point.timestamp);
+                    *last = (*last).max(point.timestamp);
+                })
+                .or_insert((point.timestamp, point.timestamp));
+            self.point_min = self.point_min.min(point.timestamp);
+            self.point_max = self.point_max.max(point.timestamp);
+        }
+        self.point_rows += points.len();
+        self.points.push(series::encode(&points)?);
+        Ok(())
+    }
 }
 
 struct Materializer {
     core: Arc<Core>,
     closed: Vec<Arc<DiskSegment>>,
+    series_files: Vec<Arc<SeriesFile>>,
     active: Option<ActiveSegment>,
     retired: Vec<Arc<DiskSegment>>,
     position: Position,
@@ -178,10 +229,54 @@ impl Materializer {
             closed.push(Arc::new(DiskSegment { meta, path }));
         }
         let retained: HashSet<_> = closed.iter().map(|segment| segment.path.clone()).collect();
-        for path in segment_directories(&root)? {
+        for path in nested_directories(&root, 4)? {
             if !retained.contains(&path) {
                 fs::remove_dir_all(&path)?;
                 sync_dir(path.parent().unwrap())?;
+            }
+        }
+        let series_root = core.journal.config.data_dir.join("metrics");
+        fs::create_dir_all(&series_root)?;
+        let deleting_series = core
+            .journal
+            .catalog
+            .lock()
+            .unwrap()
+            .series_files("deleting")?;
+        for meta in deleting_series {
+            let path = core.journal.config.data_dir.join(&meta.path);
+            if path.exists() {
+                fs::remove_file(&path)?;
+                sync_dir(path.parent().unwrap())?;
+            }
+            core.journal
+                .catalog
+                .lock()
+                .unwrap()
+                .finish_deleting_series(&meta.id)?;
+        }
+        let mut series_files = vec![];
+        for meta in core.journal.catalog.lock().unwrap().series_files("ready")? {
+            let path = core.journal.config.data_dir.join(&meta.path);
+            ensure!(path.is_file(), "missing durable series file {}", meta.id);
+            series_files.push(Arc::new(SeriesFile { meta, path }));
+        }
+        let registered: HashSet<_> = series_files.iter().map(|file| file.path.clone()).collect();
+        for day in nested_directories(&series_root, 3)? {
+            let mut removed = false;
+            for entry in fs::read_dir(&day)? {
+                let path = entry?.path();
+                let stray = path.is_file()
+                    && path
+                        .extension()
+                        .is_some_and(|ext| ext == "parquet" || ext == "tmp");
+                if stray && !registered.contains(&path) {
+                    fs::remove_file(&path)?;
+                    removed = true;
+                }
+            }
+            if removed {
+                sync_dir(&day)?;
             }
         }
         let wal = core.journal.wal.lock().unwrap();
@@ -198,6 +293,7 @@ impl Materializer {
         Ok(Self {
             core,
             closed,
+            series_files,
             active: None,
             retired: vec![],
             position,
@@ -286,7 +382,7 @@ impl Materializer {
         }
         // Пачки только со счётчиками dropped тоже должны двигать checkpoint.
         if receipt.events == 0 && self.active.is_none() {
-            self.checkpoint(None)?;
+            self.checkpoint(None, None, &[])?;
         }
         Ok(true)
     }
@@ -307,6 +403,7 @@ impl Materializer {
         }
         active.meta.uncompressed_bytes += batch.get_array_memory_size();
         active.batches.push(batch);
+        active.add_points(rows, &self.core.journal.metrics)?;
         self.position.offset += rows.len() as u64;
         self.watermark = rows.last().unwrap().sequence;
         active.meta.checkpoint = self.position;
@@ -323,12 +420,14 @@ impl Materializer {
     fn new_segment(&self, row: &StoredEvent) -> Result<ActiveSegment> {
         let id = Uuid::now_v7().to_string();
         let date = OffsetDateTime::from_unix_timestamp_nanos(row.core_received_at as i128)?;
-        let relative = format!(
-            "segments/{:04}/{:02}/{:02}/{id}",
+        let day = format!(
+            "{:04}/{:02}/{:02}",
             date.year(),
             date.month() as u8,
             date.day()
         );
+        let relative = format!("segments/{day}/{id}");
+        let series_path = format!("metrics/{day}/{id}.parquet");
         let path = self.core.journal.config.data_dir.join(&relative);
         fs::create_dir_all(&path)?;
         let index = ActiveIndex::create(
@@ -352,6 +451,12 @@ impl Materializer {
             },
             path,
             batches: vec![],
+            points: vec![],
+            point_rows: 0,
+            point_min: i64::MAX,
+            point_max: i64::MIN,
+            names: BTreeMap::new(),
+            series_path,
             index,
             started: Instant::now(),
         })
@@ -362,6 +467,8 @@ impl Materializer {
             Some(ActiveView {
                 meta: segment.meta.clone(),
                 batches: segment.batches.clone(),
+                points: segment.points.clone(),
+                names: segment.names.clone(),
                 searcher: segment.index.publish()?,
             })
         } else {
@@ -369,6 +476,7 @@ impl Materializer {
         };
         *self.core.snapshot.write().unwrap() = Arc::new(Snapshot {
             closed: self.closed.clone(),
+            series_files: self.series_files.clone(),
             active,
             watermark: self.watermark,
             generation: self.generation,
@@ -406,6 +514,7 @@ impl Materializer {
         let mut segment = self.active.take().unwrap();
         columns::write_parquet(&segment.path.join("logs.parquet"), &segment.batches)?;
         failpoint("segment_after_parquet");
+        let sealed_series = self.seal_series(&segment)?;
         segment.index.finish()?;
         segment.meta.closed_at = now_nanos();
         segment.meta.checkpoint = self.position;
@@ -416,19 +525,32 @@ impl Materializer {
             segment.path.join("meta.json.tmp"),
             segment.path.join("meta.json"),
         )?;
-        let mut parent = segment.path.join("index");
-        loop {
-            sync_dir(&parent)?;
-            if parent == self.core.journal.config.data_dir {
-                break;
-            }
-            parent = parent
-                .parent()
-                .context("segment outside data directory")?
-                .into();
-        }
+        sync_ancestors(
+            &segment.path.join("index"),
+            &self.core.journal.config.data_dir,
+        )?;
         failpoint("segment_before_catalog");
-        self.checkpoint(Some(&segment.meta))?;
+        let names: Vec<SeriesName> = segment
+            .names
+            .iter()
+            .map(
+                |((service, name, origin), (first_seen, last_seen))| SeriesName {
+                    service: service.clone(),
+                    name: name.clone(),
+                    origin: origin.to_string(),
+                    first_seen: *first_seen,
+                    last_seen: *last_seen,
+                },
+            )
+            .collect();
+        self.checkpoint(
+            Some(&segment.meta),
+            sealed_series.as_ref().map(|file| &file.meta),
+            &names,
+        )?;
+        if let Some(file) = sealed_series {
+            self.series_files.push(Arc::new(file));
+        }
         self.closed.push(Arc::new(DiskSegment {
             meta: segment.meta,
             path: segment.path,
@@ -442,12 +564,50 @@ impl Materializer {
         Ok(())
     }
 
-    fn checkpoint(&self, segment: Option<&SegmentMeta>) -> Result<()> {
+    /// Пишет Parquet серий сегмента; без точек файл не создаётся.
+    fn seal_series(&self, segment: &ActiveSegment) -> Result<Option<SeriesFile>> {
+        if segment.point_rows == 0 {
+            return Ok(None);
+        }
+        let root = &self.core.journal.config.data_dir;
+        let path = root.join(&segment.series_path);
+        let directory = path.parent().context("series outside data directory")?;
+        fs::create_dir_all(directory)?;
+        columns::write_parquet_with(
+            &path,
+            series::schema(),
+            &segment.points,
+            "series_during_parquet",
+        )?;
+        sync_ancestors(directory, root)?;
+        failpoint("series_after_parquet");
+        Ok(Some(SeriesFile {
+            meta: SeriesFileMeta {
+                version: 1,
+                id: segment.meta.id.clone(),
+                path: segment.series_path.clone(),
+                rows: segment.point_rows,
+                min_timestamp: segment.point_min,
+                max_timestamp: segment.point_max,
+                closed_at: now_nanos(),
+            },
+            path,
+        }))
+    }
+
+    fn checkpoint(
+        &self,
+        segment: Option<&SegmentMeta>,
+        series: Option<&SeriesFileMeta>,
+        names: &[SeriesName],
+    ) -> Result<()> {
         // Lock order всегда WAL -> catalog, как при дедупликации входящего запроса.
         let mut wal = self.core.journal.wal.lock().unwrap();
         let receipts = wal.through(self.position);
         self.core.journal.catalog.lock().unwrap().publish(
             segment,
+            series,
+            names,
             self.position,
             &receipts,
             wal.next_ids(),
@@ -556,9 +716,25 @@ fn estimated_bytes(row: &StoredEvent) -> usize {
         + row.event.request_id.as_ref().map_or(0, String::len)
 }
 
-fn segment_directories(root: &Path) -> Result<Vec<PathBuf>> {
+/// Синхронизирует каталог и его предков до корня данных, чтобы новые имена пережили сбой.
+fn sync_ancestors(start: &Path, root: &Path) -> Result<()> {
+    let mut parent = start.to_path_buf();
+    loop {
+        sync_dir(&parent)?;
+        if parent == root {
+            return Ok(());
+        }
+        parent = parent
+            .parent()
+            .context("path outside data directory")?
+            .into();
+    }
+}
+
+/// Каталоги ровно на указанной глубине под root (например, segments/YYYY/MM/DD/<id>).
+fn nested_directories(root: &Path, depth: usize) -> Result<Vec<PathBuf>> {
     let mut level = vec![root.to_path_buf()];
-    for _ in 0..4 {
+    for _ in 0..depth {
         let mut next = vec![];
         for parent in level {
             for entry in fs::read_dir(parent)? {
