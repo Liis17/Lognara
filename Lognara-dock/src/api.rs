@@ -84,6 +84,7 @@ pub fn router(app: AppState) -> Router {
         .route("/auth/login", post(auth::login))
         .route("/auth/logout", post(auth::logout))
         .route("/me", get(account::me))
+        .route("/account/password", post(account::change_password))
         .layer(middleware::from_fn_with_state(
             app.clone(),
             session::require_origin,

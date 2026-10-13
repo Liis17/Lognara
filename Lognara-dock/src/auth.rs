@@ -77,25 +77,35 @@ pub async fn login(
     State(app): State<AppState>,
     Json(request): Json<LoginRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if request.username.len() > MAX_USERNAME_BYTES || request.password.len() > MAX_PASSWORD_BYTES {
+    check_password(&app, &request.username, request.password)
+        .await
+        .inspect_err(|_| tracing::warn!(username = %request.username, "password login failed"))?;
+    start_session(&app, request.username).await
+}
+
+/// Проверяет пароль с учётом блокировки логина; неверный пароль считается неудачной попыткой.
+pub async fn check_password(
+    app: &AppState,
+    username: &str,
+    password: String,
+) -> Result<(), ApiError> {
+    if username.len() > MAX_USERNAME_BYTES || password.len() > MAX_PASSWORD_BYTES {
         return Err(ApiError::Unauthorized);
     }
-    if let Some(wait) = app.limiter.locked_for(&request.username) {
+    if let Some(wait) = app.limiter.locked_for(username) {
         return Err(ApiError::TooManyRequests(wait));
     }
     let checker = app.clone();
-    let username = request.username.clone();
-    let valid =
-        tokio::task::spawn_blocking(move || checker.htpasswd.verify(&username, &request.password))
-            .await
-            .map_err(|_| ApiError::Internal)?;
+    let user = username.to_owned();
+    let valid = tokio::task::spawn_blocking(move || checker.htpasswd.verify(&user, &password))
+        .await
+        .map_err(|_| ApiError::Internal)?;
     if !valid {
-        app.limiter.failure(&request.username);
-        tracing::warn!(username = %request.username, "password login failed");
+        app.limiter.failure(username);
         return Err(ApiError::Unauthorized);
     }
-    app.limiter.success(&request.username);
-    start_session(&app, request.username).await
+    app.limiter.success(username);
+    Ok(())
 }
 
 /// Создаёт сессию и отдаёт её cookie.
