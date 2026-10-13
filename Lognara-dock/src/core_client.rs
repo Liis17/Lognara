@@ -12,6 +12,8 @@ use uuid::Uuid;
 use crate::config::Config;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// Серия за год на стенде core (examples/series_bench.rs) считалась около 16 с; таймаут core 30 с (LOGNARA_QUERY_TIMEOUT_SECONDS).
+const SERIES_QUERY_TIMEOUT: Duration = Duration::from_secs(35);
 /// Сколько символов текста ошибки core передаётся дальше.
 const DETAIL_LIMIT: usize = 1000;
 
@@ -92,11 +94,12 @@ impl CoreClient {
 
     /// Серии за период: `POST /v1/series/query`.
     pub async fn series_query(&self, query: &Value) -> Result<CoreReply, CoreError> {
-        self.call(
+        self.call_within(
             Method::POST,
             "v1/series/query",
             &self.query_token,
             Some(query),
+            SERIES_QUERY_TIMEOUT,
         )
         .await
     }
@@ -162,8 +165,24 @@ impl CoreClient {
         token: &str,
         body: Option<&Value>,
     ) -> Result<CoreReply, CoreError> {
+        self.call_within(method, path, token, body, REQUEST_TIMEOUT)
+            .await
+    }
+
+    async fn call_within(
+        &self,
+        method: Method,
+        path: &str,
+        token: &str,
+        body: Option<&Value>,
+        timeout: Duration,
+    ) -> Result<CoreReply, CoreError> {
         let url = self.base.join(path).expect("core url joins path");
-        let mut request = self.http.request(method, url).bearer_auth(token);
+        let mut request = self
+            .http
+            .request(method, url)
+            .bearer_auth(token)
+            .timeout(timeout);
         if let Some(body) = body {
             request = request.json(body);
         }
