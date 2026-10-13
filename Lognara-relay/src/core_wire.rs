@@ -338,6 +338,7 @@ mod tests {
                     .collect();
                 crate::normalize::event(crate::agent_wire::Record {
                     received_at: 123,
+                    origin: None,
                     payload: crate::agent_wire::Payload::Text(message),
                 })
             })
