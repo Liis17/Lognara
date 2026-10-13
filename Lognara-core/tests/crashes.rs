@@ -33,6 +33,7 @@ async fn start(path: &std::path::Path, point: Option<&str>) -> Process {
         .env("LOGNARA_SEGMENT_ROWS", "2")
         .env("LOGNARA_REFRESH_MS", "20")
         .env("LOGNARA_DISK_RESERVE_BYTES", "1")
+        .env("LOGNARA_SERIES_COMPACT_QUIET_SECONDS", "1")
         .env("RUST_LOG", "error")
         .env_remove("LOGNARA_CRASH_AT")
         .stdout(Stdio::null())
@@ -132,6 +133,9 @@ async fn crashes_at_each_publication_boundary_recover_without_loss_or_duplicates
         "segment_before_catalog",
         "segment_after_catalog",
         "wal_after_prune",
+        "series_compact_during_parquet",
+        "series_compact_after_parquet",
+        "series_compact_after_mark",
     ] {
         let dir = tempfile::tempdir().unwrap();
         let mut process = start(dir.path(), Some(point)).await;

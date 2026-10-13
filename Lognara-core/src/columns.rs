@@ -1,7 +1,7 @@
 //! Единственная схема Arrow/Parquet и получение полных событий по row_id.
 use std::{
     fs::{self, File},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, OnceLock},
 };
 
@@ -232,32 +232,74 @@ pub fn write_parquet_with(
     batches: &[RecordBatch],
     failpoint_name: &str,
 ) -> Result<()> {
-    let temp = path.with_extension("parquet.tmp");
-    let file = File::create(&temp)?;
-    let props = WriterProperties::builder()
-        .set_compression(Compression::ZSTD(ZstdLevel::try_new(3)?))
-        .set_dictionary_enabled(true)
-        .set_max_row_group_row_count(Some(16_384))
-        .build();
-    let mut writer = ArrowWriter::try_new(file.try_clone()?, schema, Some(props))?;
+    let mut writer = ParquetWriter::create(path, schema)?;
     for batch in batches {
         writer.write(batch)?;
         crate::wal::failpoint(failpoint_name);
     }
-    writer.close()?;
-    file.sync_all()?;
-    fs::rename(&temp, path)?;
-    sync_dir(
-        path.parent()
-            .ok_or_else(|| anyhow!("missing parent directory"))?,
-    )?;
-    Ok(())
+    writer.finish()
+}
+
+/// Потоковая запись Parquet через `.tmp`; finish синхронизирует файл и публикует его rename-ом.
+pub struct ParquetWriter {
+    writer: ArrowWriter<File>,
+    file: File,
+    temp: PathBuf,
+    path: PathBuf,
+}
+
+impl ParquetWriter {
+    pub fn create(path: &Path, schema: SchemaRef) -> Result<Self> {
+        let temp = path.with_extension("parquet.tmp");
+        let file = File::create(&temp)?;
+        let props = WriterProperties::builder()
+            .set_compression(Compression::ZSTD(ZstdLevel::try_new(3)?))
+            .set_dictionary_enabled(true)
+            .set_max_row_group_row_count(Some(16_384))
+            .build();
+        let writer = ArrowWriter::try_new(file.try_clone()?, schema, Some(props))?;
+        Ok(Self {
+            writer,
+            file,
+            temp,
+            path: path.into(),
+        })
+    }
+
+    pub fn write(&mut self, batch: &RecordBatch) -> Result<()> {
+        self.writer.write(batch)?;
+        Ok(())
+    }
+
+    pub fn finish(self) -> Result<()> {
+        let Self {
+            writer,
+            file,
+            temp,
+            path,
+        } = self;
+        writer.close()?;
+        file.sync_all()?;
+        fs::rename(&temp, &path)?;
+        sync_dir(
+            path.parent()
+                .ok_or_else(|| anyhow!("missing parent directory"))?,
+        )?;
+        Ok(())
+    }
 }
 
 pub fn read_all(path: &Path) -> Result<Vec<RecordBatch>> {
     Ok(ParquetRecordBatchReaderBuilder::try_new(File::open(path)?)?
         .build()?
         .collect::<Result<Vec<_>, _>>()?)
+}
+
+/// Пачки файла по одной: память ограничена одной пачкой, файл открыт, пока жив итератор.
+pub fn stream_batches(path: &Path) -> Result<impl Iterator<Item = Result<RecordBatch>>> {
+    Ok(ParquetRecordBatchReaderBuilder::try_new(File::open(path)?)?
+        .build()?
+        .map(|batch| batch.map_err(anyhow::Error::from)))
 }
 
 /// row_ids строго возрастают; RowSelection пропускает ненужные row groups и страницы.

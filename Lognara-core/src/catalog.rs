@@ -239,6 +239,20 @@ impl Catalog {
         Ok(())
     }
 
+    /// Слияние серий: новый файл становится ready, исходные - deleting, одной транзакцией.
+    pub fn replace_series(&mut self, new: &SeriesFileMeta, old_ids: &[String]) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO series_files VALUES(?1,?2,'ready')",
+            params![new.id, serde_json::to_string(new)?],
+        )?;
+        for id in old_ids {
+            transaction.execute("UPDATE series_files SET state='deleting' WHERE id=?1", [id])?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn mark_deleting(&mut self, ids: &[String]) -> Result<()> {
         let transaction = self.connection.transaction()?;
         for id in ids {

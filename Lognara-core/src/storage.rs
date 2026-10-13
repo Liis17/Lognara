@@ -210,12 +210,14 @@ struct Materializer {
     series_files: Vec<Arc<SeriesFile>>,
     active: Option<ActiveSegment>,
     retired: Vec<Arc<DiskSegment>>,
+    retired_series: Vec<Arc<SeriesFile>>,
     position: Position,
     watermark: u64,
     generation: u64,
     guard: LabelGuard,
     last_publish: Instant,
     last_retention: Instant,
+    last_compaction: Instant,
 }
 
 impl Materializer {
@@ -322,12 +324,14 @@ impl Materializer {
             series_files,
             active: None,
             retired: vec![],
+            retired_series: vec![],
             position,
             watermark,
             generation: 0,
             guard: LabelGuard::default(),
             last_publish: Instant::now(),
             last_retention: Instant::now() - Duration::from_secs(60),
+            last_compaction: Instant::now() - Duration::from_secs(60),
         })
     }
 
@@ -345,6 +349,16 @@ impl Materializer {
             if self.last_retention.elapsed() >= Duration::from_secs(1) {
                 self.retain()?;
                 self.last_retention = Instant::now();
+            }
+            let compact_every = self
+                .core
+                .journal
+                .config
+                .series_compact_quiet
+                .min(Duration::from_secs(60));
+            if self.last_compaction.elapsed() >= compact_every {
+                self.compact()?;
+                self.last_compaction = Instant::now();
             }
             if !worked {
                 if self.core.journal.stopping.load(Ordering::Acquire) {
@@ -729,6 +743,97 @@ impl Materializer {
                 .fetch_add(1, Ordering::Relaxed);
         }
         self.retired = waiting;
+        self.finish_series_deletions()
+    }
+
+    /// Сливает файлы серий одного дня, если все они старше порога тишины; за проход один день.
+    fn compact(&mut self) -> Result<()> {
+        let quiet = self.core.journal.config.series_compact_quiet.as_nanos() as i64;
+        let cutoff = now_nanos().saturating_sub(quiet);
+        let mut days: BTreeMap<&str, Vec<&Arc<SeriesFile>>> = BTreeMap::new();
+        for file in &self.series_files {
+            let (day, _) = file
+                .meta
+                .path
+                .rsplit_once('/')
+                .context("series file outside day directory")?;
+            days.entry(day).or_default().push(file);
+        }
+        // Ключи упорядочены по строке YYYY/MM/DD: первым идёт самый старый день.
+        let Some((day, files)) = days.into_iter().find(|(_, files)| {
+            files.len() >= 2 && files.iter().all(|file| file.meta.closed_at < cutoff)
+        }) else {
+            return Ok(());
+        };
+        let day = day.to_owned();
+        let sources: Vec<Arc<SeriesFile>> = files.into_iter().cloned().collect();
+        let id = Uuid::now_v7().to_string();
+        let relative = format!("{day}/{id}.parquet");
+        let path = self.core.journal.config.data_dir.join(&relative);
+        let mut writer = columns::ParquetWriter::create(&path, series::schema())?;
+        for source in &sources {
+            for batch in columns::stream_batches(&source.path)? {
+                writer.write(&batch?)?;
+                failpoint("series_compact_during_parquet");
+            }
+        }
+        writer.finish()?;
+        failpoint("series_compact_after_parquet");
+        let old_ids: Vec<String> = sources.iter().map(|file| file.meta.id.clone()).collect();
+        let merged = SeriesFileMeta {
+            version: 1,
+            id,
+            path: relative,
+            rows: sources.iter().map(|file| file.meta.rows).sum(),
+            min_timestamp: sources
+                .iter()
+                .fold(i64::MAX, |min, file| min.min(file.meta.min_timestamp)),
+            max_timestamp: sources
+                .iter()
+                .fold(i64::MIN, |max, file| max.max(file.meta.max_timestamp)),
+            closed_at: now_nanos(),
+        };
+        self.core
+            .journal
+            .catalog
+            .lock()
+            .unwrap()
+            .replace_series(&merged, &old_ids)?;
+        failpoint("series_compact_after_mark");
+        let removed: HashSet<&str> = old_ids.iter().map(String::as_str).collect();
+        self.series_files
+            .retain(|file| !removed.contains(file.meta.id.as_str()));
+        self.series_files
+            .push(Arc::new(SeriesFile { meta: merged, path }));
+        self.series_files.sort_by(|a, b| a.path.cmp(&b.path));
+        self.retired_series.extend(sources);
+        self.publish()?;
+        self.core
+            .journal
+            .metrics
+            .series_compactions
+            .fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Удаляет исходные файлы серий без держателей снимка; остальные ждут в retired_series.
+    fn finish_series_deletions(&mut self) -> Result<()> {
+        let mut waiting = vec![];
+        for file in self.retired_series.drain(..) {
+            if Arc::strong_count(&file) != 1 {
+                waiting.push(file);
+                continue;
+            }
+            fs::remove_file(&file.path)?;
+            sync_dir(file.path.parent().unwrap())?;
+            self.core
+                .journal
+                .catalog
+                .lock()
+                .unwrap()
+                .finish_deleting_series(&file.meta.id)?;
+        }
+        self.retired_series = waiting;
         Ok(())
     }
 }

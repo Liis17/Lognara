@@ -3,15 +3,19 @@ use lognara_core::{
     catalog::{Catalog, SeriesName},
     columns,
     config::Config,
+    model::now_nanos,
+    series::{self, SeriesFileMeta},
+    series_query::{self, QueryRequest, Split},
     storage::Core,
     wire,
 };
 use serde_json::{Value, json};
 use std::{
-    path::Path,
-    sync::atomic::Ordering,
+    path::{Path, PathBuf},
+    sync::{Arc, atomic::Ordering},
     time::{Duration, Instant},
 };
+use uuid::Uuid;
 
 const REPORT_TIME: &str = "2026-10-13T15:14:00.4480321Z";
 const REPORT_NANOS: i64 = 1_791_904_440_448_032_100;
@@ -295,4 +299,210 @@ fn series_names_keep_first_and_last_seen_across_segments() {
             last_seen: 1_791_907_200_000_000_000,
         }]
     );
+}
+
+/// Отчёт runs с собственным временем: каждая строка пачки уходит в свой сегмент и свой бакет.
+fn report_at(time: &str, runs: u64) -> Value {
+    json!({"SchemaVersion": 2, "Counters": {"runs": runs}, "Timestamp": time})
+}
+
+/// Значения серии runs по минутам 15:10-15:13; сравниваются до и после слияния.
+async fn runs_values(core: &Arc<Core>) -> Value {
+    let request = QueryRequest {
+        service: fixture_service(),
+        name: "runs".into(),
+        from: "2026-10-13T15:10:00Z".into(),
+        to: "2026-10-13T15:13:00Z".into(),
+        step_seconds: 60,
+        split: Split::None,
+        origin: None,
+    };
+    let reply = series_query::query(core.clone(), request).await.unwrap();
+    serde_json::to_value(reply.series).unwrap()
+}
+
+#[tokio::test]
+async fn compaction_merges_a_day_and_keeps_query_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = config(dir.path());
+    cfg.segment_rows = 1;
+    let core = Core::open(cfg.clone()).unwrap();
+    core.journal
+        .accept(&batch(&[
+            Some(report_at("2026-10-13T15:10:10Z", 1)),
+            Some(report_at("2026-10-13T15:11:10Z", 2)),
+            Some(report_at("2026-10-13T15:12:10Z", 4)),
+        ]))
+        .unwrap();
+    wait(|| core.snapshot().series_files.len() == 3);
+    let before = runs_values(&core).await;
+    assert_eq!(before, json!([{"label": "", "values": [1.0, 2.0, 4.0]}]));
+    core.shutdown().unwrap();
+    drop(core);
+    // Порог в несколько миллисекунд: слияние дня происходит сразу после старта.
+    cfg.series_compact_quiet = Duration::from_millis(5);
+    let core = Core::open(cfg).unwrap();
+    wait(|| core.snapshot().series_files.len() == 1);
+    let merged = core.snapshot().series_files[0].clone();
+    assert_eq!(merged.meta.rows, 3);
+    assert_eq!(read_series(&merged.path).len(), 3);
+    assert_eq!(runs_values(&core).await, before);
+    core.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn snapshot_taken_before_compaction_keeps_source_files_until_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = config(dir.path());
+    cfg.segment_rows = 1;
+    cfg.series_compact_quiet = Duration::from_secs(1);
+    let core = Core::open(cfg).unwrap();
+    core.journal
+        .accept(&batch(&[
+            Some(report_at("2026-10-13T15:10:10Z", 1)),
+            Some(report_at("2026-10-13T15:11:10Z", 2)),
+        ]))
+        .unwrap();
+    wait(|| core.snapshot().series_files.len() == 2);
+    let held = core.snapshot();
+    let sources: Vec<PathBuf> = held
+        .series_files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect();
+    wait(|| core.snapshot().series_files.len() == 1);
+    // Слияние уже опубликовано, но держатель старого снимка не даёт удалить исходники.
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(sources.iter().all(|path| path.is_file()));
+    drop(held);
+    wait(|| sources.iter().all(|path| !path.exists()));
+    core.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn restart_after_compaction_registers_only_the_merged_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = config(dir.path());
+    cfg.segment_rows = 1;
+    cfg.series_compact_quiet = Duration::from_millis(5);
+    let core = Core::open(cfg.clone()).unwrap();
+    core.journal
+        .accept(&batch(&[
+            Some(report_at("2026-10-13T15:10:10Z", 1)),
+            Some(report_at("2026-10-13T15:11:10Z", 2)),
+        ]))
+        .unwrap();
+    wait(|| {
+        let snapshot = core.snapshot();
+        snapshot.series_files.len() == 1 && snapshot.series_files[0].meta.rows == 2
+    });
+    let merged = core.snapshot().series_files[0].clone();
+    let day = dir
+        .path()
+        .join(merged.meta.path.rsplit_once('/').unwrap().0);
+    wait(|| std::fs::read_dir(&day).unwrap().count() == 1);
+    core.shutdown().unwrap();
+    drop(core);
+    let core = Core::open(cfg).unwrap();
+    let after = core.snapshot();
+    assert_eq!(after.series_files.len(), 1);
+    assert_eq!(after.series_files[0].meta.id, merged.meta.id);
+    assert_eq!(read_series(&after.series_files[0].path).len(), 2);
+    assert_eq!(std::fs::read_dir(&day).unwrap().count(), 1);
+    core.shutdown().unwrap();
+    drop(core);
+    let catalog = Catalog::open(&dir.path().join("catalog.sqlite")).unwrap();
+    assert!(catalog.series_files("deleting").unwrap().is_empty());
+    let ready = catalog.series_files("ready").unwrap();
+    assert_eq!(ready.len(), 1);
+    assert_eq!(ready[0].id, merged.meta.id);
+}
+
+/// Два закрытых сегмента с точками; порог слияния по умолчанию, поэтому слияния не будет.
+fn seal_two_series(cfg: &Config) {
+    let core = Core::open(cfg.clone()).unwrap();
+    core.journal
+        .accept(&batch(&[
+            Some(report_at("2026-10-13T15:10:10Z", 1)),
+            Some(report_at("2026-10-13T15:11:10Z", 2)),
+        ]))
+        .unwrap();
+    wait(|| core.snapshot().series_files.len() == 2);
+    core.shutdown().unwrap();
+}
+
+/// Записывает слитый файл дня без регистрации в каталоге, как после обрыва до mark.
+fn write_merged(dir: &Path, sources: &[SeriesFileMeta]) -> SeriesFileMeta {
+    let day = sources[0].path.rsplit_once('/').unwrap().0;
+    let id = Uuid::now_v7().to_string();
+    let path = format!("{day}/{id}.parquet");
+    let batches: Vec<_> = sources
+        .iter()
+        .flat_map(|meta| columns::read_all(&dir.join(&meta.path)).unwrap())
+        .collect();
+    columns::write_parquet_with(&dir.join(&path), series::schema(), &batches, "unused").unwrap();
+    SeriesFileMeta {
+        version: 1,
+        id,
+        path,
+        rows: sources.iter().map(|meta| meta.rows).sum(),
+        min_timestamp: sources.iter().map(|meta| meta.min_timestamp).min().unwrap(),
+        max_timestamp: sources.iter().map(|meta| meta.max_timestamp).max().unwrap(),
+        closed_at: now_nanos(),
+    }
+}
+
+#[test]
+fn crash_before_mark_removes_the_unregistered_merged_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = config(dir.path());
+    cfg.segment_rows = 1;
+    seal_two_series(&cfg);
+    let sources = Catalog::open(&dir.path().join("catalog.sqlite"))
+        .unwrap()
+        .series_files("ready")
+        .unwrap();
+    // Состояние после series_compact_after_parquet: слитый файл есть, в каталоге его нет.
+    let merged = write_merged(dir.path(), &sources);
+    let core = Core::open(cfg).unwrap();
+    let snapshot = core.snapshot();
+    assert_eq!(snapshot.series_files.len(), 2);
+    assert!(!dir.path().join(&merged.path).exists());
+    assert!(
+        sources
+            .iter()
+            .all(|meta| dir.path().join(&meta.path).is_file())
+    );
+    drop(snapshot);
+    core.shutdown().unwrap();
+}
+
+#[test]
+fn crash_after_mark_keeps_only_the_merged_file_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = config(dir.path());
+    cfg.segment_rows = 1;
+    seal_two_series(&cfg);
+    let mut catalog = Catalog::open(&dir.path().join("catalog.sqlite")).unwrap();
+    let sources = catalog.series_files("ready").unwrap();
+    let merged = write_merged(dir.path(), &sources);
+    // Состояние после series_compact_after_mark: слитый файл ready, исходные deleting.
+    let ids: Vec<String> = sources.iter().map(|meta| meta.id.clone()).collect();
+    catalog.replace_series(&merged, &ids).unwrap();
+    drop(catalog);
+    let core = Core::open(cfg).unwrap();
+    let snapshot = core.snapshot();
+    assert_eq!(snapshot.series_files.len(), 1);
+    assert_eq!(snapshot.series_files[0].meta.id, merged.id);
+    assert_eq!(read_series(&snapshot.series_files[0].path).len(), 2);
+    assert!(
+        sources
+            .iter()
+            .all(|meta| !dir.path().join(&meta.path).exists())
+    );
+    drop(snapshot);
+    core.shutdown().unwrap();
+    drop(core);
+    let catalog = Catalog::open(&dir.path().join("catalog.sqlite")).unwrap();
+    assert!(catalog.series_files("deleting").unwrap().is_empty());
 }
