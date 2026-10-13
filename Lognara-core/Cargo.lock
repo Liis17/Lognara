@@ -2198,6 +2198,7 @@ dependencies = [
  "lognara-relay",
  "lru",
  "parquet",
+ "rand 0.9.5",
  "reqwest",
  "rmp-serde",
  "rusqlite",

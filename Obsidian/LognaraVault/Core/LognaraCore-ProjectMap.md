@@ -7,7 +7,8 @@ Parent: [[Core/LognaraCore]]
 | main, lib | Запуск и сборка сервиса |
 | config | Проверяемые переменные окружения |
 | wire, wire_budget, model | Бинарный контракт, бюджет десериализации без аллокаций и JSON-представление |
-| api | Авторизация и HTTP |
+| api | Авторизация relay/query/admin и HTTP |
+| access | SQLite-реестр relay/агентов, SHA-256 токенов и генерация секретов |
 | journal, wal | Долговечный приём и дедупликация |
 | catalog | SQLite: сегменты, receipts, checkpoint |
 | columns | Arrow/Parquet и физические строки |
@@ -16,7 +17,7 @@ Parent: [[Core/LognaraCore]]
 | query | Проверка фильтров, top-k, чтение строк, HMAC-курсоры |
 | analytics | Типизированные агрегаты DataFusion, общий memory pool |
 | metrics | Счётчики и gauges Prometheus |
-| tests | Контракт, HTTP, WAL, Parquet, поиск, аналитика, retention, аварийные subprocess и настоящие agent/relay и восстановление всей цепочки после недоступности core |
+| tests | access.rs: CRUD, изоляция и отзыв токенов; контракт, HTTP, WAL, Parquet, поиск, аналитика, retention, аварийные subprocess и настоящие agent/relay и восстановление всей цепочки после недоступности core |
 | examples/relay_fixture | Fixture через настоящий encoder relay; запись без происхождения (`origin: None`) сохраняет прежний контракт |
 | examples/load | Нагрузочный HTTP-клиент и выборочная проверка свежести от ACK |
 | scripts/benchmark.py | Запуск release-стенда, сбор RSS/CPU/диска/метрик |
