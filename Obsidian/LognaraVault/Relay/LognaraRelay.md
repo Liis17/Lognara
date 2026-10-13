@@ -50,7 +50,7 @@ services:
       LOGNARA_LISTEN_ADDR: "0.0.0.0:7401"
       LOGNARA_FLUSH_INTERVAL_MS: "60000"
     volumes:
-      - lognara-spool:/var/lib/lognara-relay/spool
+      - ${LOGNARA_RELAY_DATA:-lognara-spool}:/var/lib/lognara-relay/spool
     networks: [lognara-ingest]
 networks:
   lognara-ingest:
@@ -59,7 +59,7 @@ volumes:
   lognara-spool:
 ```
 
-Агенты по умолчанию шлют на `http://lognara-relay:7401/v1/batches`, то есть на сервис с этим именем в той же сети. Все агенты получают тот же `LOGNARA_RELAY_TOKEN` через `environment`. Порт `7401` на хост не публикуется, `network_mode: host` не используется. `.env.example` находится в корне репозитория, а фрагмент для контейнера приложения с агентом показан в корневом README. После смены ключа пересоздаются relay и все агенты.
+Пустой `LOGNARA_RELAY_DATA` оставляет volume `lognara-spool`, абсолютный путь монтирует папку на хосте. Агенты по умолчанию шлют на `http://lognara-relay:7401/v1/batches`, то есть на сервис с этим именем в той же сети. Все агенты получают тот же `LOGNARA_RELAY_TOKEN` через `environment`. Порт `7401` на хост не публикуется, `network_mode: host` не используется. `.env.example` находится в корне репозитория, а фрагмент для контейнера приложения с агентом показан в корневом README. После смены ключа пересоздаются relay и все агенты.
 
 ## Приём: `POST /v1/batches`
 

@@ -17,7 +17,7 @@ Parent: [[Core/LognaraCore]]
 | analytics | Типизированные агрегаты DataFusion, общий memory pool |
 | metrics | Счётчики и gauges Prometheus |
 | tests | Контракт, HTTP, WAL, Parquet, поиск, аналитика, retention, аварийные subprocess и настоящие agent/relay и восстановление всей цепочки после недоступности core |
-| examples/relay_fixture | Fixture через настоящий encoder relay |
+| examples/relay_fixture | Fixture через настоящий encoder relay; запись без происхождения (`origin: None`) сохраняет прежний контракт |
 | examples/load | Нагрузочный HTTP-клиент и выборочная проверка свежести от ACK |
 | scripts/benchmark.py | Запуск release-стенда, сбор RSS/CPU/диска/метрик |
 | docs/operations.md | Конфигурация, TLS-прокси, восстановление и мониторинг |

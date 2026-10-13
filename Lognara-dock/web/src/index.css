@@ -1,0 +1,112 @@
+/* Временное оформление: полноценный дизайн будет позже. */
+body {
+  margin: 0;
+  font: 14px/1.4 system-ui, sans-serif;
+  color: #222;
+}
+header {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  padding: 8px 16px;
+  border-bottom: 1px solid #ddd;
+}
+header nav {
+  display: flex;
+  gap: 12px;
+  flex: 1;
+}
+header nav a.active {
+  font-weight: bold;
+}
+main {
+  padding: 16px;
+}
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+input {
+  padding: 4px 6px;
+  font: inherit;
+}
+.login {
+  max-width: 320px;
+  margin: 80px auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.login form {
+  display: flex;
+  flex-direction: column;
+}
+.settings form {
+  max-width: 420px;
+  margin-bottom: 32px;
+}
+.passkeys {
+  padding: 0;
+  list-style: none;
+}
+.passkeys li {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 4px;
+}
+.toolbar {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.status.live {
+  color: #1a7f37;
+}
+.status.core_error,
+.error {
+  color: #c62828;
+}
+.ok {
+  color: #1a7f37;
+}
+.muted {
+  color: #777;
+}
+table.logs {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+}
+table.logs th,
+table.logs td {
+  text-align: left;
+  padding: 2px 8px;
+  border-bottom: 1px solid #eee;
+  vertical-align: top;
+}
+table.logs tbody tr {
+  cursor: pointer;
+}
+table.logs .time {
+  white-space: nowrap;
+}
+table.logs .message {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.level-error td,
+.level-fatal td {
+  color: #c62828;
+}
+.level-warn td {
+  color: #a15c00;
+}
+.details pre {
+  margin: 0;
+  white-space: pre-wrap;
+}
