@@ -3,13 +3,16 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::http::HeaderValue;
 use axum::http::StatusCode;
-use axum::http::header::RETRY_AFTER;
+use axum::http::header::{REFERRER_POLICY, RETRY_AFTER, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router, middleware};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
+use tower_http::services::{ServeDir, ServeFile};
+use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::account;
 use crate::auth::{self, LoginLimiter};
@@ -109,11 +112,28 @@ pub fn router(app: AppState) -> Router {
         .layer(middleware::from_fn_with_state(
             app.clone(),
             session::require_origin,
-        ));
+        ))
+        .fallback(|| async { ApiError::NotFound });
+    // Остальные пути отдаёт SPA: неизвестный путь получает index.html для react-router.
+    let web = &app.config.web_dir;
+    let spa = ServeDir::new(web).fallback(ServeFile::new(web.join("index.html")));
     Router::new()
         .nest("/api", api)
         .route("/health/live", get(|| async { StatusCode::OK }))
         .route("/health/ready", get(ready))
+        .fallback_service(spa)
+        .layer(SetResponseHeaderLayer::if_not_present(
+            X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            X_FRAME_OPTIONS,
+            HeaderValue::from_static("DENY"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            REFERRER_POLICY,
+            HeaderValue::from_static("same-origin"),
+        ))
         .with_state(app)
 }
 

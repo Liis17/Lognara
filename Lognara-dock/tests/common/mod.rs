@@ -29,12 +29,14 @@ impl TestApp {
 pub fn config(dir: &Path, extra: &[(&str, &str)]) -> Config {
     let auth = dir.join("auth/htpasswd").display().to_string();
     let data = dir.join("data").display().to_string();
+    let web = dir.join("web").display().to_string();
     let mut vars: Vec<(String, String)> = [
         ("LOGNARA_DOCK_PUBLIC_URL", ORIGIN),
         ("LOGNARA_DOCK_CORE_URL", "http://127.0.0.1:9"),
         ("LOGNARA_DOCK_CORE_TOKEN", "query-secret"),
         ("LOGNARA_DOCK_HTPASSWD_FILE", &auth),
         ("LOGNARA_DOCK_DATA_DIR", &data),
+        ("LOGNARA_DOCK_WEB_DIR", &web),
         ("LOGNARA_DOCK_BCRYPT_COST", "10"),
         ("LOGNARA_DOCK_PASSWORD_MIN_LENGTH", "8"),
     ]
