@@ -1,0 +1,6 @@
+**/target
+.git
+.env
+Obsidian
+build
+**/__pycache__
