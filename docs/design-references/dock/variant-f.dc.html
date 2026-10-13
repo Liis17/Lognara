@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Lognara Dock — Вариант F</title>
+<script src="./vendor/react.js"></script>
+<script src="./vendor/react-dom.js"></script>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Commissioner:wght@400;500;600;700&amp;family=IBM+Plex+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0;background:#151311}
+.f{--bg:#151311;--panel:#1C1916;--raised:#25211D;--line:#2F2A25;--ink:#EEE7DD;--ink2:#BDB3A6;--ink3:#9C9184;--accent:#A9B8FF;--accent-ink:#141A3A;--err:#F2806F;--warn:#E8B65A;--info:#8FB0D8;
+box-sizing:border-box;width:100%;min-height:900px;background:var(--bg);color:var(--ink);font:400 13px/1.5 Commissioner,system-ui,sans-serif;display:flex;flex-direction:column}
+.top{display:flex;align-items:center;gap:22px;padding:14px 26px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.brand{font:700 16px Commissioner,sans-serif;letter-spacing:-.01em}
+.brand span{color:var(--accent)}
+.top nav{display:flex;gap:4px;flex-wrap:wrap}
+.top nav a{color:var(--ink3);text-decoration:none;padding:6px 10px;border-radius:999px;font-weight:500}
+.top nav a[aria-current="page"]{color:var(--ink);background:var(--raised)}
+.me{margin-left:auto;color:var(--ink3);font-size:12px}
+.wrap{padding:20px 26px;display:flex;flex-direction:column;gap:16px;min-width:0;flex:1}
+.bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.mode{display:inline-flex;background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:3px}
+.mode button{font:600 12.5px Commissioner,sans-serif;background:none;border:0;color:var(--ink3);padding:6px 14px;border-radius:999px;cursor:pointer}
+.mode button[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink)}
+.bar input{flex:1 1 340px;min-width:0;background:var(--panel);border:1px solid var(--line);border-radius:10px;color:var(--ink);font:400 12.5px "IBM Plex Mono",monospace;padding:9px 12px}
+.btn{font:600 12.5px Commissioner,sans-serif;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:10px;padding:8px 12px;cursor:pointer;white-space:nowrap}
+.btn.solid{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.btn:focus-visible,.mode button:focus-visible,.bar input:focus-visible,.pat:focus-visible,.top nav a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.summary{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+.summary h1{font:600 26px/1.15 Commissioner,sans-serif;margin:0;letter-spacing:-.015em}
+.summary h1 em{font-style:normal;color:var(--accent)}
+.summary p{margin:0;color:var(--ink3)}
+.box{background:var(--panel);border:1px solid var(--line);border-radius:14px;overflow-x:auto}
+table{width:100%;border-collapse:collapse}
+th{font:600 11px Commissioner,sans-serif;letter-spacing:.07em;text-transform:uppercase;color:var(--ink3);text-align:left;padding:11px 14px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:12px 14px;border-bottom:1px solid var(--line);vertical-align:middle;color:var(--ink2)}
+tr:last-child td{border-bottom:0}
+.lv{font:600 11px "IBM Plex Mono",monospace;letter-spacing:.03em}
+.lv-e{color:var(--err)}.lv-w{color:var(--warn)}.lv-i{color:var(--info)}
+.pat{display:flex;gap:10px;align-items:baseline;background:none;border:0;padding:0;font:inherit;color:var(--ink);text-align:left;cursor:pointer;min-width:0}
+.pat .car{color:var(--ink3);font-size:11px;width:10px;flex:none}
+.pat code{font:400 12.5px/1.5 "IBM Plex Mono",monospace;color:var(--ink);overflow-wrap:anywhere}
+.ph{font-style:normal;font:500 11.5px "IBM Plex Mono",monospace;color:var(--accent);background:rgba(169,184,255,.12);border-radius:4px;padding:0 5px}
+.new{font:600 10.5px Commissioner,sans-serif;letter-spacing:.06em;text-transform:uppercase;color:var(--accent-ink);background:var(--accent);border-radius:4px;padding:1px 6px;margin-left:8px;white-space:nowrap}
+.num{font:500 13px "IBM Plex Mono",monospace;color:var(--ink);text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+.share{display:flex;align-items:center;gap:8px;min-width:120px}
+.share i{display:block;height:6px;border-radius:3px;background:var(--ink3)}
+.share span{font:400 11.5px "IBM Plex Mono",monospace;color:var(--ink3)}
+.grow{font:500 12px "IBM Plex Mono",monospace;white-space:nowrap}
+.up{color:var(--err)}.flat{color:var(--ink3)}
+.spark{display:block;width:120px;height:28px}
+tr.open td{background:var(--raised)}
+tr.exp td{background:var(--raised);padding:4px 14px 18px 38px}
+.exp-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.4fr) auto;gap:22px;align-items:start}
+.exp-grid h3{font:600 11px Commissioner,sans-serif;letter-spacing:.07em;text-transform:uppercase;color:var(--ink3);margin:0 0 8px}
+.var{display:grid;grid-template-columns:minmax(0,96px) minmax(0,1fr) 40px;gap:6px 10px;align-items:center;font:400 12px "IBM Plex Mono",monospace;color:var(--ink2);margin-bottom:10px}
+.var b{grid-column:1 / -1;font:500 12px "IBM Plex Mono",monospace;color:var(--accent)}
+.var .tr{height:6px;background:var(--bg);border-radius:3px;overflow:hidden}
+.var .tr i{display:block;height:100%;background:var(--accent)}
+.var em{font-style:normal;text-align:right;color:var(--ink)}
+.samples{display:flex;flex-direction:column;gap:6px}
+.samples div{font:400 12px/1.45 "IBM Plex Mono",monospace;color:var(--ink2);background:var(--bg);border-radius:8px;padding:7px 10px;overflow-wrap:anywhere}
+.samples div span{color:var(--ink3);margin-right:8px}
+.acts{display:flex;flex-direction:column;gap:8px}
+@media (max-width:1000px){.exp-grid{grid-template-columns:1fr}.spark{width:90px}}
+</style>
+</helmet>
+
+<div class="f">
+  <header class="top">
+    <div class="brand">lognara<span>/</span>dock</div>
+    <nav aria-label="Разделы">
+      <a href="#" aria-current="page">Логи</a>
+      <a href="#">Ошибки</a>
+      <a href="#">Аналитика</a>
+      <a href="#">Алерты</a>
+      <a href="#">Инфраструктура</a>
+    </nav>
+    <span class="me">admin</span>
+  </header>
+
+  <div class="wrap">
+    <div class="bar">
+      <div class="mode" role="group" aria-label="Вид">
+        <button type="button" aria-pressed="false">События</button>
+        <button type="button" aria-pressed="true">Паттерны</button>
+        <button type="button" aria-pressed="false">Trace</button>
+      </div>
+      <label for="q" style="position:absolute;left:-9999px">Запрос</label>
+      <input id="q" type="text" value="service:billing">
+      <button class="btn" type="button">1 час ▾</button>
+      <button class="btn" type="button">Сортировка: по росту ▾</button>
+    </div>
+
+    <div class="summary">
+      <h1>52 574 события → <em>23 паттерна</em></h1>
+      <p>billing за последний час · 2 новых паттерна · пример данных</p>
+    </div>
+
+    <div class="box">
+      <table>
+        <thead>
+          <tr><th scope="col">Уровень</th><th scope="col">Паттерн сообщения</th><th scope="col" style="text-align:right">Событий</th><th scope="col">Доля</th><th scope="col">Рост за час</th><th scope="col">Динамика</th></tr>
+        </thead>
+        <tbody>
+          <tr class="open">
+            <td><span class="lv lv-e">ERROR</span></td>
+            <td><button class="pat" type="button" aria-expanded="true"><span class="car">▾</span><code>Database connection refused: host=<var class="ph">ip</var> port=<var class="ph">num</var></code></button></td>
+            <td class="num">9 412</td>
+            <td><div class="share"><i style="width:36px"></i><span>18%</span></div></td>
+            <td class="grow up">+340%</td>
+            <td><svg class="spark" viewBox="0 0 120 28" role="img" aria-label="Резкий рост к концу часа"><polyline points="0,24 12,23 24,24 36,22 48,23 60,20 72,18 84,14 96,8 108,5 120,3" fill="none" stroke="#F2806F" stroke-width="2" stroke-linejoin="round"></polyline><circle cx="120" cy="3" r="2.5" fill="#F2806F"></circle></svg></td>
+          </tr>
+          <tr class="exp">
+            <td colspan="6">
+              <div class="exp-grid">
+                <div>
+                  <h3>Значения переменных</h3>
+                  <div class="var"><b>ip</b><span>10.4.2.18</span><span class="tr"><i style="width:62%"></i></span><em>62%</em><span>10.4.2.19</span><span class="tr"><i style="width:38%"></i></span><em>38%</em></div>
+                  <div class="var"><b>num (port)</b><span>5432</span><span class="tr"><i style="width:100%"></i></span><em>100%</em></div>
+                  <div class="var"><b>instance</b><span>billing-7f9c</span><span class="tr"><i style="width:71%"></i></span><em>71%</em><span>billing-2a11</span><span class="tr"><i style="width:29%"></i></span><em>29%</em></div>
+                </div>
+                <div>
+                  <h3>Примеры</h3>
+                  <div class="samples">
+                    <div><span>14:02:11.482</span>Database connection refused: host=10.4.2.18 port=5432</div>
+                    <div><span>14:02:10.977</span>Database connection refused: host=10.4.2.19 port=5432</div>
+                    <div><span>14:01:47.090</span>Database connection refused: host=10.4.2.19 port=5432</div>
+                  </div>
+                </div>
+                <div class="acts">
+                  <button class="btn solid" type="button">Все 9 412 событий</button>
+                  <button class="btn" type="button">Алерт по паттерну</button>
+                  <button class="btn" type="button">Открыть как проблему</button>
+                  <button class="btn" type="button">Скрыть паттерн</button>
+                </div>
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td><span class="lv lv-e">ERROR</span></td>
+            <td><button class="pat" type="button" aria-expanded="false"><span class="car">▸</span><code>Timeout after <var class="ph">num</var> ms: upstream <var class="ph">word</var></code><span class="new">новый</span></button></td>
+            <td class="num">318</td>
+            <td><div class="share"><i style="width:2px"></i><span>0,6%</span></div></td>
+            <td class="grow up">появился в 13:41</td>
+            <td><svg class="spark" viewBox="0 0 120 28" role="img" aria-label="Появился во второй половине часа"><polyline points="0,27 12,27 24,27 36,27 48,27 60,27 72,27 84,26 96,20 108,12 120,9" fill="none" stroke="#F2806F" stroke-width="2" stroke-linejoin="round"></polyline></svg></td>
+          </tr>
+          <tr>
+            <td><span class="lv lv-w">WARN</span></td>
+            <td><button class="pat" type="button" aria-expanded="false"><span class="car">▸</span><code>Pool exhausted, waiting <var class="ph">num</var> ms</code></button></td>
+            <td class="num">1 208</td>
+            <td><div class="share"><i style="width:5px"></i><span>2,3%</span></div></td>
+            <td class="grow up">+120%</td>
+            <td><svg class="spark" viewBox="0 0 120 28" role="img" aria-label="Умеренный рост"><polyline points="0,20 12,21 24,19 36,20 48,18 60,17 72,15 84,12 96,9 108,8 120,7" fill="none" stroke="#E8B65A" stroke-width="2" stroke-linejoin="round"></polyline></svg></td>
+          </tr>
+          <tr>
+            <td><span class="lv lv-w">WARN</span></td>
+            <td><button class="pat" type="button" aria-expanded="false"><span class="car">▸</span><code>retry attempt <var class="ph">num</var> of <var class="ph">num</var> after <var class="ph">num</var> ms</code></button></td>
+            <td class="num">864</td>
+            <td><div class="share"><i style="width:3px"></i><span>1,6%</span></div></td>
+            <td class="grow up">+45%</td>
+            <td><svg class="spark" viewBox="0 0 120 28" role="img" aria-label="Небольшой рост"><polyline points="0,18 12,17 24,19 36,16 48,17 60,15 72,14 84,13 96,12 108,12 120,11" fill="none" stroke="#E8B65A" stroke-width="2" stroke-linejoin="round"></polyline></svg></td>
+          </tr>
+          <tr>
+            <td><span class="lv lv-i">INFO</span></td>
+            <td><button class="pat" type="button" aria-expanded="false"><span class="car">▸</span><code>POST /v2/charges matched handler=<var class="ph">word</var></code></button></td>
+            <td class="num">31 870</td>
+            <td><div class="share"><i style="width:120px;max-width:100%"></i><span>61%</span></div></td>
+            <td class="grow flat">+3%</td>
+            <td><svg class="spark" viewBox="0 0 120 28" role="img" aria-label="Ровно"><polyline points="0,12 12,11 24,13 36,12 48,11 60,12 72,13 84,12 96,11 108,12 120,12" fill="none" stroke="#8FB0D8" stroke-width="2" stroke-linejoin="round"></polyline></svg></td>
+          </tr>
+          <tr>
+            <td><span class="lv lv-i">INFO</span></td>
+            <td><button class="pat" type="button" aria-expanded="false"><span class="car">▸</span><code>health.check <var class="ph">word</var></code></button></td>
+            <td class="num">8 902</td>
+            <td><div class="share"><i style="width:34px"></i><span>17%</span></div></td>
+            <td class="grow flat">0%</td>
+            <td><svg class="spark" viewBox="0 0 120 28" role="img" aria-label="Ровно"><polyline points="0,14 12,14 24,13 36,14 48,15 60,14 72,13 84,14 96,14 108,13 120,14" fill="none" stroke="#8FB0D8" stroke-width="2" stroke-linejoin="round"></polyline></svg></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+</x-dc>
+
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1280,"height":900}}'>
+class Component extends DCLogic {
+renderVals() {
+return {};
+}
+}
+</script>
+</body>
+</html>

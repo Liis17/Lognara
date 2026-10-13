@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Lognara Dock — События</title>
+<script src="./vendor/react.js"></script>
+<script src="./vendor/react-dom.js"></script>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Commissioner:wght@400;500;600;700&amp;family=IBM+Plex+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0;background:#151311}
+.f{--bg:#151311;--panel:#1C1916;--raised:#25211D;--line:#2F2A25;--ink:#EEE7DD;--ink2:#BDB3A6;--ink3:#9C9184;--accent:#A9B8FF;--accent-ink:#141A3A;--err:#F2806F;--warn:#E8B65A;--info:#8FB0D8;--dbg:#9C9184;
+box-sizing:border-box;width:100%;min-height:900px;background:var(--bg);color:var(--ink);font:400 13px/1.5 Commissioner,system-ui,sans-serif;display:flex;flex-direction:column}
+.top{display:flex;align-items:center;gap:22px;padding:14px 26px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.brand{font:700 16px Commissioner,sans-serif;letter-spacing:-.01em}
+.brand span{color:var(--accent)}
+.top nav{display:flex;gap:4px;flex-wrap:wrap}
+.top nav a{color:var(--ink3);text-decoration:none;padding:6px 10px;border-radius:999px;font-weight:500}
+.top nav a[aria-current="page"]{color:var(--ink);background:var(--raised)}
+.me{margin-left:auto;color:var(--ink3);font-size:12px}
+.wrap{padding:20px 26px;display:flex;flex-direction:column;gap:16px;min-width:0;flex:1}
+.bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.mode{display:inline-flex;background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:3px}
+.mode button{font:600 12.5px Commissioner,sans-serif;background:none;border:0;color:var(--ink3);padding:6px 14px;border-radius:999px;cursor:pointer}
+.mode button[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink)}
+.bar input{flex:1 1 340px;min-width:0;background:var(--panel);border:1px solid var(--line);border-radius:10px;color:var(--ink);font:400 12.5px "IBM Plex Mono",monospace;padding:9px 12px}
+.btn{font:600 12.5px Commissioner,sans-serif;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:10px;padding:8px 12px;cursor:pointer;white-space:nowrap}
+.btn.solid{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.live{display:inline-flex;align-items:center;gap:7px}
+.live i{width:7px;height:7px;border-radius:50%;background:var(--accent)}
+.btn:focus-visible,.mode button:focus-visible,.bar input:focus-visible,.top nav a:focus-visible,.rowbtn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.summary{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+.summary h1{font:600 26px/1.15 Commissioner,sans-serif;margin:0;letter-spacing:-.015em}
+.summary p{margin:0;color:var(--ink3)}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+.chip{font:500 12px "IBM Plex Mono",monospace;border-radius:999px;padding:3px 10px;background:var(--panel);border:1px solid var(--line);color:var(--ink2)}
+.chip b{font-weight:500}
+.box{background:var(--panel);border:1px solid var(--line);border-radius:14px}
+.hist{padding:14px 16px 10px}
+.hist-head{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+.hist-head h2{font:600 13px Commissioner,sans-serif;margin:0}
+.legend{display:flex;gap:14px;font-size:12px;color:var(--ink2);flex-wrap:wrap}
+.legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:6px}
+.cols{display:flex;align-items:flex-end;gap:4px;height:84px;border-bottom:1px solid var(--line)}
+.col{flex:1 1 0;display:flex;flex-direction:column-reverse;height:100%;min-width:0}
+.col i{display:block;width:100%;border-top:2px solid var(--panel)}
+.col i:last-child{border-radius:3px 3px 0 0}
+.axis{display:flex;justify-content:space-between;font:400 11px "IBM Plex Mono",monospace;color:var(--ink3);margin-top:6px}
+.tbl{overflow-x:auto}
+table{width:100%;border-collapse:collapse}
+th{font:600 11px Commissioner,sans-serif;letter-spacing:.07em;text-transform:uppercase;color:var(--ink3);text-align:left;padding:11px 14px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:10px 14px;border-bottom:1px solid var(--line);vertical-align:top;color:var(--ink2)}
+tr:last-child td{border-bottom:0}
+td.t{font:400 12px "IBM Plex Mono",monospace;color:var(--ink3);white-space:nowrap}
+td.src{font:400 12px "IBM Plex Mono",monospace;white-space:nowrap}
+.lv{font:600 11px "IBM Plex Mono",monospace;letter-spacing:.03em}
+.lv-e{color:var(--err)}.lv-w{color:var(--warn)}.lv-i{color:var(--info)}.lv-d{color:var(--dbg)}
+.rowbtn{display:flex;gap:10px;align-items:baseline;background:none;border:0;padding:0;font:inherit;color:var(--ink);text-align:left;cursor:pointer;min-width:0}
+.rowbtn .car{color:var(--ink3);font-size:11px;width:10px;flex:none}
+.rowbtn code{font:400 12.5px/1.5 "IBM Plex Mono",monospace;color:var(--ink);overflow-wrap:anywhere}
+tr.open td{background:var(--raised)}
+tr.exp td{background:var(--raised);padding:4px 14px 18px 38px}
+.exp-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.2fr) auto;gap:22px;align-items:start}
+.exp-grid h3{font:600 11px Commissioner,sans-serif;letter-spacing:.07em;text-transform:uppercase;color:var(--ink3);margin:0 0 8px}
+.kv{display:grid;grid-template-columns:92px minmax(0,1fr);gap:4px 10px;margin:0;font:400 12px "IBM Plex Mono",monospace}
+.kv dt{color:var(--ink3)}
+.kv dd{margin:0;color:var(--ink);overflow-wrap:anywhere}
+.json{margin:0;font:400 12px/1.6 "IBM Plex Mono",monospace;color:var(--ink2);background:var(--bg);border-radius:8px;padding:10px 12px;white-space:pre;overflow-x:auto}
+.json .k{color:var(--accent)}.json .s{color:var(--ink)}.json .n{color:var(--warn)}
+.acts{display:flex;flex-direction:column;gap:8px}
+.pattern-hint{font-size:12px;color:var(--ink3)}
+.pattern-hint a{color:var(--accent);text-decoration:none;font-weight:600}
+.foot{display:flex;justify-content:space-between;color:var(--ink3);font-size:12px;flex-wrap:wrap;gap:8px}
+@media (max-width:1000px){.exp-grid{grid-template-columns:1fr}td.src{display:none}}
+</style>
+</helmet>
+
+<div class="f">
+  <header class="top">
+    <div class="brand">lognara<span>/</span>dock</div>
+    <nav aria-label="Разделы">
+      <a href="#" aria-current="page">Логи</a>
+      <a href="#">Ошибки</a>
+      <a href="#">Аналитика</a>
+      <a href="#">Алерты</a>
+      <a href="#">Инфраструктура</a>
+    </nav>
+    <span class="me">admin</span>
+  </header>
+
+  <div class="wrap">
+    <div class="bar">
+      <div class="mode" role="group" aria-label="Вид">
+        <button type="button" aria-pressed="true">События</button>
+        <button type="button" aria-pressed="false">Паттерны</button>
+        <button type="button" aria-pressed="false">Trace</button>
+      </div>
+      <label for="q" style="position:absolute;left:-9999px">Запрос</label>
+      <input id="q" type="text" value="service:billing AND level:(ERROR OR WARN)">
+      <button class="btn" type="button">1 час ▾</button>
+      <button class="btn live" type="button" aria-pressed="true"><i></i>Live</button>
+      <button class="btn" type="button">Экспорт</button>
+    </div>
+
+    <div class="summary">
+      <h1>11 940 событий</h1>
+      <div class="chips">
+        <span class="chip"><b class="lv-e">ERROR</b> 9 730</span>
+        <span class="chip"><b class="lv-w">WARN</b> 2 210</span>
+        <span class="chip">prod-eu-03 › billing › 7f9c, 2a11</span>
+      </div>
+      <p>пример данных</p>
+    </div>
+
+    <section class="box hist" aria-label="Гистограмма">
+      <div class="hist-head">
+        <h2>По времени, шаг 5 мин</h2>
+        <div class="legend"><span><i style="background:#E8B65A"></i>WARN</span><span><i style="background:#F2806F"></i>ERROR</span></div>
+      </div>
+      <div class="cols" role="img" aria-label="Количество WARN и ERROR по 5 минут, всплеск ERROR после 13:50">
+        <div class="col"><i style="height:10%;background:#E8B65A"></i><i style="height:4%;background:#F2806F"></i></div>
+        <div class="col"><i style="height:12%;background:#E8B65A"></i><i style="height:6%;background:#F2806F"></i></div>
+        <div class="col"><i style="height:9%;background:#E8B65A"></i><i style="height:4%;background:#F2806F"></i></div>
+        <div class="col"><i style="height:14%;background:#E8B65A"></i><i style="height:8%;background:#F2806F"></i></div>
+        <div class="col"><i style="height:16%;background:#E8B65A"></i><i style="height:10%;background:#F2806F"></i></div>
+        <div class="col"><i style="height:12%;background:#E8B65A"></i><i style="height:7%;background:#F2806F"></i></div>
+        <div class="col"><i style="height:10%;background:#E8B65A"></i><i style="height:6%;background:#F2806F"></i></div>
+        <div class="col"><i style="height:15%;background:#E8B65A"></i><i style="height:12%;background:#F2806F"></i></div>
+        <div class="col"><i style="height:18%;background:#E8B65A"></i><i style="height:30%;background:#F2806F"></i></div>
+        <div class="col"><i style="height:20%;background:#E8B65A"></i><i style="height:52%;background:#F2806F"></i></div>
+        <div class="col"><i style="height:22%;background:#E8B65A"></i><i style="height:74%;background:#F2806F"></i></div>
+        <div class="col"><i style="height:18%;background:#E8B65A"></i><i style="height:60%;background:#F2806F"></i></div>
+      </div>
+      <div class="axis"><span>13:05</span><span>13:20</span><span>13:35</span><span>13:50</span><span>14:05</span></div>
+    </section>
+
+    <section class="box tbl" aria-label="События">
+      <table>
+        <thead><tr><th scope="col">Время</th><th scope="col">Уровень</th><th scope="col">Инстанс</th><th scope="col">Сообщение</th></tr></thead>
+        <tbody>
+          <tr class="open">
+            <td class="t">14:02:11.482</td>
+            <td><span class="lv lv-e">ERROR</span></td>
+            <td class="src">billing-7f9c</td>
+            <td><button class="rowbtn" type="button" aria-expanded="true"><span class="car">▾</span><code>Database connection refused: host=10.4.2.18 port=5432</code></button></td>
+          </tr>
+          <tr class="exp">
+            <td colspan="4">
+              <div class="exp-grid">
+                <div>
+                  <h3>Поля</h3>
+                  <dl class="kv">
+                    <dt>server</dt><dd>prod-eu-03</dd>
+                    <dt>action</dt><dd>charge.create</dd>
+                    <dt>trace_id</dt><dd>4bf92f3577b34da6a3ce929d0e0e4736</dd>
+                    <dt>request_id</dt><dd>req_8J2kQ</dd>
+                  </dl>
+                </div>
+                <div>
+                  <h3>JSON</h3>
+<pre class="json"><span class="k">"duration_ms"</span>: <span class="n">5012</span>,
+<span class="k">"attributes"</span>: {
+  <span class="k">"db.host"</span>: <span class="s">"10.4.2.18"</span>,
+  <span class="k">"db.port"</span>: <span class="n">5432</span>,
+  <span class="k">"retry"</span>: <span class="n">3</span>
+}</pre>
+                  <p class="pattern-hint" style="margin:8px 0 0">Паттерн встречается 9 412 раз за час · <a href="#">открыть паттерн</a></p>
+                </div>
+                <div class="acts">
+                  <button class="btn solid" type="button">Контекст ±5 мин</button>
+                  <button class="btn" type="button">Открыть trace</button>
+                  <button class="btn" type="button">Копировать ссылку</button>
+                </div>
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td class="t">14:02:11.403</td><td><span class="lv lv-w">WARN</span></td><td class="src">billing-7f9c</td>
+            <td><button class="rowbtn" type="button" aria-expanded="false"><span class="car">▸</span><code>Pool exhausted, waiting 2000 ms</code></button></td>
+          </tr>
+          <tr>
+            <td class="t">14:02:10.977</td><td><span class="lv lv-e">ERROR</span></td><td class="src">billing-2a11</td>
+            <td><button class="rowbtn" type="button" aria-expanded="false"><span class="car">▸</span><code>Database connection refused: host=10.4.2.19 port=5432</code></button></td>
+          </tr>
+          <tr>
+            <td class="t">14:02:09.861</td><td><span class="lv lv-e">ERROR</span></td><td class="src">billing-7f9c</td>
+            <td><button class="rowbtn" type="button" aria-expanded="false"><span class="car">▸</span><code>Timeout after 5000 ms: upstream ledger</code></button></td>
+          </tr>
+          <tr>
+            <td class="t">14:02:08.744</td><td><span class="lv lv-w">WARN</span></td><td class="src">billing-7f9c</td>
+            <td><button class="rowbtn" type="button" aria-expanded="false"><span class="car">▸</span><code>retry attempt 2 of 3 after 400 ms</code></button></td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <div class="foot"><span>Показано 1–50 из 11 940</span><span>Live: новые сверху · пауза по Space</span></div>
+  </div>
+</div>
+</x-dc>
+
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1280,"height":900}}'>
+class Component extends DCLogic {
+renderVals() {
+return {};
+}
+}
+</script>
+</body>
+</html>
