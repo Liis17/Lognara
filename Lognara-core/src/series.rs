@@ -16,7 +16,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::wire::Source;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Origin {
     Counter,
     Gauge,

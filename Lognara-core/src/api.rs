@@ -21,6 +21,7 @@ use crate::{
     definitions::{self, DefinitionInput},
     journal::{IngestError, Journal},
     query::{self, QueryError, SearchRequest},
+    series_query::{self, QueryRequest},
     storage::Core,
     wire::DecodeError,
 };
@@ -31,6 +32,8 @@ pub fn router(core: Arc<Core>) -> Router {
         .route("/v1/traces/{trace_id}", get(trace))
         .route("/v1/stats/histogram", post(histogram))
         .route("/v1/stats/group-by", post(group_by))
+        .route("/v1/series", get(list_series))
+        .route("/v1/series/query", post(query_series))
         .route_layer(middleware::from_fn_with_state(
             token_hash(&core.journal.config.query_token),
             authorize,
@@ -60,6 +63,20 @@ async fn group_by(
 ) -> Response {
     match request {
         Ok(Json(request)) => run_analytics(&core, analytics::group_by(&core, request)).await,
+        Err(error) => QueryError::Invalid(error.body_text()).into_response(),
+    }
+}
+
+async fn list_series(State(core): State<Arc<Core>>) -> Response {
+    run_analytics(&core, series_query::list(core.clone())).await
+}
+
+async fn query_series(
+    State(core): State<Arc<Core>>,
+    request: Result<Json<QueryRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    match request {
+        Ok(Json(request)) => run_analytics(&core, series_query::query(core.clone(), request)).await,
         Err(error) => QueryError::Invalid(error.body_text()).into_response(),
     }
 }

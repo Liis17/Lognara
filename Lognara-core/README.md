@@ -70,6 +70,13 @@ cargo run --example relay_fixture -- tests/fixtures/relay-batch.bin
 
 Определение без `rule` описывает native-метрику с тем же service и name. С `rule` core извлекает точку из `message`: `contains` — подстрока, `pattern` — регулярное выражение, `value_group` — именованная группа значения (без неё значение 1), `label_groups` — именованные группы меток. Правило действует на строки, материализованные после изменения; историю не пересчитывает. Точки хранятся сырыми, `kind` и `aggregation` применяются при запросе.
 
+## Графики метрик
+
+Маршруты доступны с токеном запросов (Bearer), как поиск и статистика.
+
+- `GET /v1/series` возвращает `{"metrics": [...]}`: по записи на (service, name, origin) с `first_seen`, `last_seen` в RFC3339 и `definition`. Определения без точек тоже в списке, даты в них `null`.
+- `POST /v1/series/query` с `service`, `name`, `from`, `to`, `step_seconds` (1..604800), `split` (`none`, `instance` или `labels`, по умолчанию `none`) и необязательным `origin` возвращает `kind`, `aggregation`, `unit`, `buckets`, до 20 серий `series` с `values` (`null` без данных) и `as_of`. Корзин не больше 10000. У `cumulative` значения - приращения; первое приращение считается от предыдущей корзины.
+
 ## Запуск и проверка
 
 Настройка, HTTPS-прокси, graceful shutdown, восстановление и метрики: [эксплуатация](docs/operations.md).

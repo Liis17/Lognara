@@ -253,7 +253,7 @@ pub fn series_metrics() -> Value {
 /// Ответ core на `POST /v1/series/query`.
 pub fn series_result() -> Value {
     json!({
-        "kind": "counter",
+        "kind": "delta",
         "aggregation": "sum",
         "unit": "requests",
         "buckets": ["2026-10-13T10:00:00Z", "2026-10-13T10:01:00Z"],
