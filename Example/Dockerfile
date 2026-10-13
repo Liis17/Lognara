@@ -25,6 +25,23 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --locked --release --manifest-path Lognara-core/Cargo.toml --bin lognara-core \
     && cp /build/target/release/lognara-core /usr/local/bin/lognara-core
 
+FROM node:24-bookworm-slim AS dock-web
+WORKDIR /web
+COPY Lognara-dock/web/package.json Lognara-dock/web/package-lock.json ./
+RUN npm ci
+COPY Lognara-dock/web/ ./
+RUN npm run build
+
+FROM rust-build AS dock-build
+RUN apt-get update && apt-get install -y --no-install-recommends libssl-dev pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+COPY Lognara-dock/Cargo.toml Lognara-dock/Cargo.lock Lognara-dock/
+COPY Lognara-dock/src/ Lognara-dock/src/
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    cargo build --locked --release --manifest-path Lognara-dock/Cargo.toml --bin lognara-dock \
+    && cp /build/target/release/lognara-dock /usr/local/bin/lognara-dock
+
 FROM python:3.13-slim-bookworm AS runtime
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 RUN apt-get update && apt-get install -y --no-install-recommends libgcc-s1 libstdc++6 \
@@ -39,6 +56,15 @@ FROM runtime AS core
 COPY --from=core-build /usr/local/bin/lognara-core /usr/local/bin/lognara-core
 EXPOSE 7402
 ENTRYPOINT ["lognara-core"]
+
+FROM runtime AS dock
+RUN apt-get update && apt-get install -y --no-install-recommends libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=dock-build /usr/local/bin/lognara-dock /usr/local/bin/lognara-dock
+COPY --from=dock-web /web/dist /usr/share/lognara-dock/web
+USER 1000:1000
+EXPOSE 7403
+ENTRYPOINT ["lognara-dock"]
 
 FROM runtime AS app
 WORKDIR /app

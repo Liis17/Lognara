@@ -77,7 +77,54 @@ services:
       start_period: 10s
     stop_grace_period: 30s
 
+  dock-init:
+    image: httpd:2.4-alpine
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        if [ ! -f /auth/htpasswd ]; then
+          htpasswd -B -C 12 -bc /auth/htpasswd demo demo-lognara-local
+        fi
+        chown 1000:1000 /auth /auth/htpasswd /data/dock
+        chmod 700 /auth /data/dock
+        chmod 600 /auth/htpasswd
+    volumes:
+      - dock-auth:/auth
+      - dock-data:/data/dock
+
+  dock:
+    build:
+      context: ..
+      dockerfile: Example/Dockerfile
+      target: dock
+    environment:
+      LOGNARA_DOCK_PUBLIC_URL: http://localhost:7403
+      LOGNARA_DOCK_LISTEN_ADDR: 0.0.0.0:7403
+      LOGNARA_DOCK_CORE_URL: http://core:7402
+      LOGNARA_DOCK_CORE_TOKEN: local-query-token
+      LOGNARA_DOCK_HTPASSWD_FILE: /etc/lognara-dock/auth/htpasswd
+      LOGNARA_DOCK_DATA_DIR: /data/dock
+    ports:
+      - "127.0.0.1:7403:7403"
+    volumes:
+      - dock-auth:/etc/lognara-dock/auth
+      - dock-data:/data/dock
+    depends_on:
+      dock-init:
+        condition: service_completed_successfully
+      core:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:7403/health/ready', timeout=2).close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    stop_grace_period: 30s
+
 volumes:
   agent-spool:
   relay-spool:
   core-data:
+  dock-auth:
+  dock-data:

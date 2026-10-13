@@ -21,7 +21,7 @@ Parent: [[Index]]
 | [[Core/LognaraCore]] | `Lognara-core/` | Реализованы HTTP-приём, WAL, Arrow/Parquet, каталог SQLite, поиск Tantivy, аналитика DataFusion и retention. |
 | [[Dock/LognaraDock]] | `Lognara-dock/` | Реализованы вход по htpasswd и passkey, сессии в SQLite, смена пароля, лента логов core через SSE и React-интерфейс. Структура в [[Dock/LognaraDock-ProjectMap]]. |
 | [[Delivery/Spool]] | `Lognara-spool/` | Общая атомарная файловая очередь; оба процесса подтверждают приём только после durable commit. |
-| [[Repository/LocalExample]] | `Example/` | Локальный Compose: Python-сервер на 8881 и agent в одном контейнере, relay и core отдельно. |
+| [[Repository/LocalExample]] | `Example/` | Локальный Compose: Python-сервер на 8881 и agent в одном контейнере, relay, core и dock отдельно; веб-логи на localhost:7403. |
 
 Корневые файлы описаны в [[Repository/RootFiles]].
 
@@ -32,7 +32,7 @@ Parent: [[Index]]
 | `Lognara-agent/src/main.rs` | Точка входа агента. Параметры задаются переменными `LOGNARA_*`. |
 | `Lognara-relay/src/main.rs` | Точка входа relay. Параметры задаются переменными `LOGNARA_*`, spool хранится в `LOGNARA_SPOOL_DIR`. |
 | `Lognara-core/src/main.rs` | Точка входа core; отдельный crate, конфигурация `LOGNARA_*`. |
-| `Example/compose.yaml` | Запуск трёх контейнеров на одной машине; на хост публикуются localhost:8881 и localhost:7402. |
+| `Example/compose.yaml` | Запуск app, relay, core и dock на одной машине; dock-init создаёт тестовый вход, на хост публикуются localhost:8881, localhost:7402 и localhost:7403. |
 | `Example/entrypoint.py` | Запускает agent и Python-сервер внутри `app`, передаёт остановку обоим процессам. |
 | `Example/server.py` | Любой корректный HTTP-метод и путь; данные клиента в JSON/stdout и на локальный agent. |
 | `Lognara-dock/src/main.rs` | Точка входа веб-интерфейса; конфигурация `LOGNARA_DOCK_*`, порт `7403`, фронтенд из `LOGNARA_DOCK_WEB_DIR`. |
@@ -82,6 +82,6 @@ Parent: [[Index]]
 
 Core запускается отдельно за TLS-прокси, ingest и query используют разные токены. Query-токен использует [[Dock/LognaraDock]]: браузер получает логи только через dock и его сессии. SIGTERM/SIGINT дорабатывает WAL. HTTP API, эксплуатация и нагрузочный стенд документированы в `Lognara-core/README.md` и `Lognara-core/docs/`.
 
-В тестовом [[Repository/LocalExample]] core запускается без TLS-прокси в изолированной Compose-сети и публикует API только на `127.0.0.1:7402`. App публикует `127.0.0.1:8881`, agent остаётся на localhost своего контейнера, relay наружу не публикуется. Тестовые токены задаются в Compose, отдельные volumes хранят обе очереди и core. Запрос → Python JSON/stdout → agent → relay → core проверяется `Example/smoke-test.py`.
+В тестовом [[Repository/LocalExample]] core запускается без TLS-прокси в изолированной Compose-сети и публикует API только на `127.0.0.1:7402`. App публикует `127.0.0.1:8881`, dock — `127.0.0.1:7403` с origin `http://localhost:7403`; agent остаётся на localhost своего контейнера, relay наружу не публикуется. Тестовые токены задаются в Compose, отдельные volumes хранят обе очереди, core, htpasswd и сессии/passkey dock. Запрос → Python JSON/stdout → agent → relay → core → SSE dock, включая вход, проверяется `Example/smoke-test.py`.
 
 Agent, relay и core требуют постоянное отдельное хранилище. В Compose источник задают `LOGNARA_AGENT_DATA`, `LOGNARA_RELAY_DATA`, `LOGNARA_CORE_DATA`: пусто означает Docker volume, абсолютный путь означает папку на хосте. Agent резервирует 64 MiB под индекс, источник, приём и подготовку отправки; payload ограничен 2 MiB, пачки 8 MiB. Дисковая квота каждого процесса 1 GiB; у agent отдельно до 8 MiB под pending. Переполнение возвращает `503`, HTTP-отказы удерживают очередь. Подробности и гарантия в [[Delivery/Spool]], [[Agent/LognaraAgent]] и README.
