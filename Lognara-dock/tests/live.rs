@@ -2,59 +2,19 @@
 
 mod common;
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use axum::Json;
 use axum::body::Body;
-use axum::extract::State;
-use axum::http::{HeaderMap, Method, StatusCode};
-use axum::routing::post;
+use axum::http::{Method, StatusCode};
 use common::*;
 use http_body_util::BodyExt;
 use lognara_dock::api::{self, App};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-#[derive(Default)]
-struct FakeCore {
-    /// События по убыванию времени, как отдаёт core.
-    events: Mutex<Vec<Value>>,
-    failing: AtomicBool,
-    requests: AtomicUsize,
-}
-
-async fn search(
-    State(core): State<Arc<FakeCore>>,
-    headers: HeaderMap,
-    Json(body): Json<Value>,
-) -> Result<Json<Value>, StatusCode> {
-    core.requests.fetch_add(1, Ordering::SeqCst);
-    assert_eq!(headers["authorization"], "Bearer query-secret");
-    assert_eq!(body["limit"], 1000);
-    assert!(body["from"].as_str().unwrap().ends_with('Z'));
-    if core.failing.load(Ordering::SeqCst) {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
-    }
-    Ok(Json(
-        json!({ "events": *core.events.lock().unwrap(), "next_cursor": null, "as_of": "x" }),
-    ))
-}
-
 fn event(id: &str, timestamp: &str) -> Value {
     json!({ "id": id, "timestamp": timestamp, "level": "info", "message": id, "attributes": {} })
-}
-
-async fn fake_core() -> (Arc<FakeCore>, String) {
-    let core = Arc::new(FakeCore::default());
-    let router = axum::Router::new()
-        .route("/v1/logs/search", post(search))
-        .with_state(core.clone());
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-    (core, url)
 }
 
 /// Читает SSE-события из тела ответа.

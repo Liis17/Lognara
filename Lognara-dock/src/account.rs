@@ -16,9 +16,11 @@ const MAX_NEW_PASSWORD_BYTES: usize = 71;
 
 pub async fn me(State(app): State<AppState>, user: AuthUser) -> Result<Json<Value>, ApiError> {
     let passkeys = crate::passkey::count(&app, &user.username).await?;
-    Ok(Json(
-        json!({ "username": user.username, "passkeys": passkeys }),
-    ))
+    Ok(Json(json!({
+        "username": user.username,
+        "passkeys": passkeys,
+        "series_admin": app.core.admin_enabled(),
+    })))
 }
 
 #[derive(Deserialize)]
