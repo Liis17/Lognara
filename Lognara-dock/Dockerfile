@@ -8,6 +8,7 @@ COPY web/ ./
 RUN npm run build
 
 FROM rust:1-bookworm AS build
+ENV CARGO_BUILD_JOBS=2
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
@@ -17,7 +18,9 @@ FROM debian:bookworm-slim
 # libssl3 нужен webauthn-rs.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates libssl3 \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /var/lib/lognara-dock /etc/lognara-dock/auth \
+    && chown -R 1000:1000 /var/lib/lognara-dock /etc/lognara-dock
 COPY --from=build /src/target/release/lognara-dock /usr/local/bin/lognara-dock
 COPY --from=web /web/dist /usr/share/lognara-dock/web
 ENV LOGNARA_DOCK_LISTEN_ADDR=0.0.0.0:7403
