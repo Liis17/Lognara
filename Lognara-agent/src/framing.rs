@@ -107,7 +107,7 @@ impl Framer {
             && self
                 .pattern
                 .as_ref()
-                .is_some_and(|pattern| pattern.is_match(&line));
+                .is_some_and(|pattern| pattern.is_match(&line[..trimmed_len(&line)]));
         if header && (!self.data.is_empty() || self.fragment > 0) {
             records.push(self.take(self.data.len(), false, true));
         }

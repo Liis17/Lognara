@@ -1,58 +1,109 @@
-//! lognara-agent: принимает логи приложения по HTTP, сохраняет их на диск
-//! и сжатыми пачками отправляет в lognara-relay.
+//! lognara-agent: HTTP, файлы и потоки программы → durable spool → relay.
 
 pub mod config;
 pub mod framing;
+pub mod output;
 pub mod sources;
 pub mod wire;
 
 mod buffer;
 mod files;
 mod ingest;
+mod process;
 mod sender;
 
-use std::io;
+pub use process::run_program;
 
+use std::io;
+use std::sync::Arc;
 use tokio::net::TcpListener;
-use tokio_util::sync::CancellationToken;
+use tokio::task::JoinHandle;
+use tokio_util::sync::{CancellationToken, DropGuard};
 use tracing::error;
 
 use crate::buffer::Buffer;
 use crate::config::Config;
 use crate::sender::Sender;
 
-/// Принимает логи на `listener` и отправляет их в relay, пока не отменён `shutdown`.
-/// После отмены дожидается финальной отправки накопленного.
+/// Принимает HTTP и файлы до отмены shutdown; затем дожидается сохранения и отправки.
 pub async fn run(
     config: Config,
     listener: TcpListener,
     shutdown: CancellationToken,
 ) -> io::Result<()> {
     config.sources.validate(false)?;
-    config.validate().map_err(io::Error::other)?;
-    let _cancel_sources = shutdown.clone().drop_guard();
-    let buffer = Buffer::open(config.clone())
-        .await
-        .map_err(io::Error::other)?;
-    let files = files::Files::open(&config).await?;
-    let file_task = tokio::spawn(files.run(buffer.clone(), shutdown.clone()));
-    // Отправка останавливается только после приёма, чтобы последние записи попали в финальную пачку.
-    let stop_sending = CancellationToken::new();
-    let _cancel_sender = stop_sending.clone().drop_guard();
-    let sender = tokio::spawn(Sender::new(&config, buffer.clone(), stop_sending.clone()).run());
+    let mut runtime = Runtime::start(config, listener, shutdown).await?;
+    let result = runtime.wait().await;
+    runtime.finish().await?;
+    result
+}
 
-    let served = axum::serve(listener, ingest::router(buffer.clone()))
-        .with_graceful_shutdown(shutdown.clone().cancelled_owned())
-        .await;
+struct Runtime {
+    buffer: Arc<Buffer>,
+    server: Option<JoinHandle<io::Result<()>>>,
+    files: JoinHandle<()>,
+    sender: JoinHandle<()>,
+    shutdown: CancellationToken,
+    stop_sending: CancellationToken,
+    _cancel_sources: DropGuard,
+    _cancel_sender: DropGuard,
+}
 
-    shutdown.cancel();
-    if let Err(err) = file_task.await {
-        error!(error = %err, "file collector task failed");
+impl Runtime {
+    async fn start(
+        config: Config,
+        listener: TcpListener,
+        shutdown: CancellationToken,
+    ) -> io::Result<Self> {
+        config.validate().map_err(io::Error::other)?;
+        let buffer = Buffer::open(config.clone())
+            .await
+            .map_err(io::Error::other)?;
+        let files = files::Files::open(&config).await?;
+        let file_task = tokio::spawn(files.run(buffer.clone(), shutdown.clone()));
+        let stop_sending = CancellationToken::new();
+        let sender = tokio::spawn(Sender::new(&config, buffer.clone(), stop_sending.clone()).run());
+        let app = ingest::router(buffer.clone());
+        let cancellation = shutdown.clone();
+        let server = tokio::spawn(async move {
+            let result = axum::serve(listener, app)
+                .with_graceful_shutdown(cancellation.cancelled_owned())
+                .await;
+            if let Err(error) = &result {
+                error!(error = %error, "HTTP server failed");
+            }
+            result
+        });
+        Ok(Self {
+            buffer,
+            server: Some(server),
+            files: file_task,
+            sender,
+            _cancel_sources: shutdown.clone().drop_guard(),
+            _cancel_sender: stop_sending.clone().drop_guard(),
+            shutdown,
+            stop_sending,
+        })
     }
-    stop_sending.cancel();
-    if let Err(err) = sender.await {
-        error!(error = %err, "sender task failed");
+
+    async fn wait(&mut self) -> io::Result<()> {
+        match self.server.take() {
+            Some(server) => server.await.map_err(io::Error::other)?,
+            None => Ok(()),
+        }
     }
-    buffer.drain().await;
-    served
+
+    async fn finish(mut self) -> io::Result<()> {
+        self.shutdown.cancel();
+        let served = self.wait().await;
+        if let Err(error) = self.files.await {
+            error!(error = %error, "file collector task failed");
+        }
+        self.stop_sending.cancel();
+        if let Err(error) = self.sender.await {
+            error!(error = %error, "sender task failed");
+        }
+        self.buffer.drain().await;
+        served
+    }
 }

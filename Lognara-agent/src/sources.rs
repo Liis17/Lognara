@@ -192,7 +192,7 @@ impl Sources {
     /// Все дополнительные буферы, regex и реестр ограничены этим резервом.
     pub fn reserved_bytes(&self, max_record: usize) -> usize {
         if self.sources.is_empty() {
-            0
+            512 << 10
         } else {
             (6 << 20) + 3 * max_record
         }

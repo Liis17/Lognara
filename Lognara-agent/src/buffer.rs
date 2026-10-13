@@ -26,6 +26,7 @@ pub struct Buffer {
     pub models: Arc<Semaphore>,
     jobs: Arc<Semaphore>,
     _metadata: OwnedSemaphorePermit,
+    pub(crate) source_memory: Arc<OwnedSemaphorePermit>,
 }
 
 pub struct Pending {
@@ -56,14 +57,16 @@ impl Buffer {
         let models = Arc::new(Semaphore::new(config.max_buffer_bytes));
         let metadata = models
             .clone()
-            .acquire_many_owned(
-                (INDEX_BYTES
-                    + 4 * config.metadata_bytes()
-                    + config.sources.reserved_bytes(config.max_record_bytes))
-                    as u32,
-            )
+            .acquire_many_owned((INDEX_BYTES + 4 * config.metadata_bytes()) as u32)
             .await
             .map_err(io::Error::other)?;
+        let source_memory = Arc::new(
+            models
+                .clone()
+                .acquire_many_owned(config.sources.reserved_bytes(config.max_record_bytes) as u32)
+                .await
+                .map_err(io::Error::other)?,
+        );
         let buffer = Arc::new(Self {
             queue: Mutex::new(queue),
             template: Batch {
@@ -78,6 +81,7 @@ impl Buffer {
             },
             models,
             _metadata: metadata,
+            source_memory,
             config,
             events: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
@@ -132,6 +136,31 @@ impl Buffer {
             .models
             .clone()
             .try_acquire_many_owned(self.budget())
+            .map_err(|_| Error::Full)?;
+        Ok(SourceAdmission {
+            _slot: slot,
+            _models: models,
+        })
+    }
+
+    pub(crate) async fn wait_source(&self) -> Result<SourceAdmission, Error> {
+        if !self.admitted() {
+            return Err(Error::Full);
+        }
+        let slot = self
+            .input
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| Error::Full)?;
+        if !self.admitted() {
+            return Err(Error::Full);
+        }
+        let models = self
+            .models
+            .clone()
+            .acquire_many_owned(self.budget())
+            .await
             .map_err(|_| Error::Full)?;
         Ok(SourceAdmission {
             _slot: slot,
