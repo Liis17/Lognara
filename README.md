@@ -11,7 +11,7 @@
 
 </div>
 
-Lognara принимает логи приложений, надёжно доставляет их на центральный сервер и позволяет искать по ним и строить статистику. Три небольших сервиса на Rust: **agent** живёт в контейнере рядом с приложением, **relay** один на машину, **core** хранит логи и отвечает на запросы. Core пишет приём в WAL, сохраняет данные в сегменты Parquet + ZSTD, ищет через Tantivy и считает аналитику через DataFusion.
+Lognara принимает логи приложений, надёжно доставляет их на центральный сервер и позволяет искать по ним и строить статистику. Три небольших сервиса на Rust: **agent** живёт в контейнере рядом с приложением, **relay** один на машину, **core** хранит логи и отвечает на запросы. Веб-интерфейс **dock** показывает логи в браузере за nginx. Core пишет приём в WAL, сохраняет данные в сегменты Parquet + ZSTD, ищет через Tantivy и считает аналитику через DataFusion.
 
 ## Как это работает
 
@@ -30,6 +30,8 @@ flowchart LR
         Seg --> API["Search / Trace / Stats API"]
         Idx --> API
     end
+    Browser["Браузер"] -->|"HTTPS через nginx"| Dock["lognara-dock<br/>:7403"]
+    Dock -->|"POST /v1/logs/search"| API
 ```
 
 1. Приложение отправляет лог (text, JSON или байты) на `POST http://127.0.0.1:7400/v1/logs` агента.
@@ -43,6 +45,7 @@ flowchart LR
 |-----------|------------|-------------------|
 | [`Lognara-agent`](Lognara-agent) | Принимает логи по localhost, сохраняет на диск, отправляет в relay | `text/plain`, `application/json`, `application/octet-stream`; пачки MessagePack + zstd; точные повторы с backoff; переполнение даёт `503` без вытеснения |
 | [`Lognara-relay`](Lognara-relay) | Разбирает записи в события, группирует по источнику, отправляет в core | spool на диске с лимитом; порядок пачек сохраняется; деление по байтовым лимитам core |
+| [`Lognara-dock`](Lognara-dock) | Веб-интерфейс: вход и логи в реальном времени | вход по htpasswd (bcrypt) и passkey; сессии и ключи в SQLite; смена пароля переписывает htpasswd; SSE-лента по поиску core |
 | [`Lognara-core`](Lognara-core) | Хранит логи, ищет и считает статистику | WAL + fsync до ACK; дедупликация по SHA-256; полнотекстовый поиск, trace lookup, гистограммы и group-by; retention; метрики Prometheus |
 
 ### Гарантии доставки
@@ -116,6 +119,7 @@ curl -X POST http://127.0.0.1:7402/v1/logs/search \
 | agent | `127.0.0.1:7400` | `LOGNARA_SERVICE`, `LOGNARA_SERVER`, `LOGNARA_BACKEND`, `LOGNARA_RELAY_TOKEN` | `LOGNARA_RELAY_URL`, `LOGNARA_BATCH_SIZE` (1000), `LOGNARA_FLUSH_INTERVAL_MS` (5000) |
 | relay | `127.0.0.1:7401` | `LOGNARA_CORE_URL`, `LOGNARA_CORE_TOKEN`, `LOGNARA_RELAY_TOKEN` | `LOGNARA_SPOOL_DIR`, `LOGNARA_SPOOL_MAX_MB` (1024), `LOGNARA_FLUSH_INTERVAL_MS` (60000), `LOGNARA_BATCH_SIZE` (10000) |
 | core | `127.0.0.1:7402` | `LOGNARA_INGEST_TOKEN`, `LOGNARA_QUERY_TOKEN` | `LOGNARA_DATA_DIR`, `LOGNARA_RETENTION_SECONDS` (604800) |
+| dock | `127.0.0.1:7403` | `LOGNARA_DOCK_PUBLIC_URL`, `LOGNARA_DOCK_CORE_URL`, `LOGNARA_DOCK_CORE_TOKEN` | `LOGNARA_DOCK_HTPASSWD_FILE`, `LOGNARA_DOCK_DATA_DIR`, `LOGNARA_DOCK_SESSION_TTL_SECONDS` (43200) |
 
 <details>
 <summary>Все параметры agent и relay</summary>
@@ -162,7 +166,7 @@ curl -X POST http://127.0.0.1:7402/v1/logs/search \
 | `LOGNARA_RELAY_MAX_BUFFER_BYTES` | `268435456` | байтовый резерв нормализованных моделей до commit |
 | `LOGNARA_RELAY_MAX_INGEST_CONCURRENCY` | `1` | число одновременно читаемых/обрабатываемых пачек |
 
-Параметры core (лимиты, память, сегменты, retention) описаны в [эксплуатации core](Lognara-core/docs/operations.md#конфигурация).
+Параметры core (лимиты, память, сегменты, retention) описаны в [эксплуатации core](Lognara-core/docs/operations.md#конфигурация), все параметры dock, Docker, nginx и API в [`Lognara-dock/README.md`](Lognara-dock/README.md).
 
 Agent обрабатывает один входящий запрос одновременно, читает до 2 MiB за 30 секунд. Бюджет 64 MiB учитывает capacity: 8 MiB отведено индексу (до 10922 частей), источник и два независимых конвейера приёма/отправки занимают остаток. Множество мелких JSON-элементов проверяется до создания payload. Отдельный резерв pending на диске позволяет отправлять при полной квоте. Пачка содержит до `BATCH_SIZE` записей, но может быть меньше из-за байтового или модельного бюджета и границ сохранённых частей.
 
@@ -279,6 +283,8 @@ Lognara-relay/            разбор, группировка, spool, отпр�
 Lognara-spool/            общая атомарная файловая очередь
 Lognara-core/             WAL, хранилище, поиск, аналитика, HTTP API
   docs/                   эксплуатация, нагрузочная проверка
+Lognara-dock/             веб-интерфейс: вход, сессии, лента логов, Dockerfile
+  web/                    React + TypeScript + Vite
 Obsidian/LognaraVault/    база знаний проекта (открывается в Obsidian)
 LICENSE                   MIT
 ```
@@ -286,7 +292,7 @@ LICENSE                   MIT
 ## Статус и ограничения
 
 - Версия 0.1.0, крейты не публикуются (`publish = false`).
-- Dockerfile и готовых образов пока нет.
+- Dockerfile есть только у dock; для agent, relay и core образов пока нет.
 - Метрики агента и relay не поддерживаются.
 - Core работает на одной ноде: без кластера и репликации, TLS не встроен.
 - 10 000 событий/с на 4 CPU / 8 GiB это проверяемая цель, а не гарантия. Результаты приёмочного прогона ещё не записаны.

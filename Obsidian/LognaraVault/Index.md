@@ -1,6 +1,6 @@
 # Lognara — База знаний
 
-Lognara — система сбора логов: агент в контейнере приложения, relay на машине и центральный core. На Rust реализованы агент (`Lognara-agent/`), relay (`Lognara-relay/`) и хранилище с API (`Lognara-core/`).
+Lognara — система сбора логов: агент в контейнере приложения, relay на машине и центральный core. На Rust реализованы агент (`Lognara-agent/`), relay (`Lognara-relay/`), хранилище с API (`Lognara-core/`) и веб-интерфейс (`Lognara-dock/`).
 
 ## Навигация
 
@@ -24,6 +24,13 @@ Lognara — система сбора логов: агент в контейне
 |------|-----------|----------|
 | [[Core/LognaraCore]] | lognara-core | Контракт relay, хранилище, поиск и аналитика. |
 | [[Core/LognaraCore-ProjectMap]] | lognara-core | Модули, конвейер и тесты. |
+
+### Dock
+
+| Файл | Компонент | Описание |
+|------|-----------|----------|
+| [[Dock/LognaraDock]] | lognara-dock | Веб-интерфейс за nginx: вход по htpasswd и passkey, сессии в SQLite, логи core в реальном времени через SSE; параметры `LOGNARA_DOCK_*`. |
+| [[Dock/LognaraDock-ProjectMap]] | lognara-dock | Дерево файлов Rust и React, связи модулей и тесты. |
 
 ### Delivery
 
