@@ -6,7 +6,7 @@ use std::time::Duration;
 use axum::http::StatusCode;
 use axum::http::header::RETRY_AFTER;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router, middleware};
 use serde_json::json;
 
@@ -14,6 +14,7 @@ use crate::account;
 use crate::auth::{self, LoginLimiter};
 use crate::config::Config;
 use crate::htpasswd::Htpasswd;
+use crate::passkey::{self, Challenges};
 use crate::session::{self, Sessions};
 use crate::store::{Store, StoreError};
 
@@ -25,11 +26,14 @@ pub struct App {
     pub store: Store,
     pub sessions: Sessions,
     pub limiter: LoginLimiter,
+    pub webauthn: webauthn_rs::Webauthn,
+    pub challenges: Challenges,
 }
 
 impl App {
     /// Читает htpasswd и открывает каталог данных; ошибки останавливают запуск.
     pub fn open(config: Config) -> Result<AppState, Box<dyn std::error::Error + Send + Sync>> {
+        let webauthn = passkey::webauthn(&config)?;
         let htpasswd = Htpasswd::open(&config.htpasswd_file)?;
         let store = Store::open(&config.data_dir)?;
         let sessions = Sessions::new(store.clone(), config.session_ttl, config.session_idle);
@@ -39,6 +43,8 @@ impl App {
             store,
             sessions,
             limiter: LoginLimiter::default(),
+            webauthn,
+            challenges: Challenges::default(),
         }))
     }
 }
@@ -83,8 +89,14 @@ pub fn router(app: AppState) -> Router {
     let api = Router::new()
         .route("/auth/login", post(auth::login))
         .route("/auth/logout", post(auth::logout))
+        .route("/auth/passkey/start", post(passkey::login_start))
+        .route("/auth/passkey/finish", post(passkey::login_finish))
         .route("/me", get(account::me))
         .route("/account/password", post(account::change_password))
+        .route("/account/passkeys", get(passkey::list))
+        .route("/account/passkeys/start", post(passkey::register_start))
+        .route("/account/passkeys/finish", post(passkey::register_finish))
+        .route("/account/passkeys/{id}", delete(passkey::delete))
         .layer(middleware::from_fn_with_state(
             app.clone(),
             session::require_origin,

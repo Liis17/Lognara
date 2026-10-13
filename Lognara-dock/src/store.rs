@@ -9,7 +9,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use fs2::FileExt;
 use rusqlite::Connection;
 
-const MIGRATIONS: &[&str] = &["
+const MIGRATIONS: &[&str] = &[
+    "
     CREATE TABLE sessions (
         token_hash BLOB PRIMARY KEY,
         username TEXT NOT NULL,
@@ -17,7 +18,24 @@ const MIGRATIONS: &[&str] = &["
         last_seen INTEGER NOT NULL
     );
     CREATE INDEX sessions_username ON sessions(username);
-"];
+",
+    "
+    CREATE TABLE users (
+        username TEXT PRIMARY KEY,
+        webauthn_id BLOB NOT NULL UNIQUE
+    );
+    CREATE TABLE passkeys (
+        id INTEGER PRIMARY KEY,
+        username TEXT NOT NULL REFERENCES users(username) ON DELETE CASCADE,
+        credential_id BLOB NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        passkey TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        last_used_at INTEGER
+    );
+    CREATE INDEX passkeys_username ON passkeys(username);
+",
+];
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {

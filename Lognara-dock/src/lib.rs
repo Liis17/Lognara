@@ -6,6 +6,7 @@ pub mod api;
 pub mod auth;
 pub mod config;
 pub mod htpasswd;
+pub mod passkey;
 pub mod session;
 pub mod store;
 

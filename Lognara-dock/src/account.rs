@@ -14,8 +14,11 @@ use crate::session::AuthUser;
 /// bcrypt учитывает только первые 72 байта; длиннее пароль не принимается.
 const MAX_NEW_PASSWORD_BYTES: usize = 71;
 
-pub async fn me(user: AuthUser) -> Json<Value> {
-    Json(json!({ "username": user.username }))
+pub async fn me(State(app): State<AppState>, user: AuthUser) -> Result<Json<Value>, ApiError> {
+    let passkeys = crate::passkey::count(&app, &user.username).await?;
+    Ok(Json(
+        json!({ "username": user.username, "passkeys": passkeys }),
+    ))
 }
 
 #[derive(Deserialize)]
