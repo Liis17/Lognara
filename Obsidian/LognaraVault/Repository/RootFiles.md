@@ -12,6 +12,7 @@ Parent: [[Index]]
 - `.gitignore` — содержит исключения для Cargo, артефактов сборки агента в `/build/`, rustfmt, PDB, Cargo Mutants, RustRover, `default.profraw`, `.DS_Store`, локального `.env` с ключом, а также `node_modules/` и `Lognara-dock/web/dist/`.
 - `.env.example` — пустой обязательный `LOGNARA_RELAY_TOKEN` и инструкция сгенерировать ключ через `openssl rand -hex 32`, токены core `LOGNARA_CORE_TOKEN` и `LOGNARA_CORE_QUERY_TOKEN`, переменные хранения `LOGNARA_*_DATA` (пусто = volume, абсолютный путь = папка на хосте), `LOGNARA_QUERY_TOKEN` для dock (равен `LOGNARA_CORE_QUERY_TOKEN` при совместном использовании примеров); копируется в `.env` для настройки Compose.
 - `LICENSE` — лицензия MIT с указанием copyright 2026 Li_is.
+- `.github/workflows/ci.yml` — GitHub Actions для всех веток и PR: сборка и тесты пяти Rust-crate, Clippy, форматирование, проверки памяти agent/relay и сборка веб-интерфейса. Детали в [[Repository/CI]].
 
 ## Ключевые методы/функции
 

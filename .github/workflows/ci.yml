@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: 2
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  rust:
+    name: Rust (${{ matrix.crate }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        crate:
+          - Lognara-agent
+          - Lognara-relay
+          - Lognara-spool
+          - Lognara-core
+          - Lognara-dock
+    defaults:
+      run:
+        working-directory: ${{ matrix.crate }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.crate }} -> target
+          key: ${{ matrix.crate }}
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: Build without test features
+        run: cargo build --locked
+      - name: Unit, integration, e2e and doc tests
+        run: cargo test --locked --all-features
+      - name: Check memory profile
+        if: matrix.crate == 'Lognara-agent' || matrix.crate == 'Lognara-relay'
+        run: python3 tests/check-memory-profile.py
+
+  web:
+    name: Web (TypeScript and build)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: Lognara-dock/web
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: Lognara-dock/web/package-lock.json
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Check TypeScript and build
+        run: npm run build
+
+  ci:
+    name: CI passed
+    if: ${{ always() }}
+    needs: [rust, web]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      RUST_RESULT: ${{ needs.rust.result }}
+      WEB_RESULT: ${{ needs.web.result }}
+    steps:
+      - name: Require all checks to pass
+        run: test "$RUST_RESULT" = success && test "$WEB_RESULT" = success
