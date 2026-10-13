@@ -410,10 +410,12 @@ mod tests {
         batch.records = vec![
             agent_wire::Record {
                 received_at: 1,
+                origin: None,
                 payload: agent_wire::Payload::Text("small".into()),
             },
             agent_wire::Record {
                 received_at: 2,
+                origin: None,
                 payload: agent_wire::Payload::Text("x".repeat(1024)),
             },
         ];
@@ -430,6 +432,7 @@ mod tests {
         let mut batch = fixture();
         batch.records = vec![agent_wire::Record {
             received_at: 1,
+            origin: None,
             payload: agent_wire::Payload::Text("x".repeat((2 << 20) + 1)),
         }];
         assert!(matches!(
