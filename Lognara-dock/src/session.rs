@@ -66,7 +66,14 @@ impl Sessions {
 
     /// Находит действующую сессию и продлевает её активность.
     pub async fn lookup(&self, token: &str) -> Result<Option<(String, TokenHash)>, StoreError> {
-        let hash = hash_token(token);
+        self.lookup_hash(hash_token(token)).await
+    }
+
+    /// То же по хэшу токена: для долгих соединений, которые перепроверяют сессию.
+    pub async fn lookup_hash(
+        &self,
+        hash: TokenHash,
+    ) -> Result<Option<(String, TokenHash)>, StoreError> {
         let (ttl, idle) = (self.ttl_ms, self.idle_ms);
         self.store
             .call(move |conn| {

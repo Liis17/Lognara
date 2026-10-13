@@ -5,7 +5,9 @@ pub mod account;
 pub mod api;
 pub mod auth;
 pub mod config;
+pub mod core_client;
 pub mod htpasswd;
+pub mod live;
 pub mod passkey;
 pub mod session;
 pub mod store;
@@ -23,7 +25,12 @@ pub async fn run(
     listener: TcpListener,
     shutdown: CancellationToken,
 ) -> io::Result<()> {
+    let stop = app.shutdown.clone();
     axum::serve(listener, api::router(app))
-        .with_graceful_shutdown(shutdown.cancelled_owned())
+        .with_graceful_shutdown(async move {
+            shutdown.cancelled().await;
+            // SSE-потоки бесконечны: без отмены graceful shutdown ждал бы их вечно.
+            stop.cancel();
+        })
         .await
 }

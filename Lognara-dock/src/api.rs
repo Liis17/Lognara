@@ -9,11 +9,13 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router, middleware};
 use serde_json::json;
+use tokio_util::sync::CancellationToken;
 
 use crate::account;
 use crate::auth::{self, LoginLimiter};
 use crate::config::Config;
 use crate::htpasswd::Htpasswd;
+use crate::live::{self, Live};
 use crate::passkey::{self, Challenges};
 use crate::session::{self, Sessions};
 use crate::store::{Store, StoreError};
@@ -28,6 +30,9 @@ pub struct App {
     pub limiter: LoginLimiter,
     pub webauthn: webauthn_rs::Webauthn,
     pub challenges: Challenges,
+    pub live: Arc<Live>,
+    /// Отменяется при остановке: закрывает SSE-потоки и опрос core.
+    pub shutdown: CancellationToken,
 }
 
 impl App {
@@ -37,14 +42,17 @@ impl App {
         let htpasswd = Htpasswd::open(&config.htpasswd_file)?;
         let store = Store::open(&config.data_dir)?;
         let sessions = Sessions::new(store.clone(), config.session_ttl, config.session_idle);
+        let shutdown = CancellationToken::new();
         Ok(Arc::new(Self {
-            config,
             htpasswd,
             store,
             sessions,
             limiter: LoginLimiter::default(),
             webauthn,
             challenges: Challenges::default(),
+            live: Live::new(&config, shutdown.clone()),
+            config,
+            shutdown,
         }))
     }
 }
@@ -97,6 +105,7 @@ pub fn router(app: AppState) -> Router {
         .route("/account/passkeys/start", post(passkey::register_start))
         .route("/account/passkeys/finish", post(passkey::register_finish))
         .route("/account/passkeys/{id}", delete(passkey::delete))
+        .route("/logs/stream", get(live::stream))
         .layer(middleware::from_fn_with_state(
             app.clone(),
             session::require_origin,

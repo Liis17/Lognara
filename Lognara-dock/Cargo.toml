@@ -12,13 +12,16 @@ axum = "0.8"
 base64 = "0.22"
 bcrypt = "0.19.3"
 fs2 = "0.4"
+futures-util = { version = "0.3", default-features = false }
 rand = "0.9"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 rusqlite = { version = "0.40", default-features = false, features = ["bundled", "cache"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 subtle = "2"
 thiserror = "2"
+time = { version = "0.3", features = ["formatting"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync", "fs"] }
 tokio-util = "0.7"
 tracing = "0.1"
