@@ -43,6 +43,10 @@ Parent: [[Index]]
 
 Каждый сервис собирается отдельным crate, общего Cargo workspace нет.
 
+Автоматические проверки описаны в [[Repository/CI]]: `.github/workflows/ci.yml` на GitHub-hosted Ubuntu проверяет все пять Rust-crate и веб-интерфейс после push в любую ветку и при событиях PR. Проверки включают сборку, тесты с `crash-tests` у core, форматирование, Clippy, профили памяти agent/relay и TypeScript/Vite на Node.js 24. Итоговый status check `CI passed` объединяет результаты; для блокировки merge его нужно включить в правилах защищённой ветки.
+
+Поставка описана в [[Repository/Images]]: после успешного CI push в `master` публикует в GHCR отдельные образы core, relay и dock для `linux/amd64`, теги `master` и `sha-<полный SHA коммита>`. Agent собирается в контейнере приложения. Все три Dockerfile собирают release-бинарник и используют Debian slim с процессом `1000:1000`; dock также включает веб-сборку. Примеры Compose используют общий `LOGNARA_IMAGE_TAG` из `.env`.
+
 ## Сквозной поток логов
 
 1. Приложение (или библиотека lognara) отправляет лог на `POST http://127.0.0.1:7400/v1/logs` агента в своём контейнере: text, JSON или бинарные данные.
