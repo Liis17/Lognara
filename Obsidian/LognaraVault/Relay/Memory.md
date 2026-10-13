@@ -4,7 +4,7 @@ Parent: [[Relay/LognaraRelay]]
 
 ## Admission и конфигурация
 
-`memory.rs` разделяет резервы приёма, накопленных моделей и отправки. Конфигурация проверяет сумму `ingest_request_bytes * concurrency + max_buffer_bytes + sender_bytes` без переполнения. По умолчанию это 1024 + 256 + 512 = 1792 MiB; профиль рассчитан на процесс с 2 GiB, оставляя 256 MiB для runtime, транспорта и allocator.
+`memory.rs` разделяет резервы приёма, накопленных моделей и отправки. Общий RAM задаётся `LOGNARA_RELAY_MEMORY_MB` (MiB, default/min2048); в Compose то же значение задаёт `mem_limit`. Из общего RAM вычитается `RUNTIME_RESERVE=256 MiB`; отдельные резервы не пересчитываются. Конфигурация проверяет сумму `ingest_request_bytes * concurrency + max_buffer_bytes + sender_bytes` без переполнения. По умолчанию это 1024 + 256 + 512 = 1792 MiB; профиль рассчитан на процесс с 2 GiB, оставляя 256 MiB для runtime, транспорта и allocator.
 
 Входной резерв: два сжатых тела по 64 MiB, буфер распаковки 256 MiB + 1, бюджет модели, 128 MiB для codec и 128 MiB запаса; сумма округляется вверх до 128 MiB. Резерв sender: `core_max_decoded_bytes + 2 * core_max_body_bytes + 128 MiB`.
 
@@ -21,7 +21,8 @@ Parent: [[Relay/LognaraRelay]]
 | `run_blocking(permit: OwnedSemaphorePermit, work: FnOnce): Result<T, JoinError>` | Удерживает permit до завершения blocking-работы. |
 | `Pool::reserve(bytes: usize): Result<Reservation, ReserveError>` | Без ожидания резервирует байты; отличает TooLarge от Full. |
 | `Reservation::drop()` | Возвращает резерв в пул. |
-| `Config::validate_memory(): Result<(), ConfigError>` | Проверяет ресурсную конфигурацию, включая программно созданную. |
+| `Config::validate_memory(): Result<(), ConfigError>` | Проверяет минимум 2048 MiB, overflow и сумму резервов, включая программно созданную конфигурацию. |
+| `Config::reserve_bytes(): Option<usize>` | Вычисляет memory_mb * MiB минус 256 MiB runtime reserve без переполнения. |
 | `Config::ingest_request_bytes(): Option<usize>` | Считает фиксированный резерв приёма. |
 | `Config::sender_bytes(): Option<usize>` | Считает отдельный резерв отправки. |
 
@@ -83,3 +84,5 @@ python3 Lognara-relay/tests/check-memory-profile.py
 | `check-memory-profile.py::main(): int` | Собирает тест, контролирует его RSS и возвращает результат проверки. |
 
 Повторный прогон текущей реализации: пик RSS 1617,5 MiB, accepted=9, admission=60, resource=4; обе проверки ниже 2048 MiB. Максимальный наблюдавшийся пик 1672,4 MiB.
+
+Проверка с персональной авторизацией и новым fake core: пик RSS 1628,7 MiB при пороге 2048 MiB, accepted=9, shutdown=ok. Для concurrency=2 требуется 3072 MiB при стандартных остальных лимитах; 1280/2047 и 3071 для двух запросов отклоняются при старте.

@@ -29,7 +29,7 @@ Rust-процесс, один на машину. Принимает пачки �
 | `LOGNARA_CORE_MAX_BODY_BYTES` | нет | `67108864` | максимум сжатой исходящей пачки, не больше лимита core |
 | `LOGNARA_CORE_MAX_DECODED_BYTES` | нет | `268435456` | максимум MessagePack до сжатия, не больше лимита core |
 | `LOGNARA_CORE_MAX_MODEL_BYTES` | нет | `268435456` | бюджет модели: 128 байт на узел MessagePack плюс string/bin |
-| `LOGNARA_RELAY_MEMORY_BYTES` | нет | `1879048192` | сумма резервов приёма, буфера и sender |
+| `LOGNARA_RELAY_MEMORY_MB` | нет | `2048` | общий RAM в MiB, минимум 2048; 256 MiB запас runtime |
 | `LOGNARA_RELAY_MAX_MODEL_BYTES` | нет | `268435456` | резерв входной модели и нормализации |
 | `LOGNARA_RELAY_MAX_BUFFER_BYTES` | нет | `268435456` | резерв нормализованных моделей до durable commit |
 | `LOGNARA_RELAY_MAX_INGEST_CONCURRENCY` | нет | `1` | число одновременных чтений/обработок |
@@ -45,8 +45,10 @@ services:
     environment:
       LOGNARA_CORE_URL: https://core.example.com/v1/batches
       LOGNARA_CORE_TOKEN: ${LOGNARA_RELAY_CORE_TOKEN:?Задайте токен relay из dock}
+      LOGNARA_RELAY_MEMORY_MB: ${LOGNARA_RELAY_MEMORY_MB:-2048}
       LOGNARA_LISTEN_ADDR: "0.0.0.0:7401"
       LOGNARA_FLUSH_INTERVAL_MS: "60000"
+    mem_limit: ${LOGNARA_RELAY_MEMORY_MB:-2048}m
     volumes:
       - ${LOGNARA_RELAY_DATA:-lognara-spool}:/var/lib/lognara-relay/spool
     networks: [lognara-ingest]
@@ -188,3 +190,5 @@ struct LogId(Uuid); struct TraceId([u8; 16]); struct SpanId([u8; 8]);  // bin 16
 | `Spool::dir(): &Path` | Возвращает фактический канонический каталог spool. |
 
 Unit/e2e: неизвестный токен отклоняется до тела, добавление и отзыв в фоне, кеш при рестарте и недоступном core, отсутствие кеша закрывает приём, сбой записи кеша не сохраняет отозванные права в памяти.
+
+`LOGNARA_RELAY_MEMORY_MB` заменяет прежний лимит резервов в байтах. `Config::memory_mb` — RAM всего процесса/контейнера; `Config::reserve_bytes(): Option<usize>` вычисляет `MB * MiB - RUNTIME_RESERVE` с checked arithmetic. По умолчанию резерв равен прежним 1792 MiB.

@@ -10,7 +10,11 @@ use crate::config::Config;
 
 pub const MAX_BODY: usize = 64 << 20;
 pub const MAX_DECODED: usize = 256 << 20;
-pub const DEFAULT_MEMORY: usize = 1792 << 20;
+/// Общий RAM процесса или контейнера, MB; из него вычитается `RUNTIME_RESERVE`.
+pub const DEFAULT_MEMORY_MB: usize = 2048;
+pub const MIN_MEMORY_MB: usize = 2048;
+/// Память runtime, стеков и аллокатора вне резервов приёма, моделей и отправки.
+pub const RUNTIME_RESERVE: usize = 256 << 20;
 pub const DEFAULT_MODEL: usize = 256 << 20;
 pub const DEFAULT_BUFFER: usize = 256 << 20;
 pub const CODEC_WORKSPACE: usize = 128 << 20;

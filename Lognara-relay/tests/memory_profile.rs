@@ -139,7 +139,8 @@ async fn bounded_relay_memory_profile() {
         _ => None,
     })
     .unwrap();
-    assert_eq!(config.memory_bytes, 1792 * MIB);
+    assert_eq!(config.memory_mb, 2048);
+    assert_eq!(config.reserve_bytes(), Some(1792 * MIB));
     assert_eq!(config.max_ingest_concurrency, 1);
     let spool = Spool::open(dir.path(), 1024 * MIB as u64).await.unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

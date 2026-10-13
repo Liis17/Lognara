@@ -34,7 +34,8 @@ pub struct Config {
     pub core_max_body_bytes: usize,
     pub core_max_decoded_bytes: usize,
     pub core_max_model_bytes: usize,
-    pub memory_bytes: usize,
+    /// Общий RAM процесса или контейнера, MB; резервы получают его за вычетом `RUNTIME_RESERVE`.
+    pub memory_mb: usize,
     pub max_model_bytes: usize,
     pub max_buffer_bytes: usize,
     pub max_ingest_concurrency: usize,
@@ -54,7 +55,7 @@ impl fmt::Debug for Config {
             .field("core_max_body_bytes", &self.core_max_body_bytes)
             .field("core_max_decoded_bytes", &self.core_max_decoded_bytes)
             .field("core_max_model_bytes", &self.core_max_model_bytes)
-            .field("memory_bytes", &self.memory_bytes)
+            .field("memory_mb", &self.memory_mb)
             .field("max_model_bytes", &self.max_model_bytes)
             .field("max_buffer_bytes", &self.max_buffer_bytes)
             .field("max_ingest_concurrency", &self.max_ingest_concurrency)
@@ -151,10 +152,10 @@ impl Config {
                 "LOGNARA_CORE_MAX_MODEL_BYTES",
                 crate::wire_budget::DEFAULT_MODEL_BYTES,
             )?,
-            memory_bytes: positive(
+            memory_mb: positive(
                 &get,
-                "LOGNARA_RELAY_MEMORY_BYTES",
-                crate::memory::DEFAULT_MEMORY,
+                "LOGNARA_RELAY_MEMORY_MB",
+                crate::memory::DEFAULT_MEMORY_MB,
             )?,
             max_model_bytes: positive(
                 &get,
@@ -193,6 +194,13 @@ impl Config {
             .checked_add(crate::memory::CODEC_WORKSPACE)
     }
 
+    /// Память под резервы приёма, моделей и отправки: общий RAM без запаса runtime.
+    pub fn reserve_bytes(&self) -> Option<usize> {
+        self.memory_mb
+            .checked_mul(1 << 20)?
+            .checked_sub(crate::memory::RUNTIME_RESERVE)
+    }
+
     pub fn validate_memory(&self) -> Result<(), ConfigError> {
         if self.flush_interval.is_zero()
             || self.batch_size == 0
@@ -221,12 +229,15 @@ impl Config {
             || self.core_max_body_bytes == 0
             || self.core_max_decoded_bytes == 0
             || self.core_max_model_bytes == 0
-            || required.is_none_or(|bytes| bytes > self.memory_bytes)
+            || self.memory_mb < crate::memory::MIN_MEMORY_MB
+            || self
+                .reserve_bytes()
+                .is_none_or(|reserve| required.is_none_or(|bytes| bytes > reserve))
         {
             return Err(ConfigError::Invalid {
-                var: "LOGNARA_RELAY_MEMORY_BYTES",
-                value: self.memory_bytes.to_string(),
-                expected: "model/buffer >= 8192 bytes and memory covering ingest, buffer and sender without overflow",
+                var: "LOGNARA_RELAY_MEMORY_MB",
+                value: self.memory_mb.to_string(),
+                expected: "model/buffer >= 8192 bytes and total RAM in MB >= 2048 covering the 256 MiB runtime reserve plus ingest, buffer and sender reserves without overflow",
             });
         }
         Ok(())
@@ -274,7 +285,7 @@ mod tests {
 
     #[test]
     fn rejects_memory_below_partition_requirements() {
-        assert!(with_required(&[("LOGNARA_RELAY_MEMORY_BYTES", "1073741824")]).is_err());
+        assert!(with_required(&[("LOGNARA_RELAY_MEMORY_MB", "1280")]).is_err());
         assert!(with_required(&[("LOGNARA_RELAY_MAX_INGEST_CONCURRENCY", "2")]).is_err());
     }
 
@@ -296,14 +307,26 @@ mod tests {
         let config = with_required(&[]).unwrap();
         assert_eq!(config.ingest_request_bytes(), Some(1024 << 20));
         assert_eq!(config.sender_bytes(), Some(512 << 20));
-        assert_eq!(config.memory_bytes, 1792 << 20);
+        assert_eq!(config.memory_mb, 2048);
+        assert_eq!(config.reserve_bytes(), Some(1792 << 20));
         let two = with_required(&[
-            ("LOGNARA_RELAY_MEMORY_BYTES", "2952790016"),
+            ("LOGNARA_RELAY_MEMORY_MB", "3072"),
             ("LOGNARA_RELAY_MAX_INGEST_CONCURRENCY", "2"),
         ])
         .unwrap();
         assert_eq!(two.max_ingest_concurrency, 2);
+        assert_eq!(two.reserve_bytes(), Some(2816 << 20));
+        assert!(
+            with_required(&[
+                ("LOGNARA_RELAY_MEMORY_MB", "3071"),
+                ("LOGNARA_RELAY_MAX_INGEST_CONCURRENCY", "2"),
+            ])
+            .is_err()
+        );
         let mut overflow = config;
+        overflow.memory_mb = usize::MAX;
+        assert!(overflow.validate_memory().is_err());
+        overflow.memory_mb = 2048;
         overflow.max_model_bytes = usize::MAX;
         assert!(overflow.validate_memory().is_err());
         overflow.max_model_bytes = 1;
@@ -317,6 +340,24 @@ mod tests {
         let debug = format!("{config:?}");
         assert!(!debug.contains("unique-core-secret"));
         assert!(debug.contains("[redacted]"));
+    }
+
+    #[test]
+    fn memory_is_total_ram_in_mb_and_names_its_variable_on_error() {
+        for mb in ["2047", "1280"] {
+            let err = with_required(&[("LOGNARA_RELAY_MEMORY_MB", mb)]).unwrap_err();
+            assert!(matches!(
+                &err,
+                ConfigError::Invalid {
+                    var: "LOGNARA_RELAY_MEMORY_MB",
+                    ..
+                }
+            ));
+            assert!(err.to_string().contains("LOGNARA_RELAY_MEMORY_MB"));
+        }
+        for mb in ["0", "abc", "-1"] {
+            assert!(with_required(&[("LOGNARA_RELAY_MEMORY_MB", mb)]).is_err());
+        }
     }
 
     const REQUIRED: [(&str, &str); 2] = [
