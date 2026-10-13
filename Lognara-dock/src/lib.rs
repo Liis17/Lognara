@@ -10,6 +10,7 @@ pub mod core_client;
 pub mod htpasswd;
 pub mod live;
 pub mod passkey;
+pub mod query;
 pub mod session;
 pub mod store;
 

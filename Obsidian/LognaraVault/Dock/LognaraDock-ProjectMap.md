@@ -22,7 +22,8 @@ Lognara-dock/
     access.rs                 /api/relays, /api/agents: сессия и proxy admin core
     account.rs                /api/me, смена пароля, check_current_password
     passkey.rs                Webauthn, Challenges, вход и регистрация, список, удаление
-    core_client.rs            query поиск и admin CRUD relay/агентов
+    core_client.rs            query история/Trace/аналитика и admin CRUD relay/агентов
+    query.rs                  typed DTO и авторизованные proxy search/trace/histogram/group-by
     live.rs                   Live (poller + broadcast), SSE stream
   tests/
     common/mod.rs             TestApp, запросы, htpasswd с cost 4
@@ -31,6 +32,7 @@ Lognara-dock/
     password.rs               смена пароля и сохранение остальных строк
     passkey.rs                церемония с SoftPasskey, отказ challenge
     live.rs                   поддельный core: дедупликация, ошибки, остановка опроса
+    query.rs                  query Bearer, DTO/cursor, Origin/сессия, no-store, ошибки, timeout
     static.rs                 SPA fallback и 404 для /api
   web/
     public/fonts/             локальные Commissioner / IBM Plex Mono, OFL, provenance
@@ -48,7 +50,7 @@ Lognara-dock/
 
 Публикация Dockerfile в GHCR из `master`, права каталогов данных и общие теги компонентов описаны в [[Repository/Images]].
 
-- `api::router` собирает обработчики `auth`, `account`, `access`, `passkey`, `live`; слой `session::require_origin` применяется ко всем `/api/*`.
+- `api::router` собирает обработчики `auth`, `account`, `access`, `passkey`, `live`, `query`; слой `session::require_origin` применяется ко всем `/api/*`.
 - `session::AuthUser` (extractor) использует `Sessions` и `Htpasswd::contains`.
 - `account::change_password` и `passkey::register_start/delete` подтверждают действие через `account::check_current_password` → `auth::check_password` (общая блокировка логина).
 - `passkey::login_finish` и `auth::login` создают сессию через `auth::start_session`.

@@ -28,6 +28,12 @@ Parent: [[Index]]
 
 SSE-поток каждые 60 секунд перепроверяет сессию и закрывается при остановке процесса (`App::shutdown`), иначе graceful shutdown ждал бы его вечно.
 
+## API истории и аналитики
+
+Dock проксирует query API core через сессию браузера: `POST /api/logs/search`, `GET /api/traces/{trace_id}` с from/to/limit/cursor, `POST /api/stats/histogram` и `POST /api/stats/group-by`. Входные DTO повторяют типизированный контракт core; неизвестные поля JSON отклоняются. История и Trace сохраняют `events`, `next_cursor`, `as_of` и серверный порядок. Trace возвращает связанные логи, не spans.
+
+Новые query-запросы имеют HTTP timeout 35 секунд при default timeout core 30 секунд; Live и admin остаются на 10 секундах. Ответы `/api/*` получают `Cache-Control: no-store`. Без сессии запрос даёт 401; POST требует прежний Origin. Ошибки core переводятся в безопасные коды: 400 `invalid_query`, 410 `cursor_expired`, 503 `query_unavailable`, 504 `query_timeout`; неожиданный формат/статус или upstream 401 даёт 502 `core_unavailable`. Тексты ошибок и query/admin-токены core браузеру не выдаются.
+
 ## Параметры запуска
 
 | Переменная | Обяз. | По умолчанию | Назначение |
@@ -68,6 +74,11 @@ SSE-поток каждые 60 секунд перепроверяет сесс�
 - `passkey::register_start(...)` — options регистрации с resident key после проверки пароля
 - `Live::subscribe(self: &Arc<Self>): (Vec<Value>, Option<String>, Receiver<Message>)` — снимок и подписка, запускает опрос
 - `CoreClient::search(&self, from, to, limit: usize): Result<Vec<Value>, CoreError>` — поиск core
+- `CoreClient::search_page(&self, request: &SearchRequest): Result<SearchResponse, CoreQueryError>` — историческая страница с фильтрами, текстом и курсором
+- `CoreClient::trace(&self, trace_id: &str, params: &TraceParams): Result<SearchResponse, CoreQueryError>` — связанные события Trace по времени ASC
+- `CoreClient::histogram(&self, request: &HistogramRequest): Result<HistogramResponse, CoreQueryError>` — временные корзины count
+- `CoreClient::group_by(&self, request: &GroupRequest): Result<GroupResponse, CoreQueryError>` — ограниченные группировки count
+- `query::search/trace/histogram/group_by(State, AuthUser, ...): Result<Response, ApiError>` — авторизованные proxy query API
 - `live::stream(State, AuthUser): Sse<...>` — SSE `logs`, `core_error`, `core_ok`, `lagged`
 
 ## Зависимости

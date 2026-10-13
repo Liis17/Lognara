@@ -5,7 +5,9 @@ use std::time::Duration;
 
 use axum::http::HeaderValue;
 use axum::http::StatusCode;
-use axum::http::header::{REFERRER_POLICY, RETRY_AFTER, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS};
+use axum::http::header::{
+    CACHE_CONTROL, REFERRER_POLICY, RETRY_AFTER, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS,
+};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router, middleware};
@@ -22,6 +24,7 @@ use crate::core_client::CoreClient;
 use crate::htpasswd::Htpasswd;
 use crate::live::{self, Live};
 use crate::passkey::{self, Challenges};
+use crate::query;
 use crate::session::{self, Sessions};
 use crate::store::{Store, StoreError};
 
@@ -76,6 +79,9 @@ pub enum ApiError {
     Internal,
     /// Core недоступен или ответил неожиданно.
     CoreUnavailable,
+    CursorExpired,
+    QueryUnavailable,
+    QueryTimeout,
 }
 
 impl From<StoreError> for ApiError {
@@ -102,6 +108,9 @@ impl IntoResponse for ApiError {
             }
             Self::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
             Self::CoreUnavailable => (StatusCode::BAD_GATEWAY, "core_unavailable"),
+            Self::CursorExpired => (StatusCode::GONE, "cursor_expired"),
+            Self::QueryUnavailable => (StatusCode::SERVICE_UNAVAILABLE, "query_unavailable"),
+            Self::QueryTimeout => (StatusCode::GATEWAY_TIMEOUT, "query_timeout"),
         };
         (status, Json(json!({ "error": code }))).into_response()
     }
@@ -120,6 +129,10 @@ pub fn router(app: AppState) -> Router {
         .route("/account/passkeys/finish", post(passkey::register_finish))
         .route("/account/passkeys/{id}", delete(passkey::delete))
         .route("/logs/stream", get(live::stream))
+        .route("/logs/search", post(query::search))
+        .route("/traces/{trace_id}", get(query::trace))
+        .route("/stats/histogram", post(query::histogram))
+        .route("/stats/group-by", post(query::group_by))
         .route(
             "/relays",
             get(access::list_relays).post(access::create_relay),
@@ -134,7 +147,11 @@ pub fn router(app: AppState) -> Router {
             app.clone(),
             session::require_origin,
         ))
-        .fallback(|| async { ApiError::NotFound });
+        .fallback(|| async { ApiError::NotFound })
+        .layer(SetResponseHeaderLayer::if_not_present(
+            CACHE_CONTROL,
+            HeaderValue::from_static("no-store"),
+        ));
     // Остальные пути отдаёт SPA: неизвестный путь получает index.html для react-router.
     let web = &app.config.web_dir;
     let spa = ServeDir::new(web).fallback(ServeFile::new(web.join("index.html")));

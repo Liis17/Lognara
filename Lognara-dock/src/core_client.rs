@@ -3,15 +3,46 @@
 
 use std::time::Duration;
 
-use reqwest::Method;
+use reqwest::{Method, RequestBuilder, StatusCode};
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use url::Url;
 
 use crate::config::Config;
+use crate::query::{
+    GroupRequest, GroupResponse, HistogramRequest, HistogramResponse, SearchRequest,
+    SearchResponse, TraceParams,
+};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// Core по умолчанию выполняет запрос до 30 секунд.
+const QUERY_TIMEOUT: Duration = Duration::from_secs(35);
+
+#[derive(Debug, thiserror::Error)]
+pub enum CoreQueryError {
+    #[error("invalid core query")]
+    Invalid,
+    #[error("cursor snapshot expired")]
+    Gone,
+    #[error("core query unavailable")]
+    Unavailable,
+    #[error("core query timed out")]
+    Timeout,
+    #[error("unexpected core response")]
+    Unexpected,
+}
+
+impl From<reqwest::Error> for CoreQueryError {
+    fn from(error: reqwest::Error) -> Self {
+        if error.is_timeout() {
+            Self::Timeout
+        } else {
+            Self::Unexpected
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {
@@ -29,6 +60,7 @@ pub enum CoreError {
 pub struct CoreClient {
     http: reqwest::Client,
     search_url: Url,
+    query_url: Url,
     admin_url: Url,
     token: String,
     admin_token: String,
@@ -45,6 +77,7 @@ impl CoreClient {
                 .core_url
                 .join("v1/logs/search")
                 .expect("core url joins path"),
+            query_url: config.core_url.join("v1/").expect("core url joins path"),
             admin_url: config
                 .core_url
                 .join("v1/admin/")
@@ -80,6 +113,93 @@ impl CoreClient {
         match reply.get_mut("events").map(Value::take) {
             Some(Value::Array(events)) => Ok(events),
             _ => Err(CoreError::Format),
+        }
+    }
+
+    /// Исторический поиск с фильтрами, текстом и курсором; порядок core сохраняется.
+    pub async fn search_page(
+        &self,
+        request: &SearchRequest,
+    ) -> Result<SearchResponse, CoreQueryError> {
+        let reply: SearchResponse = self
+            .query(self.http.post(self.search_url.clone()).json(request))
+            .await?;
+        if reply.events.len() > request.limit {
+            return Err(CoreQueryError::Unexpected);
+        }
+        Ok(reply)
+    }
+
+    /// Связанные логи trace по возрастанию времени, без модели spans.
+    pub async fn trace(
+        &self,
+        trace_id: &str,
+        params: &TraceParams,
+    ) -> Result<SearchResponse, CoreQueryError> {
+        let mut url = self.query_url.join("traces/").expect("core url joins path");
+        url.path_segments_mut()
+            .expect("core url has path segments")
+            .pop_if_empty()
+            .push(trace_id);
+        let reply: SearchResponse = self.query(self.http.get(url).query(params)).await?;
+        if reply.events.len() > params.limit {
+            return Err(CoreQueryError::Unexpected);
+        }
+        Ok(reply)
+    }
+
+    pub async fn histogram(
+        &self,
+        request: &HistogramRequest,
+    ) -> Result<HistogramResponse, CoreQueryError> {
+        let url = self
+            .query_url
+            .join("stats/histogram")
+            .expect("core url joins path");
+        let reply: HistogramResponse = self.query(self.http.post(url).json(request)).await?;
+        if reply.buckets.len() > 10_000 {
+            return Err(CoreQueryError::Unexpected);
+        }
+        Ok(reply)
+    }
+
+    pub async fn group_by(&self, request: &GroupRequest) -> Result<GroupResponse, CoreQueryError> {
+        let url = self
+            .query_url
+            .join("stats/group-by")
+            .expect("core url joins path");
+        let reply: GroupResponse = self.query(self.http.post(url).json(request)).await?;
+        if reply.groups.len() > request.limit
+            || reply.groups.iter().any(|group| {
+                group.values.len() != request.group_by.len()
+                    || !request
+                        .group_by
+                        .iter()
+                        .all(|field| group.values.contains_key(field))
+            })
+        {
+            return Err(CoreQueryError::Unexpected);
+        }
+        Ok(reply)
+    }
+
+    /// Передаёт только типизированный успешный ответ и статическую классификацию ошибок.
+    async fn query<T: DeserializeOwned>(
+        &self,
+        request: RequestBuilder,
+    ) -> Result<T, CoreQueryError> {
+        let response = request
+            .timeout(QUERY_TIMEOUT)
+            .bearer_auth(&self.token)
+            .send()
+            .await?;
+        match response.status() {
+            StatusCode::OK => Ok(response.json().await?),
+            StatusCode::BAD_REQUEST => Err(CoreQueryError::Invalid),
+            StatusCode::GONE => Err(CoreQueryError::Gone),
+            StatusCode::SERVICE_UNAVAILABLE => Err(CoreQueryError::Unavailable),
+            StatusCode::GATEWAY_TIMEOUT => Err(CoreQueryError::Timeout),
+            _ => Err(CoreQueryError::Unexpected),
         }
     }
 
