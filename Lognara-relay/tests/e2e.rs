@@ -215,6 +215,7 @@ fn source(service: &str) -> Source {
 fn record(message: &str) -> Record {
     Record {
         received_at: 1,
+        origin: None,
         payload: Payload::Text(message.into()),
     }
 }

@@ -2,6 +2,8 @@
 //! и сжатыми пачками отправляет в lognara-relay.
 
 pub mod config;
+pub mod framing;
+pub mod sources;
 pub mod wire;
 
 mod buffer;

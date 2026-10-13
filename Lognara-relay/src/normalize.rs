@@ -16,6 +16,25 @@ use crate::model_budget::{ModelBudget, TooLarge};
 /// Проверяет временные объекты и расширение payload до создания Event/Value.
 pub fn event_with_budget(record: Record, budget: &mut ModelBudget) -> Result<Event, TooLarge> {
     budget.charge(4 * std::mem::size_of::<Event>())?;
+    if let Some(origin) = &record.origin {
+        if origin.source.len() > 64
+            || origin.path.as_ref().is_some_and(|p| p.len() > 4096)
+            || origin
+                .stream
+                .as_ref()
+                .is_some_and(|s| !matches!(s.as_str(), "stdout" | "stderr"))
+            || origin.end < origin.offset
+            || origin.path.is_some() == origin.stream.is_some()
+        {
+            return Err(TooLarge);
+        }
+        budget.charge(
+            4096 + 4
+                * (origin.source.len()
+                    + origin.path.as_ref().map_or(0, String::len)
+                    + origin.stream.as_ref().map_or(0, String::len)),
+        )?;
+    }
     let payload = match record.payload {
         Payload::Text(text) => Payload::Text(text),
         Payload::Binary(bytes) => {
@@ -37,6 +56,7 @@ pub fn event_with_budget(record: Record, budget: &mut ModelBudget) -> Result<Eve
     };
     Ok(event(Record {
         received_at: record.received_at,
+        origin: record.origin,
         payload,
     }))
 }
@@ -71,6 +91,29 @@ pub fn event(record: Record) -> Event {
             // Числа, массивы и прочие значения, а также невалидный JSON остаются текстом.
             _ => event.message = json,
         },
+    }
+    if let Some(origin) = record.origin {
+        event
+            .attributes
+            .insert("lognara.source".into(), origin.source.into());
+        if let Some(path) = origin.path {
+            event.attributes.insert("log.file.path".into(), path.into());
+        }
+        if let Some(stream) = origin.stream {
+            event.attributes.insert("log.stream".into(), stream.into());
+        }
+        event
+            .attributes
+            .insert("log.origin.offset".into(), origin.offset.into());
+        event
+            .attributes
+            .insert("log.origin.end".into(), origin.end.into());
+        event
+            .attributes
+            .insert("log.fragment.index".into(), origin.fragment.into());
+        event
+            .attributes
+            .insert("log.fragment.continued".into(), origin.continued.into());
     }
     event
 }
@@ -161,9 +204,32 @@ mod tests {
 
     const RECEIVED_AT: i64 = 1_790_678_511_894_000_000;
 
+    #[test]
+    fn origin_preserves_payload_and_has_a_separate_model_budget() {
+        let mut record = record(Payload::Text("original".into()));
+        record.origin = Some(crate::agent_wire::Origin {
+            source: "access".into(),
+            path: Some("/var/log/app/access.log".into()),
+            stream: None,
+            offset: 10,
+            end: 19,
+            fragment: 0,
+            continued: false,
+        });
+        assert_eq!(
+            event_with_budget(record.clone(), &mut ModelBudget::new(2048)),
+            Err(TooLarge)
+        );
+        let event = event_with_budget(record, &mut ModelBudget::new(16384)).unwrap();
+        assert_eq!(event.message, "original");
+        assert_eq!(event.attributes["log.file.path"], "/var/log/app/access.log");
+        assert_eq!(event.attributes["log.origin.offset"], 10);
+    }
+
     fn record(payload: Payload) -> Record {
         Record {
             received_at: RECEIVED_AT,
+            origin: None,
             payload,
         }
     }
@@ -181,6 +247,7 @@ mod tests {
         let json = format!("{{\"items\":[{}null]}}", "null,".repeat(1000));
         let record = Record {
             received_at: 1,
+            origin: None,
             payload: Payload::Json(json),
         };
         assert_eq!(
@@ -189,6 +256,7 @@ mod tests {
         );
         let binary = Record {
             received_at: 1,
+            origin: None,
             payload: Payload::Binary(vec![0; 1024]),
         };
         assert_eq!(
@@ -201,6 +269,7 @@ mod tests {
     fn budgets_are_cumulative_and_invalid_json_keeps_original_text() {
         let make = || Record {
             received_at: 1,
+            origin: None,
             payload: Payload::Json(r#"{"message":"ok"}"#.into()),
         };
         let mut budget = ModelBudget::new(10_000);
@@ -211,6 +280,7 @@ mod tests {
         assert_eq!(event_with_budget(make(), &mut budget), Err(TooLarge));
         let invalid = Record {
             received_at: 1,
+            origin: None,
             payload: Payload::Json("[1,".into()),
         };
         assert_eq!(

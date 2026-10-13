@@ -35,6 +35,11 @@ pub struct Pending {
     _models: OwnedSemaphorePermit,
 }
 
+pub(crate) struct SourceAdmission {
+    _slot: OwnedSemaphorePermit,
+    _models: OwnedSemaphorePermit,
+}
+
 impl Buffer {
     pub async fn open(config: Config) -> Result<Arc<Self>, Error> {
         let init = config.clone();
@@ -51,7 +56,12 @@ impl Buffer {
         let models = Arc::new(Semaphore::new(config.max_buffer_bytes));
         let metadata = models
             .clone()
-            .acquire_many_owned((INDEX_BYTES + 4 * config.metadata_bytes()) as u32)
+            .acquire_many_owned(
+                (INDEX_BYTES
+                    + 4 * config.metadata_bytes()
+                    + config.sources.reserved_bytes(config.max_record_bytes))
+                    as u32,
+            )
             .await
             .map_err(io::Error::other)?;
         let buffer = Arc::new(Self {
@@ -106,6 +116,51 @@ impl Buffer {
     }
     pub fn max_record_bytes(&self) -> usize {
         self.config.max_record_bytes
+    }
+
+    /// До чтения/разбора источника, в том же порядке, что и HTTP.
+    pub(crate) fn admit_source(&self) -> Result<SourceAdmission, Error> {
+        if !self.admitted() {
+            return Err(Error::Full);
+        }
+        let slot = self
+            .input
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Error::Full)?;
+        let models = self
+            .models
+            .clone()
+            .try_acquire_many_owned(self.budget())
+            .map_err(|_| Error::Full)?;
+        Ok(SourceAdmission {
+            _slot: slot,
+            _models: models,
+        })
+    }
+
+    pub(crate) fn file_pressure(&self) -> bool {
+        self.events.load(Ordering::Acquire) >= (self.config.max_buffer as u64).saturating_mul(3) / 4
+            || self.bytes.load(Ordering::Acquire)
+                >= self.config.spool_max_bytes.saturating_mul(3) / 4
+    }
+
+    pub(crate) fn source_record_limit(&self) -> usize {
+        self.config.max_record_bytes.min(512 << 10)
+    }
+
+    pub(crate) async fn save_source(
+        self: &Arc<Self>,
+        records: Vec<Record>,
+        admission: SourceAdmission,
+    ) -> Result<(), Error> {
+        let buffer = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let _admission = admission;
+            buffer.push(records)
+        })
+        .await
+        .map_err(|e| io::Error::other(e.to_string()))?
     }
     pub async fn full(&self) {
         self.changed.notified().await
@@ -379,6 +434,7 @@ mod tests {
         (0..n)
             .map(|n| Record {
                 received_at: n as i64 + 1,
+                origin: None,
                 payload: Payload::Text(n.to_string()),
             })
             .collect()
@@ -450,6 +506,7 @@ mod tests {
         for _ in 0..4 {
             b.push(vec![Record {
                 received_at: 1,
+                origin: None,
                 payload: Payload::Binary(value.clone()),
             }])
             .unwrap();
