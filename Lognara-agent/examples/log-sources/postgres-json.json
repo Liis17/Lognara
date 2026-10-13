@@ -1,0 +1,1 @@
+{"sources":[{"id":"postgres-json","type":"file","format":"ndjson","include":["/var/log/postgresql/*.json*"],"start_at":"beginning"}]}

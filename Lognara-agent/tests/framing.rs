@@ -81,3 +81,21 @@ fn fragments_never_exceed_the_limit_and_multiline_headers_are_checked_before_joi
         }
     }
 }
+
+#[test]
+fn multiline_checkpoint_marks_a_cut_inside_a_completed_physical_line() {
+    let mut source = Source::stream(SourceKind::Stdout);
+    source.multiline = Some(Multiline {
+        start_pattern: "^E".into(),
+        flush_timeout_ms: 1000,
+    });
+    let mut reader = Framer::new(&source, 8, 0, None).unwrap();
+    let first = reader.feed(b"E aaa\nxxE b\n").remove(0);
+    assert_eq!(first.payload, Payload::Text("E aaa\nxx".into()));
+    assert!(first.continuation.as_ref().unwrap().line_continued);
+    let mut restarted = Framer::new(&source, 8, first.end, first.continuation).unwrap();
+    let tail = restarted.feed(b"E b\nE next\n").remove(0);
+    assert_eq!(tail.payload, Payload::Text("E b".into()));
+    assert_eq!(tail.fragment, 1);
+    assert_eq!(tail.offset, 8);
+}

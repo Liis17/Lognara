@@ -167,10 +167,9 @@ impl Framer {
         let offset = self.offset;
         self.offset += count as u64;
         let fragment = self.fragment;
-        let cut_line = count > self.line_start;
+        let cut_line = count > 0 && bytes.last() != Some(&b'\n');
         self.line_start = self.line_start.saturating_sub(count);
         if continued {
-            self.line_continued |= cut_line;
             self.fragment += 1;
         } else {
             self.fragment = 0;
@@ -206,7 +205,7 @@ impl Framer {
             invalid_json,
             continuation: continued.then_some(Continuation {
                 fragment: self.fragment,
-                line_continued: self.line_continued,
+                line_continued: cut_line,
             }),
         }
     }

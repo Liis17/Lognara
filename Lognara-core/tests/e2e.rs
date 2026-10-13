@@ -56,7 +56,7 @@ async fn actual_pipeline_recovers_after_core_outage_and_public_routes_observe_lo
         stop,
     ));
     let batch = Batch { service:"api".into(), server:"srv".into(), backend:"backend".into(), environment:Some("test".into()), service_instance:None,
-        sent_at:1_790_678_511_894_000_001, dropped:0, records:vec![Record { received_at:1_790_678_511_894_000_001,
+        sent_at:1_790_678_511_894_000_001, dropped:0, records:vec![Record { origin: None, received_at:1_790_678_511_894_000_001,
             payload:Payload::Json(r#"{"id":"019d3f8e-7c2a-7b3e-9f1d-2a4b6c8d0e1f","level":"error","message":"relay to core","trace_id":"8c21f0a4b6c8d0e12a4b6c8d0e1f3a5b"}"#.into()) }] };
     let body = zstd::encode_all(&rmp_serde::to_vec_named(&batch).unwrap()[..], 3).unwrap();
     let client = reqwest::Client::new();

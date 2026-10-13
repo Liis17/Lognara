@@ -1,0 +1,1 @@
+{"sources":[{"id":"app","type":"file","format":"text","include":["/var/log/app/*.log*"],"exclude":["/var/log/app/debug.log*"],"multiline":{"start_pattern":"^[0-9]{4}-","flush_timeout_ms":1000}}]}

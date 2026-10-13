@@ -4,22 +4,26 @@ Parent: [[Index]]
 
 ## Назначение
 
-Rust-процесс, который живёт в контейнере рядом с основным приложением. Принимает логи по localhost (от библиотеки lognara или напрямую от приложения), сохраняет запросы на постоянный диск до ответа `202` и сжатыми пачками отправляет в lognara-relay на той же машине. Поля `LogEvent` (level, message, trace_id, id и т. д.) агент не разбирает: он только добавляет идентификацию источника и время приёма, а структурирует данные relay. Метрики пока не поддерживаются.
+Rust-процесс, который живёт в контейнере рядом с основным приложением. Принимает логи по localhost (от библиотеки lognara или напрямую от приложения), читает настроенные файлы и захватывает stdout/stderr дочерней программы, сохраняет запросы на постоянный диск до ответа `202` и сжатыми пачками отправляет в lognara-relay на той же машине. Поля `LogEvent` (level, message, trace_id, id и т. д.) агент не разбирает: он только добавляет идентификацию источника и время приёма, а структурирует данные relay. Метрики пока не поддерживаются.
 
-Поток: приложение → `POST /v1/logs` → атомарная очередь [[Delivery/Spool]] → пачка MessagePack + zstd с общим Bearer-токеном → `POST` в relay → lognara-core.
+Источники и lifecycle описаны в [[Agent/LogSources]], карта модулей в [[Agent/LognaraAgent-ProjectMap]].
+
+Поток: HTTP, файл или pipe программы → общий Buffer → атомарная очередь [[Delivery/Spool]] → пачка MessagePack + zstd с общим Bearer-токеном → `POST` в relay → lognara-core.
 
 ## Файлы
 
 | Файл | Роль |
 |------|------|
 | `Lognara-agent/Cargo.toml` | Манифест crate `lognara-agent` (edition 2024). |
-| `Lognara-agent/src/main.rs` | Точка входа: логирование, конфиг из env, bind, SIGTERM/SIGINT → остановка. |
-| `Lognara-agent/src/lib.rs` | Сборка компонентов и `run()`. |
+| `Lognara-agent/src/main.rs` | Точка входа: неблокирующая диагностика, env + sources JSON, bind, обычный режим или CLI `run --`. |
+| `Lognara-agent/src/lib.rs` | Runtime HTTP/файлы/sender, `run()` и экспорт `run_program()`. |
 | `Lognara-agent/src/config.rs` | Параметры `LOGNARA_*`. |
 | `Lognara-agent/src/ingest.rs` | HTTP-приём `POST /v1/logs`. |
 | `Lognara-agent/src/buffer.rs` | Дисковая очередь, резерв моделей и подготовка пачек. |
 | `Lognara-agent/src/wire.rs` | Формат пачки, контракт с relay. |
 | `Lognara-agent/src/sender.rs` | Отправка пачек в relay, ретраи. |
+| `Lognara-agent/src/sources.rs`, `framing.rs`, `files.rs` | Настройки, общий разбор, durable checkpoint и ротация. |
+| `Lognara-agent/src/process.rs`, `output.rs` | Запуск foreground-процесса, потоки, echo, сигналы и потери. |
 | `Lognara-agent/tests/e2e.rs` | Сквозные тесты с фейковым relay. |
 
 ## Параметры запуска
@@ -41,6 +45,7 @@ Rust-процесс, который живёт в контейнере рядо�
 | `LOGNARA_MAX_BUFFER_BYTES` | нет | `67108864` | общий бюджет моделей, индекса и сериализации |
 | `LOGNARA_MAX_BATCH_BYTES` | нет | `8388608` | максимум MessagePack и сжатой пачки; не более 8 MiB |
 | `LOGNARA_MAX_RECORD_BYTES` | нет | `2097152` | payload одной записи; не более 2 MiB |
+| `LOGNARA_SOURCES_FILE` | нет | нет | JSON источников; загружается бинарником до запуска приложения |
 | `LOGNARA_SPOOL_DIR` | нет | `/var/lib/lognara-agent/spool` | постоянный каталог очереди |
 | `LOGNARA_SPOOL_MAX_MB` | нет | `1024` | квота тел очереди; отдельный pending до 8 MiB |
 | `LOGNARA_LISTEN_ADDR` | нет | `127.0.0.1:7400` | адрес приёма |
@@ -64,10 +69,12 @@ Rust-процесс, который живёт в контейнере рядо�
 ```rust
 struct Batch { service, server, backend: String, environment, service_instance: Option<String>,
                sent_at: i64, dropped: u64, records: Vec<Record> }
-struct Record { received_at: i64, payload: Payload }
+struct Record { received_at: i64, payload: Payload, origin: Option<Origin> }
+struct Origin { source: String, path, stream: Option<String>, offset, end, fragment: u64, continued: bool }
 enum Payload { Text(String), Json(String), Binary(Vec<u8>) }
 ```
 
+- `origin` имеет serde default и skip_serializing_if=None: старые wire/spool читаются, HTTP-записи без origin сериализуются прежними байтами. Relay переносит происхождение в атрибуты; детали в [[Agent/LogSources]].
 - `sent_at`, `received_at` — Unix-время в наносекундах.
 - `dropped` — поле совместимости; новые пачки всегда содержат 0.
 - `records` содержит хотя бы одну запись; relay отклоняет `records=[]` с `400` при любом `dropped`. 
@@ -79,10 +86,11 @@ enum Payload { Text(String), Json(String), Binary(Vec<u8>) }
 
 - Запрос сохраняется группой частей MessagePack до `202`; все части публикуются одним rename после fsync. При ошибке последней части промежуточные части не публикуются. После перезапуска очередь и `pending/` восстанавливаются.
 - Пачка отправляется по числу записей, таймеру или давлению байтов. Объединяются только последовательные части одного источника; размер и модельный бюджет могут уменьшить пачку. Верхний предел — `BATCH_SIZE`, 8 MiB MessagePack и 8 MiB сжатого тела.
-- В памяти одновременно один входящий запрос и одна отправляемая пачка. Бюджет 64 MiB включает 8 MiB индекса (до 10922 файлов, до 768 байт на элемент с временными копиями), источник и два независимых резерва моделей. JSON-массив ограничивается до выделения payload; MessagePack проверяется без аллокаций перед восстановлением моделей.
+- Один admission slot совместно используется HTTP и сборщиками. В памяти одновременно одна входная операция и одна отправляемая пачка. Бюджет 64 MiB включает 8 MiB индекса (до 10922 файлов, до 768 байт на элемент с временными копиями), источник и два независимых резерва моделей. JSON-массив ограничивается до выделения payload; MessagePack проверяется без аллокаций перед восстановлением моделей.
 - Резервы учитывают capacity и временные объекты. Blocking-worker владеет permit при отмене ожидающего запроса; остановка ждёт работников. Workspace zstd, HTTP/runtime/allocator требуют дополнительной памяти сверх бюджета моделей; RSS измеряется отдельно.
 - При пустой очереди не отправляется HTTP, JSON `[]` не создаёт файлов. Принятые записи не вытесняются при заполнении.
-- При остановке завершается приём, выполняется финальная попытка до 5 секунд, затем ждут дисковых работников. Недоставленные данные уже на постоянном volume.
+- Дополнительные буферы источников покрываются резервом внутри 64 MiB; default с источниками 12 MiB, без них 512 KiB на диагностику. Console writer может остаться заблокированным, удерживая только резерв, без владения Buffer/блокировкой spool.
+- При остановке обычного режима завершается приём, выполняется финальная попытка до 5 секунд, затем ждут дисковых работников. Недоставленные данные уже на постоянном volume.
 - Постоянный volume обязателен; каждый процесс блокирует свой каталог. Гарантия не покрывает удаление/повреждение диска. Обновлять после relay и доставки старой RAM-очереди; инструкция в README.
 
 ## Ключевые методы/функции
@@ -90,6 +98,8 @@ enum Payload { Text(String), Json(String), Binary(Vec<u8>) }
 | Метод | Описание |
 |---|---|
 | `run(config: Config, listener: TcpListener, shutdown: CancellationToken): io::Result<()>` | Запускает приём и отправку; после `shutdown` дожидается финальной отправки. |
+| `run_program(config: Config, listener: TcpListener, arguments: Vec<OsString>, diagnostics: Option<Console>): io::Result<u8>` | Запускает программу, захватывает потоки и возвращает код после остановки. |
+| `Config::load_sources(path: Option<&Path>, capture: bool): io::Result<()>` | Загружает JSON и проверяет общий бюджет памяти. |
 | `Config::from_env(): Result<Config, ConfigError>` | Читает параметры `LOGNARA_*` из окружения. |
 | `Config::from_lookup(lookup: impl Fn(&str) -> Option<String>): Result<Config, ConfigError>` | Собирает конфиг из произвольного источника и проверяет обязательный ключ relay. |
 | `Config::fmt(f: &mut fmt::Formatter<'_>): fmt::Result` | Форматирует `Debug` конфигурации со скрытым ключом relay. |
@@ -115,12 +125,12 @@ enum Payload { Text(String), Json(String), Binary(Vec<u8>) }
 
 ## Проверка
 
-`tests/e2e.rs` проверяет таймер, число записей, shutdown, HTTP-отказы, точные повторы и настоящий SIGKILL после `202`. `buffer.rs` проверяет квоту и атомарный отказ, отправку при полной очереди, байтовое давление с несжимаемыми payload и жизнь permit отменённого worker. `tests/check-memory-profile.py` измеряет RSS при 16 клиентах, заполнении диска и восстановлении relay; все подтверждённые записи должны доставиться.
+`tests/e2e.rs` проверяет таймер, число записей, shutdown, HTTP-отказы, точные повторы и настоящий SIGKILL после `202`. `buffer.rs` проверяет квоту и атомарный отказ, отправку при полной очереди, байтовое давление с несжимаемыми payload и жизнь permit отменённого worker. `tests/files.rs`, `framing.rs`, `sources.rs`, `process.rs` проверяют форматы, crash между spool/checkpoint, ротацию, права, aliases, FD fairness, сигналы, зависших потомков и полный spool с заблокированной консолью. `tests/check-memory-profile.py --sources` добавляет файлы и оба потока к конкурентному HTTP. `tests/check-memory-profile.py` измеряет RSS при 16 клиентах, заполнении диска и восстановлении relay; все подтверждённые записи должны доставиться.
 
 ## Зависимости
 
-- Использует: `tokio`, `tokio-util`, `axum`, `reqwest` (без TLS), `serde`, `serde_json` (`raw_value`), `rmp-serde`, `serde_bytes`, `zstd`, `tracing`, `tracing-subscriber`, `http-body`, общий `lognara-spool`.
+- Использует: `tokio`, `tokio-util`, `axum`, `reqwest` (без TLS), `serde`, `serde_json` (`raw_value`), `rmp-serde`, `serde_bytes`, `zstd`, `tracing`, `tracing-subscriber`, `http-body`, `glob`, `regex` (байтовые regex с ограниченным размером), `sha2`, `libc`, общий `lognara-spool`.
 - Отправляет пачки в: [[Relay/LognaraRelay]].
 - Используется в: [[Architecture]].
 
-Измерение `check-memory-profile.py` на macOS arm64/debug: пик RSS 96,8 MiB, 7 подтверждённых записей по 2 MiB, 50 отказов при конкурентном приёме и 10 запросов без ответа из-за разрыва транспорта. Очередь оставалась заполненной при недоступном relay ещё 30 секунд; после восстановления доставлены все 7 подтверждённых записей. Клиент обязан повторять запросы без ACK; тестовые клиенты входят в измерение.
+Измерение `check-memory-profile.py` на macOS arm64/debug: пик RSS HTTP-профиля 86,1 MiB, с файлами и stdout/stderr 78,6 MiB при пороге 128 MiB и бюджете объектов 64 MiB. Оба профиля создают конкурентный HTTP и 30 секунд недоступности relay, source-профиль добавляет multiline-файл и начальный flood обоих потоков. Все подтверждённые записи доставлены после восстановления. Клиенты входят в RSS; это не проверка Linux cgroup и не гарантия фиксированного RSS при любой нагрузке.

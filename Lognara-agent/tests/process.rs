@@ -293,3 +293,33 @@ async fn inherited_pipes_in_a_descendant_do_not_prevent_shutdown() {
     assert!(start.elapsed() < Duration::from_secs(6));
     assert!(String::from_utf8_lossy(&output.stderr).contains("shutdown_cutoffs="));
 }
+
+#[tokio::test]
+async fn refuses_to_launch_on_invalid_sources_or_occupied_http_port() {
+    let dir = tempfile::tempdir().unwrap();
+    let settings = dir.path().join("sources.json");
+    std::fs::write(&settings, r#"{"sources":[],"unknown":true}"#).unwrap();
+    let marker = dir.path().join("started");
+    let output = agent(dir.path(), "http://127.0.0.1:1/v1/batches")
+        .env("LOGNARA_SOURCES_FILE", &settings)
+        .args(["run", "--", "/usr/bin/touch"])
+        .arg(&marker)
+        .output()
+        .await
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(!marker.exists());
+    let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let output = agent(dir.path(), "http://127.0.0.1:1/v1/batches")
+        .env(
+            "LOGNARA_LISTEN_ADDR",
+            occupied.local_addr().unwrap().to_string(),
+        )
+        .args(["run", "--", "/usr/bin/touch"])
+        .arg(&marker)
+        .output()
+        .await
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(!marker.exists());
+}

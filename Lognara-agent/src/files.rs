@@ -212,6 +212,7 @@ impl Files {
                 Ok(items) => items,
                 Err(error) => {
                     self.report(&format!("cannot scan {}: {error}", directory.display()));
+                    self.preserve_directory(&directory);
                     continue;
                 }
             };
@@ -220,6 +221,7 @@ impl Files {
                     Ok(item) => item.path(),
                     Err(error) => {
                         self.report(&error.to_string());
+                        self.preserve_directory(&directory);
                         continue;
                     }
                 };
@@ -228,7 +230,11 @@ impl Files {
                 }
                 let metadata = match fs::metadata(&path) {
                     Ok(m) => m,
-                    Err(_) => continue,
+                    Err(error) => {
+                        self.report(&error.to_string());
+                        self.preserve_directory(&directory);
+                        continue;
+                    }
                 };
                 let matches: Vec<_> = self
                     .sources
@@ -273,13 +279,7 @@ impl Files {
                 if existing.is_none()
                     && let Some(index) = recovery
                 {
-                    if self
-                        .tracked
-                        .iter()
-                        .filter(|entry| entry.file.is_some())
-                        .count()
-                        >= MAX_OPEN_FILES
-                    {
+                    if !self.make_room() {
                         recovery = None;
                     } else {
                         let position = &self.tracked[index].position;
@@ -326,13 +326,7 @@ impl Files {
                     self.report("256 tracked-file limit reached; new files are waiting");
                     continue;
                 }
-                if self
-                    .tracked
-                    .iter()
-                    .filter(|entry| entry.file.is_some())
-                    .count()
-                    >= MAX_OPEN_FILES
-                {
+                if !self.make_room() {
                     self.report("64 open-file limit reached during discovery; files are waiting");
                     continue;
                 }
@@ -399,6 +393,15 @@ impl Files {
         Ok(())
     }
 
+    // Ошибка обхода не доказывает удаление файла: сохраняем позиции до удачного scan.
+    fn preserve_directory(&mut self, directory: &Path) {
+        for entry in &mut self.tracked {
+            if Path::new(&entry.position.path).parent() == Some(directory) {
+                entry.seen = true;
+            }
+        }
+    }
+
     fn read(&mut self, index: usize, buffer: &Buffer, stop: &CancellationToken) -> io::Result<()> {
         let Some(source) = self
             .sources
@@ -408,14 +411,13 @@ impl Files {
         else {
             return Ok(());
         };
+        // Checkpoint восстанавливает ротации вне include, но не отменяет явный exclude.
+        if excluded(&source, Path::new(&self.tracked[index].position.path)) {
+            self.tracked[index].file = None;
+            return Ok(());
+        }
         if self.tracked[index].file.is_none() {
-            if self
-                .tracked
-                .iter()
-                .filter(|entry| entry.file.is_some())
-                .count()
-                >= MAX_OPEN_FILES
-            {
+            if !self.make_room() {
                 self.report("64 open-file limit reached; files are waiting");
                 return Ok(());
             }
@@ -424,12 +426,42 @@ impl Files {
         }
         let mut file = self.tracked[index].file.take().unwrap();
         let result = self.read_open(index, &source, &mut file, buffer, stop);
+        let position = &self.tracked[index].position;
+        let reachable = fs::metadata(&position.path).is_ok_and(|metadata| {
+            metadata.ino() == position.inode && metadata.dev() == position.device
+        });
         if self.tracked[index].changed.elapsed() < QUIET
-            || self.tracked[index].position.offset < self.tracked[index].size
+            || (!reachable && position.offset < self.tracked[index].size)
         {
             self.tracked[index].file = Some(file);
         }
         result
+    }
+
+    /// Round-robin чтение сохраняет справедливость при числе файлов > FD-лимита.
+    /// Доступный по пути файл можно открыть снова; недоступный старый inode удерживаем.
+    fn make_room(&mut self) -> bool {
+        if self
+            .tracked
+            .iter()
+            .filter(|entry| entry.file.is_some())
+            .count()
+            < MAX_OPEN_FILES
+        {
+            return true;
+        }
+        if let Some(entry) = self.tracked.iter_mut().find(|entry| {
+            entry.file.is_some()
+                && fs::metadata(&entry.position.path).is_ok_and(|metadata| {
+                    metadata.ino() == entry.position.inode
+                        && metadata.dev() == entry.position.device
+                })
+        }) {
+            entry.file = None;
+            true
+        } else {
+            false
+        }
     }
 
     fn read_open(
@@ -473,8 +505,8 @@ impl Files {
         }
         entry.size = metadata.len();
         entry.modified = metadata.modified().ok();
-        if fs::metadata(&entry.position.path)
-            .is_ok_and(|m| m.ino() != metadata.ino() || m.dev() != metadata.dev())
+        if !fs::metadata(&entry.position.path)
+            .is_ok_and(|m| m.ino() == metadata.ino() && m.dev() == metadata.dev())
         {
             entry.rotated = true;
         }
@@ -599,10 +631,25 @@ fn matches_source(source: &Source, path: &Path) -> bool {
         .include
         .iter()
         .any(|p| glob::Pattern::new(p).is_ok_and(|p| p.matches_path(path)))
-        && !source
-            .exclude
-            .iter()
-            .any(|p| glob::Pattern::new(p).is_ok_and(|p| p.matches_path(path)))
+        && !excluded(source, path)
+}
+
+fn excluded(source: &Source, path: &Path) -> bool {
+    source.exclude.iter().any(|pattern| {
+        if glob::Pattern::new(pattern).is_ok_and(|p| p.matches_path(path)) {
+            return true;
+        }
+        // Позиции используют canonical path, а настройки могут содержать alias каталога.
+        let pattern = Path::new(pattern);
+        pattern
+            .parent()
+            .and_then(|parent| fs::canonicalize(parent).ok())
+            .zip(pattern.file_name())
+            .is_some_and(|(parent, name)| {
+                glob::Pattern::new(&parent.join(name).to_string_lossy())
+                    .is_ok_and(|p| p.matches_path(path))
+            })
+    })
 }
 
 fn compressed(path: &Path) -> bool {

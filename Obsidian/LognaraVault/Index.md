@@ -10,7 +10,9 @@ Lognara — система сбора логов: агент в контейне
 ### Agent
 | Файл | Компонент | Описание |
 |------|-----------|----------|
-| [[Agent/LognaraAgent]] | lognara-agent | Приём логов по HTTP, буфер в памяти, отправка сжатых пачек в relay с общим ключом; параметры `LOGNARA_*` и контракт пачки. |
+| [[Agent/LognaraAgent]] | lognara-agent | HTTP, файлы, stdout/stderr, durable spool, отправка сжатых пачек в relay с общим ключом; параметры `LOGNARA_*` и контракт пачки. |
+| [[Agent/LogSources]] | источники логов | JSON, форматы, checkpoint, ротация, потоки, потери и lifecycle программы. |
+| [[Agent/LognaraAgent-ProjectMap]] | lognara-agent | Карта модулей, публичных интерфейсов и проверок. |
 
 ### Relay
 | Файл | Компонент | Описание |

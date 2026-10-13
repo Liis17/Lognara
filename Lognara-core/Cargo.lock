@@ -2161,13 +2161,17 @@ name = "lognara-agent"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "glob",
  "http-body",
+ "libc",
  "lognara-spool",
+ "regex",
  "reqwest",
  "rmp-serde",
  "serde",
  "serde_bytes",
  "serde_json",
+ "sha2",
  "tokio",
  "tokio-util",
  "tracing",

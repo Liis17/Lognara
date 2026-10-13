@@ -121,7 +121,6 @@ impl Capture {
             .await
             .is_err()
         {
-            self.losses.cutoff.fetch_add(1, Ordering::Relaxed);
             stop.cancel();
             let _ = self.reader.await;
         }
@@ -145,13 +144,26 @@ async fn read_pipe<R: AsyncRead + Unpin>(
     let mut offset = 0;
     let mut report = Instant::now();
     loop {
-        let result = tokio::select! { _ = stop.cancelled() => break, result = reader.read(&mut chunk) => result };
+        let result = tokio::select! {
+            biased;
+            _ = stop.cancelled() => {
+                losses.cutoff.fetch_add(1, Ordering::Relaxed);
+                break;
+            },
+            result = reader.read(&mut chunk) => result
+        };
         let count = match result {
             Ok(0) => break,
             Ok(count) => count,
             Err(error) => {
                 warn!(error = %error, "pipe read failed; retaining reader while program is alive");
-                tokio::select! { _ = stop.cancelled() => break, _ = tokio::time::sleep(Duration::from_millis(100)) => continue }
+                tokio::select! {
+                    _ = stop.cancelled() => {
+                        losses.cutoff.fetch_add(1, Ordering::Relaxed);
+                        break;
+                    },
+                    _ = tokio::time::sleep(Duration::from_millis(100)) => continue
+                }
             }
         };
         console.echo(&chunk[..count]);
@@ -461,16 +473,99 @@ pub async fn run_program(
     };
     group.send(libc::SIGTERM, true);
     let drain_deadline = Instant::now() + Duration::from_secs(2);
-    tokio::join!(
-        out.finish(drain_deadline, &pipe_stop),
-        err.finish(drain_deadline, &pipe_stop)
-    );
-    group.send(libc::SIGKILL, true);
-    group.0 = 0;
+    finish_group(&mut group, &pipe_stop, drain_deadline, async {
+        tokio::join!(
+            out.finish(drain_deadline, &pipe_stop),
+            err.finish(drain_deadline, &pipe_stop)
+        );
+    })
+    .await;
     if let Err(error) = runtime.finish().await {
         warn!(error = %error, "agent shutdown failed; program exit status retained");
     }
     Ok(status
         .code()
         .unwrap_or_else(|| 128 + status.signal().unwrap_or(0)) as u8)
+}
+
+/// Срок жизни потомков не зависит от длительности уже начатых disk workers.
+async fn finish_group(
+    group: &mut Group,
+    pipe_stop: &CancellationToken,
+    deadline: Instant,
+    finishing: impl std::future::Future<Output = ()>,
+) {
+    tokio::pin!(finishing);
+    tokio::select! {
+        _ = &mut finishing => {
+            group.send(libc::SIGKILL, true);
+            group.0 = 0;
+        }
+        _ = tokio::time::sleep_until(deadline) => {
+            pipe_stop.cancel();
+            group.send(libc::SIGKILL, true);
+            // Не отправляем повторный kill после disk drain: PGID мог уже освободиться.
+            group.0 = 0;
+            finishing.await;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn reader_counts_forced_cutoff_once_even_when_cancel_precedes_join() {
+        let (reader, _open_writer) = tokio::io::duplex(64);
+        let (tx, mut rx) = mpsc::channel(1);
+        let stop = CancellationToken::new();
+        stop.cancel();
+        let losses = Arc::new(Losses::default());
+        read_pipe(
+            reader,
+            tx,
+            losses.clone(),
+            Console::stderr().unwrap(),
+            stop,
+            "test".into(),
+        )
+        .await;
+        assert_eq!(losses.cutoff.load(Ordering::Relaxed), 1);
+        assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn kills_remaining_group_on_deadline_before_waiting_for_disk_drain() {
+        let mut child = Command::new("/bin/sleep")
+            .arg("60")
+            .process_group(0)
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut group = Group(child.id().unwrap() as i32);
+        let stop = CancellationToken::new();
+        let token = stop.clone();
+        let (release, drain) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            finish_group(
+                &mut group,
+                &token,
+                Instant::now() + Duration::from_millis(100),
+                async {
+                    let _ = drain.await;
+                },
+            )
+            .await;
+        });
+        let status = tokio::time::timeout(Duration::from_secs(2), child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(status.signal(), Some(libc::SIGKILL));
+        assert!(stop.is_cancelled());
+        assert!(!task.is_finished(), "disk drain must still be awaited");
+        release.send(()).unwrap();
+        task.await.unwrap();
+    }
 }

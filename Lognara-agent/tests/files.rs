@@ -206,3 +206,224 @@ async fn resumes_a_fragmented_line_after_restart_without_losing_its_tail() {
     stop.cancel();
     task.await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn all_65_growing_files_get_a_turn_despite_the_64_descriptor_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths: Vec<_> = (0..65)
+        .map(|n| dir.path().join(format!("{n:03}.log")))
+        .collect();
+    for path in &paths {
+        fs::write(path, "first\n").unwrap();
+    }
+    let (config, mut rx) = setup(dir.path(), dir.path().join("*.log").to_str().unwrap()).await;
+    let (stop, task) = start(config).await;
+    let growing = stop.clone();
+    let producer = tokio::spawn(async move {
+        while !growing.is_cancelled() {
+            for path in &paths {
+                OpenOptions::new()
+                    .append(true)
+                    .open(path)
+                    .unwrap()
+                    .write_all(b"next\n")
+                    .unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(400)).await;
+        }
+    });
+    let mut observed = std::collections::HashSet::new();
+    let completed = tokio::time::timeout(Duration::from_secs(25), async {
+        while observed.len() < 65 {
+            for record in rx.recv().await.unwrap().records {
+                observed.insert(record.origin.unwrap().path.unwrap());
+            }
+        }
+    })
+    .await;
+    stop.cancel();
+    producer.await.unwrap();
+    task.await.unwrap().unwrap();
+    assert!(
+        completed.is_ok(),
+        "only {} of 65 growing files collected",
+        observed.len()
+    );
+}
+
+#[tokio::test]
+async fn checkpoint_failure_pauses_without_duplicates_and_sigkill_replays_saved_data() {
+    use std::process::Stdio;
+    use tokio::process::Command;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.log");
+    fs::write(&path, "first\n").unwrap();
+    let (config, mut rx) = setup(dir.path(), path.to_str().unwrap()).await;
+    let settings = dir.path().join("sources.json");
+    fs::write(&settings, serde_json::to_vec(&config.sources).unwrap()).unwrap();
+    let launch = || {
+        Command::new(env!("CARGO_BIN_EXE_lognara-agent"))
+            .env_clear()
+            .env("LOGNARA_SERVICE", "test")
+            .env("LOGNARA_SERVER", "test")
+            .env("LOGNARA_BACKEND", "test")
+            .env("LOGNARA_RELAY_TOKEN", "test")
+            .env("LOGNARA_RELAY_URL", config.relay_url.as_str())
+            .env("LOGNARA_SPOOL_DIR", &config.spool_dir)
+            .env("LOGNARA_SOURCES_FILE", &settings)
+            .env("LOGNARA_LISTEN_ADDR", "127.0.0.1:0")
+            .env("LOGNARA_FLUSH_INTERVAL_MS", "20")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap()
+    };
+    let mut child = launch();
+    assert_eq!(
+        next(&mut rx).await.records[0].payload,
+        Payload::Text("first".into())
+    );
+    let checkpoint = config.spool_dir.join("sources.checkpoint");
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let value: serde_json::Value =
+                serde_json::from_slice(&fs::read(&checkpoint).unwrap()).unwrap();
+            if value["files"][0]["offset"] == 6 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // Реальный отказ atomic checkpoint после durable append, без тестового hook.
+    let blocked = config.spool_dir.join("sources.checkpoint.tmp");
+    fs::create_dir(&blocked).unwrap();
+    OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(b"saved\n")
+        .unwrap();
+    assert_eq!(
+        next(&mut rx).await.records[0].payload,
+        Payload::Text("saved".into())
+    );
+    OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(b"old tail\n")
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(400), rx.recv())
+            .await
+            .is_err()
+    );
+    let old: serde_json::Value = serde_json::from_slice(&fs::read(&checkpoint).unwrap()).unwrap();
+    assert_eq!(old["files"][0]["offset"], 6);
+    child.kill().await.unwrap(); // SIGKILL, финальный flush не выполняется.
+    child.wait().await.unwrap();
+    fs::remove_dir(blocked).unwrap();
+    fs::rename(&path, dir.path().join("app.log.1")).unwrap();
+    fs::write(&path, "new file\n").unwrap();
+    let mut child = launch();
+    let mut messages = Vec::new();
+    while messages.len() < 3 {
+        messages.extend(
+            next(&mut rx)
+                .await
+                .records
+                .into_iter()
+                .map(|r| match r.payload {
+                    Payload::Text(text) => text,
+                    _ => panic!("text expected"),
+                }),
+        );
+    }
+    child.kill().await.unwrap();
+    child.wait().await.unwrap();
+    // Спool уже доставил saved, но старый checkpoint допускает его повтор после crash.
+    assert_eq!(messages, ["saved", "old tail", "new file"]);
+}
+
+#[tokio::test]
+async fn retries_permissions_and_deduplicates_aliases_while_excluding_archives_and_spool() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.log");
+    fs::write(&path, "readable\n").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+    std::os::unix::fs::symlink(&path, dir.path().join("alias.log")).unwrap();
+    fs::write(dir.path().join("archive.gz"), "archive\n").unwrap();
+    let (config, mut rx) = setup(dir.path(), dir.path().join("*").to_str().unwrap()).await;
+    fs::create_dir_all(&config.spool_dir).unwrap();
+    fs::write(config.spool_dir.join("internal.log"), "internal\n").unwrap();
+    let (stop, task) = start(config).await;
+    // Root обходил бы mode 000; обычный пользователь должен ждать восстановления прав.
+    if unsafe { libc::geteuid() } != 0 {
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), rx.recv())
+                .await
+                .is_err()
+        );
+    }
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    let records = next(&mut rx).await.records;
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].payload, Payload::Text("readable".into()));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1200), rx.recv())
+            .await
+            .is_err()
+    );
+    stop.cancel();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn updated_exclusions_apply_to_checkpoint_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.log");
+    let b = dir.path().join("b.log");
+    fs::write(&a, "a\n").unwrap();
+    fs::write(&b, "b\n").unwrap();
+    let (mut config, mut rx) = setup(dir.path(), dir.path().join("*.log").to_str().unwrap()).await;
+    let (stop, task) = start(config.clone()).await;
+    let mut count = 0;
+    while count < 2 {
+        count += next(&mut rx).await.records.len();
+    }
+    stop.cancel();
+    task.await.unwrap().unwrap();
+    // Mock отдаёт batch до HTTP ACK; остановка может законно повторить старый batch.
+    while rx.try_recv().is_ok() {}
+    config.sources.sources[0]
+        .exclude
+        .push(a.to_str().unwrap().into());
+    OpenOptions::new()
+        .append(true)
+        .open(&a)
+        .unwrap()
+        .write_all(b"excluded\n")
+        .unwrap();
+    OpenOptions::new()
+        .append(true)
+        .open(&b)
+        .unwrap()
+        .write_all(b"included\n")
+        .unwrap();
+    let (stop, task) = start(config).await;
+    let records = next(&mut rx).await.records;
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].payload, Payload::Text("included".into()));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1200), rx.recv())
+            .await
+            .is_err()
+    );
+    stop.cancel();
+    task.await.unwrap().unwrap();
+}

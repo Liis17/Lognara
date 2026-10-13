@@ -53,3 +53,41 @@ fn capture_reservations_fit_the_default_memory_budget() {
             <= config.max_buffer_bytes
     );
 }
+
+#[test]
+fn documented_application_sources_fit_the_default_memory_budget() {
+    for (json, capture) in [
+        (
+            include_str!("../examples/log-sources/nginx-files.json"),
+            false,
+        ),
+        (
+            include_str!("../examples/log-sources/postgres-json.json"),
+            false,
+        ),
+        (
+            include_str!("../examples/log-sources/seq-diagnostics.json"),
+            false,
+        ),
+        (
+            include_str!("../examples/log-sources/minio-streams.json"),
+            true,
+        ),
+        (
+            include_str!("../examples/log-sources/multiline.json"),
+            false,
+        ),
+    ] {
+        let sources = Sources::parse(json.as_bytes(), capture).unwrap();
+        let mut config = lognara_agent::config::Config::from_lookup(|key| match key {
+            "LOGNARA_SERVICE" | "LOGNARA_SERVER" | "LOGNARA_BACKEND" | "LOGNARA_RELAY_TOKEN" => {
+                Some("example".into())
+            }
+            _ => None,
+        })
+        .unwrap();
+        config.sources = sources;
+        assert_eq!(config.max_buffer_bytes, 64 << 20);
+        config.validate().unwrap();
+    }
+}
