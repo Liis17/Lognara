@@ -5,7 +5,7 @@ Parent: [[Index]]
 ## Назначение и состояние
 
 Центральный Rust-crate `Lognara-core/`, edition 2024, MSRV 1.94. Принимает контракт [[Relay/LognaraRelay]], хранит события и предоставляет API поиска и аналитики.
-Реализованы конфигурация, HTTP-приём, бинарная модель, WAL, дедупликация пачек, восстановление и JSON-представление. Реализованы материализация в Arrow/Parquet, каталог SQLite, согласованные снимки и индексы; доступны HTTP-поиск и trace lookup.
+Реализованы конфигурация, HTTP-приём, бинарная модель, WAL, дедупликация пачек, восстановление и JSON-представление. Реализованы материализация в Arrow/Parquet, каталог SQLite, согласованные снимки и индексы; доступны HTTP-поиск, trace lookup, статистика и графики метрик (раздел «Метрики»).
 
 ## Контракт
 
@@ -48,7 +48,7 @@ WAL хранит одну версионированную запись на ф�
 
 ## Сегменты
 
-Открытый сегмент хранит Arrow-батчи и Tantivy без STORED-копий. Пороги: 250000 строк / 256 MiB Arrow / 300 секунд. Снимок публикуется после commit + reload. При seal сначала долговечно записываются Parquet, индекс и meta.json, затем SQLite FULL-транзакция регистрирует сегмент, receipts и позицию внутри пачки; после неё WAL можно удалить. Незарегистрированные каталоги при старте удаляются, данные восстанавливаются из WAL. Индекс восстанавливается из Parquet по запросу, повреждённый сегмент не скрывается.
+Открытый сегмент хранит Arrow-батчи и Tantivy без STORED-копий. Пороги: 250000 строк / 256 MiB Arrow / 300 секунд. Снимок публикуется после commit + reload. При seal сначала долговечно записываются Parquet, индекс и meta.json, затем SQLite FULL-транзакция регистрирует сегмент, файл точек метрик, имена серий, receipts и позицию внутри пачки; после неё WAL можно удалить. Незарегистрированные каталоги при старте удаляются, данные восстанавливаются из WAL. Индекс восстанавливается из Parquet по запросу, повреждённый сегмент не скрывается.
 
 | Метод | Назначение |
 |---|---|
@@ -60,7 +60,7 @@ WAL хранит одну версионированную запись на ф�
 | `columns::read_rows(path: &Path, ids: &[usize]): Result<Vec<StoredEvent>>` | Читает выбранные строки Parquet через RowSelection. |
 | `columns::read_rows_with_budget(path, ids, remaining): Result<Vec<StoredEvent>>` | Читает выбранные строки по одной, проверяя бюджет до разбора attributes. |
 | `columns::charge_row(batch, row, remaining): Result<()>` | Резервирует память модели и JSON-ответа для строки Arrow/Parquet. |
-| `Catalog::publish(segment, checkpoint, receipts, next_ids): Result<()>` | Атомарно фиксирует материализацию и дедупликацию. |
+| `Catalog::publish(segment, series, names, checkpoint, receipts, next_ids): Result<()>` | Атомарно фиксирует сегмент, файл точек, имена серий и дедупликацию. |
 | `IndexCache::searcher(segment: &Path, rows: usize): Result<Searcher>` | Открывает или восстанавливает индекс; LRU ограничен. |
 
 Структура файлов: [[Core/LognaraCore-ProjectMap]].
@@ -73,7 +73,7 @@ WAL хранит одну версионированную запись на ф�
 
 | Метод | Назначение |
 |---|---|
-| `api::router(core: Arc<Core>): Router` | Собирает HTTP приёма и чтения с отдельными токенами. |
+| `api::router(core: Arc<Core>): Router` | Собирает HTTP приёма и чтения с отдельными токенами; при `LOGNARA_ADMIN_TOKEN` добавляет `/v1/admin/series/*`. |
 | `api::ingest_router(journal: Arc<Journal>): Router` | Приём, health и метрики. |
 | `PreparedFilter::new(from, to, filters): Result<PreparedFilter>` | Проверяет диапазон и допустимые фильтры. |
 | `query::search(core, request, ascending, deadline): Result<SearchResponse>` | Ищет в согласованном снимке, возвращает события и курсор. |
@@ -89,6 +89,51 @@ Retention смотрит max core_received_at, исключает expired сег
 | `analytics::histogram(core, request): Result<HistogramResponse>` | Считает временные корзины через типизированные выражения DataFusion. |
 | `analytics::group_by(core, request): Result<GroupResponse>` | Считает группы по разрешённым измерениям. |
 
+## Метрики
+
+Точки метрик хранятся в `metrics/YYYY/MM/DD/<id>.parquet` без срока хранения. Материализатор извлекает их при добавлении строк в открытый сегмент из `attributes.Metrics` версии 2 (встроенный формат) и из правил. Правила лежат в `series_definitions`, `RuleSet` пересобирается после каждой записи определения, а один вызов записи строк использует один снимок набора. Поэтому правило действует на новые строки; историю не пересчитывает ([[Design/Metrics]], раздел «Отличия реализации»).
+
+Запрос видит те же данные, что и поиск: Parquet-файлы из `Snapshot.series_files` и открытые точки сегмента. Без определения ряд считается показателем (среднее), если все его точки gauge, иначе приращениями (сумма). Определение задаёт `kind` (`delta`, `cumulative`, `gauge`) и `aggregation`; у `cumulative` всегда сумма приращений.
+
+Ошибки разбора и отброшенные точки считаются в `lognara_core_series_*`. Маршруты определений и предпросмотра включаются только с `LOGNARA_ADMIN_TOKEN`; query-токен даёт только чтение серий. Операционные детали (каталог, слияние, счётчики): `Lognara-core/docs/operations.md`. Структура модулей: [[Core/LognaraCore-ProjectMap]].
+
+| Метод | Назначение |
+|---|---|
+| `series::schema(): SchemaRef` | Схема Parquet точек: время UTC, источник, `name`, `origin`, `rule_id`, `labels`, `value`, `event_id`. |
+| `series::encode(points: &[Point]): Result<RecordBatch>` | Строит RecordBatch точек по схеме серий. |
+| `extract::native(row: &StoredEvent): (Vec<Point>, bool)` | Точки из `attributes.Metrics` (SchemaVersion 2); флаг - была ошибка разбора. |
+| `extract::rules(row: &StoredEvent, rules: &RuleSet): (Vec<Point>, bool)` | Точки всех правил сервиса строки. |
+| `extract::rule_point(rule: &CompiledRule, row: &StoredEvent): (Option<Point>, bool)` | Точка одного правила: окружение, подстрока, regex, значение, метки. |
+| `definitions::validate(input: &DefinitionInput, others: &[Definition], native: bool): Result<(), String>` | Проверяет имя, длины, уникальность, лимит правил и коллизию с native-метрикой. |
+| `definitions::validate_rule(rule: &Rule): Result<Regex, String>` | Лимиты правила, компиляция regex, проверка именованных групп. |
+| `RuleSet::load(definitions: &[Definition]): Result<RuleSet>` | Компилирует включённые правила по сервисам. |
+| `RuleSet::for_service(&self, service: &str): &[CompiledRule]` | Правила сервиса; пустой срез, если их нет. |
+| `LabelGuard::admit(&mut self, rule_id: &str, labels: &str): bool` | Пропускает до 1000 различных наборов меток на правило за время жизни процесса. |
+| `definitions::list(core: &Core): Result<Vec<Definition>, QueryError>` | Все определения из каталога. |
+| `definitions::create(core: &Core, input: DefinitionInput): Result<Definition, QueryError>` | Проверка, запись и замена набора правил под одной блокировкой каталога. |
+| `definitions::update(core: &Core, id: &str, input: DefinitionInput): Result<Option<Definition>, QueryError>` | Замена определения; `None`, если id нет. |
+| `definitions::delete(core: &Core, id: &str): Result<bool, QueryError>` | Удаляет определение и пересобирает правила. |
+| `series_query::list(core: Arc<Core>): Result<ListResponse, QueryError>` | `GET /v1/series`: серии каталога и открытого сегмента, определения без точек. |
+| `series_query::query(core: Arc<Core>, request: QueryRequest): Result<QueryResponse, QueryError>` | `POST /v1/series/query`: корзины, split, приращения для cumulative, до 20 серий. |
+| `analytics::preview(core: &Core, request: PreviewRequest): Result<PreviewResponse, QueryError>` | Применяет правило к последним строкам сервиса: до 5000 строк, до 50 образцов. |
+| `columns::write_parquet_with(path: &Path, schema: SchemaRef, batches: &[RecordBatch], failpoint_name: &str): Result<()>` | Общая запись Parquet для логов и серий. |
+| `columns::stream_batches(path: &Path): Result<impl Iterator<Item = Result<RecordBatch>>>` | Потоковое чтение Parquet для слияния дня. |
+| `ParquetWriter::create(path: &Path, schema: SchemaRef): Result<ParquetWriter>` | Открывает запись через `.tmp`, ZSTD уровень 3. |
+| `ParquetWriter::write(&mut self, batch: &RecordBatch): Result<()>` | Добавляет пачку в файл. |
+| `ParquetWriter::finish(self): Result<()>` | Синхронизирует `.tmp` и переименовывает его в итоговый файл. |
+| `Catalog::series_files(&self, state: &str): Result<Vec<SeriesFileMeta>>` | Файлы точек по состоянию `ready` или `deleting`. |
+| `Catalog::series_names(&self): Result<Vec<SeriesName>>` | Имена серий с первой и последней точкой. |
+| `Catalog::has_native_name(&self, service: &str, name: &str): Result<bool>` | Есть ли у (service, name) native counter или gauge. |
+| `Catalog::definitions(&self): Result<Vec<Definition>>` | Определения из `series_definitions`. |
+| `Catalog::insert_definition(&self, definition: &Definition): Result<()>` | Добавляет определение. |
+| `Catalog::update_definition(&self, definition: &Definition): Result<bool>` | Заменяет определение по id; `false`, если его нет. |
+| `Catalog::delete_definition(&self, id: &str): Result<bool>` | Удаляет определение по id. |
+| `Catalog::replace_series(&mut self, new: &SeriesFileMeta, old_ids: &[String]): Result<()>` | Одной транзакцией регистрирует слитый файл и переводит исходные в `deleting`. |
+| `Catalog::finish_deleting_series(&self, id: &str): Result<()>` | Удаляет строку файла в состоянии `deleting`; вызывается после удаления самого файла. |
+| `ActiveSegment::add_points(&mut self, rows: &[StoredEvent], rules: &RuleSet, guard: &mut LabelGuard, metrics: &Metrics): Result<()>` | Извлекает точки пачки, применяет LabelGuard и обновляет счётчики. |
+| `Materializer::seal_series(&self, segment: &ActiveSegment): Result<Option<SeriesFile>>` | Пишет Parquet точек сегмента; без точек файла нет. |
+| `Materializer::compact(&mut self): Result<()>` | Сливает один день, в котором все файлы старше порога тишины и их не меньше двух. |
+
 ## Эксплуатация и проверки
 
 `Lognara-core/docs/operations.md` описывает все переменные, запуск за TLS-прокси, остановку, резервную копию всего каталога и восстановление. SIGTERM/SIGINT прекращает HTTP, дорабатывает WAL и закрывает открытый сегмент. Метрики Prometheus защищены query-токеном; health доступен без токена. В примере Compose корневого README каталог `LOGNARA_DATA_DIR` монтируется из `LOGNARA_CORE_DATA` (папка на хосте) или volume `lognara-core-data`.
@@ -103,5 +148,5 @@ Retention смотрит max core_received_at, исключает expired сег
 
 | Метод | Назначение |
 |---|---|
-| `Metrics::render(): String` | Сериализует низкокардинальные счётчики/gauges Prometheus. |
+| `Metrics::render(): String` | Сериализует низкокардинальные счётчики/gauges Prometheus, в том числе `lognara_core_series_*`. |
 | `main::shutdown()` | Ждёт SIGINT или SIGTERM. |

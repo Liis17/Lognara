@@ -10,7 +10,7 @@
                                        └─ /var/lib/lognara-dock/dock.sqlite3 (папка с хоста)
 ```
 
-Query-токен core хранится только в dock и не передаётся в браузер.
+Query-токен и admin-токен core хранятся только в dock и не передаются в браузер.
 
 ## Вход
 
@@ -54,6 +54,7 @@ docker run --rm httpd:2.4 htpasswd -Bbn liis 'пароль' >> auth/htpasswd
 | `LOGNARA_DOCK_PUBLIC_URL` | обязательна | внешний адрес, например `https://dock.liis17.com`. Используется как origin для passkey и проверки `Origin`. `http` допускается только для `localhost` |
 | `LOGNARA_DOCK_CORE_URL` | обязательна | базовый адрес core, например `http://lognara-core:7402` |
 | `LOGNARA_DOCK_CORE_TOKEN` | обязательна | равен `LOGNARA_QUERY_TOKEN` core, ASCII без пробелов |
+| `LOGNARA_DOCK_CORE_ADMIN_TOKEN` | не задан | равен `LOGNARA_ADMIN_TOKEN` core, ASCII без пробелов; нужен для определений метрик. Пустое значение отключает их: маршруты отвечают `404 admin_disabled`, в `/api/me` `series_admin` равен `false` |
 | `LOGNARA_DOCK_LISTEN_ADDR` | `127.0.0.1:7403` | в контейнере `0.0.0.0:7403` (задано в образе) |
 | `LOGNARA_DOCK_HTPASSWD_FILE` | `/etc/lognara-dock/auth/htpasswd` | файл пользователей внутри смонтированной папки |
 | `LOGNARA_DOCK_DATA_DIR` | `/var/lib/lognara-dock` | SQLite с сессиями и passkey, lock-файл |
@@ -81,6 +82,7 @@ nginx должен передавать заголовок `Origin` без из�
 cd Lognara-dock
 cp docker-compose.example.yml docker-compose.yml   # поправьте домен и адрес core
 echo "LOGNARA_QUERY_TOKEN=<query-токен core>" > .env
+# необязательно, для определений метрик: echo "LOGNARA_ADMIN_TOKEN=<admin-токен core>" >> .env
 docker compose up -d --build
 ```
 
@@ -92,16 +94,23 @@ docker compose up -d --build
 | `POST /api/auth/login` | открыт | `{username, password}`, ставит cookie сессии |
 | `POST /api/auth/passkey/start`, `/finish` | открыт | вход по passkey |
 | `POST /api/auth/logout` | сессия | завершить сессию |
-| `GET /api/me` | сессия | `{username, passkeys}` |
+| `GET /api/me` | сессия | `{username, passkeys, series_admin}`; `series_admin` - задан ли admin-токен |
 | `POST /api/account/password` | сессия | `{current, new}` |
 | `GET /api/account/passkeys` | сессия | список ключей |
 | `POST /api/account/passkeys/start` | сессия | `{name, password}`, начать регистрацию |
 | `POST /api/account/passkeys/finish` | сессия | завершить регистрацию |
 | `DELETE /api/account/passkeys/{id}` | сессия | `{password}`, удалить ключ |
 | `GET /api/logs/stream` | сессия | SSE: `logs`, `core_error`, `core_ok`, `lagged` |
+| `GET /api/series` | сессия | список метрик core (`GET /v1/series`) |
+| `POST /api/series/query` | сессия | значения серии по корзинам (`POST /v1/series/query`), таймаут 35 с |
+| `GET`, `POST /api/series/definitions` | сессия, admin | список и создание определений |
+| `PUT`, `DELETE /api/series/definitions/{id}` | сессия, admin | замена и удаление определения |
+| `POST /api/series/preview` | сессия, admin | предпросмотр правила на логах core |
 | `GET /*` | открыт | SPA, неизвестный путь отдаёт `index.html` |
 
-Ошибки возвращаются как JSON `{"error": "<код>"}`: `unauthorized`, `forbidden`, `too_many_attempts`, `invalid_current_password`, `password_too_short`, `password_too_long`, `invalid_name`, `challenge_expired`, `passkey_rejected`, `passkey_exists`, `not_found`.
+Маршруты с пометкой admin работают только при заданном `LOGNARA_DOCK_CORE_ADMIN_TOKEN`; иначе они отвечают `404` с кодом `admin_disabled`. Тело запроса к core передаётся как есть, проверяет его core.
+
+Ошибки возвращаются как JSON `{"error": "<код>"}`: `unauthorized`, `forbidden`, `too_many_attempts`, `invalid_current_password`, `password_too_short`, `password_too_long`, `invalid_name`, `challenge_expired`, `passkey_rejected`, `passkey_exists`, `not_found`. Для метрик добавлены `core_unavailable` (503: core недоступен, не ответил вовремя или вернул 5xx), `invalid` (400: ответ содержит `detail` с причиной от core) и `admin_disabled` (404).
 
 ## Разработка
 

@@ -22,14 +22,14 @@ Lognara — система сбора логов: агент в контейне
 ### Core
 | Файл | Компонент | Описание |
 |------|-----------|----------|
-| [[Core/LognaraCore]] | lognara-core | Контракт relay, хранилище, поиск и аналитика. |
+| [[Core/LognaraCore]] | lognara-core | Контракт relay, хранилище, поиск, аналитика и точки метрик с API графиков. |
 | [[Core/LognaraCore-ProjectMap]] | lognara-core | Модули, конвейер и тесты. |
 
 ### Dock
 
 | Файл | Компонент | Описание |
 |------|-----------|----------|
-| [[Dock/LognaraDock]] | lognara-dock | Веб-интерфейс за nginx: вход по htpasswd и passkey, сессии в SQLite, логи core в реальном времени через SSE; параметры `LOGNARA_DOCK_*`. |
+| [[Dock/LognaraDock]] | lognara-dock | Веб-интерфейс за nginx: вход по htpasswd и passkey, сессии в SQLite, логи core в реальном времени через SSE, страница метрик с графиками и редактор правил; параметры `LOGNARA_DOCK_*`. |
 | [[Dock/LognaraDock-ProjectMap]] | lognara-dock | Дерево файлов Rust и React, связи модулей и тесты. |
 
 ### Delivery
@@ -43,7 +43,7 @@ Lognara — система сбора логов: агент в контейне
 | Файл | Компонент | Описание |
 |------|-----------|----------|
 | [[Design/LongTermStorage]] | lognara-core | Принятое, но не реализованное решение: хранение логов без удаления, compaction, сводки сегментов, горячее и холодное хранилище. |
-| [[Design/Metrics]] | lognara-core, lognara-dock | Принятое, но не реализованное решение: встроенный формат метрик `ServiceMetrics`, правила с регулярным выражением из dock, хранилище метрик и свёртки. |
+| [[Design/Metrics]] | lognara-core, lognara-dock | Реализовано 2026-10-14: встроенный формат `ServiceMetrics`, правила с регулярным выражением из dock, хранилище точек и графики; без свёрток и пересчёта истории. Отличия от проекта перечислены в заметке. |
 
 ### Repository
 
