@@ -19,12 +19,14 @@ Lognara-dock/
     store.rs                  SQLite, миграции, lock каталога данных
     session.rs                Sessions, cookie, AuthUser, require_origin
     auth.rs                   login/logout, LoginLimiter, check_password
+    access.rs                 /api/relays, /api/agents: сессия и proxy admin core
     account.rs                /api/me, смена пароля, check_current_password
     passkey.rs                Webauthn, Challenges, вход и регистрация, список, удаление
-    core_client.rs            POST /v1/logs/search
+    core_client.rs            query поиск и admin CRUD relay/агентов
     live.rs                   Live (poller + broadcast), SSE stream
   tests/
     common/mod.rs             TestApp, запросы, htpasswd с cost 4
+    access.rs                 proxy admin API, сессия, Origin, no-store, ошибки core
     auth.rs                   вход, перечитывание htpasswd, TTL, Origin, блокировка
     password.rs               смена пароля и сохранение остальных строк
     passkey.rs                церемония с SoftPasskey, отказ challenge
@@ -33,16 +35,19 @@ Lognara-dock/
   web/
     src/api.ts                fetch-обёртка и тексты ошибок
     src/webauthn.ts           base64url ↔ ArrayBuffer для navigator.credentials
-    src/App.tsx               проверка /api/me, маршруты /login, /logs, /settings
+    src/App.tsx               проверка /api/me, маршруты /login, /logs, /access, /settings
     src/pages/Login.tsx       пароль и кнопка passkey
     src/pages/Logs.tsx        EventSource, 2000 строк, пауза, раскрытие события
+    src/pages/Access.tsx      профили relay/агентов, создание, одноразовый токен, удаление
     src/pages/Settings.tsx    смена пароля, список и добавление passkey
 ```
 
 ## Связи модулей
 
-- `api::router` собирает обработчики `auth`, `account`, `passkey`, `live`; слой `session::require_origin` применяется ко всем `/api/*`.
+- `api::router` собирает обработчики `auth`, `account`, `access`, `passkey`, `live`; слой `session::require_origin` применяется ко всем `/api/*`.
 - `session::AuthUser` (extractor) использует `Sessions` и `Htpasswd::contains`.
 - `account::change_password` и `passkey::register_start/delete` подтверждают действие через `account::check_current_password` → `auth::check_password` (общая блокировка логина).
 - `passkey::login_finish` и `auth::login` создают сессию через `auth::start_session`.
 - `live::Live` использует `CoreClient`; `live::stream` перепроверяет сессию через `Sessions::lookup_hash`.
+
+- `access` → `App.core: CoreClient`: admin-токен из Config; Live использует query-клиент. Реестр хранится только в core.

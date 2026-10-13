@@ -14,9 +14,11 @@ use tokio_util::sync::CancellationToken;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::set_header::SetResponseHeaderLayer;
 
+use crate::access;
 use crate::account;
 use crate::auth::{self, LoginLimiter};
 use crate::config::Config;
+use crate::core_client::CoreClient;
 use crate::htpasswd::Htpasswd;
 use crate::live::{self, Live};
 use crate::passkey::{self, Challenges};
@@ -34,6 +36,7 @@ pub struct App {
     pub webauthn: webauthn_rs::Webauthn,
     pub challenges: Challenges,
     pub live: Arc<Live>,
+    pub core: CoreClient,
     /// Отменяется при остановке: закрывает SSE-потоки и опрос core.
     pub shutdown: CancellationToken,
 }
@@ -54,6 +57,7 @@ impl App {
             webauthn,
             challenges: Challenges::default(),
             live: Live::new(&config, shutdown.clone()),
+            core: CoreClient::new(&config),
             config,
             shutdown,
         }))
@@ -66,8 +70,12 @@ pub enum ApiError {
     Unauthorized,
     Forbidden,
     NotFound,
+    RelayNotFound,
+    Conflict(&'static str),
     TooManyRequests(Duration),
     Internal,
+    /// Core недоступен или ответил неожиданно.
+    CoreUnavailable,
 }
 
 impl From<StoreError> for ApiError {
@@ -84,6 +92,8 @@ impl IntoResponse for ApiError {
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
             Self::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found"),
+            Self::RelayNotFound => (StatusCode::NOT_FOUND, "relay_not_found"),
+            Self::Conflict(code) => (StatusCode::CONFLICT, code),
             Self::TooManyRequests(wait) => {
                 let body = Json(json!({ "error": "too_many_attempts" }));
                 let retry = (wait.as_secs() + 1).to_string();
@@ -91,6 +101,7 @@ impl IntoResponse for ApiError {
                     .into_response();
             }
             Self::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
+            Self::CoreUnavailable => (StatusCode::BAD_GATEWAY, "core_unavailable"),
         };
         (status, Json(json!({ "error": code }))).into_response()
     }
@@ -109,6 +120,16 @@ pub fn router(app: AppState) -> Router {
         .route("/account/passkeys/finish", post(passkey::register_finish))
         .route("/account/passkeys/{id}", delete(passkey::delete))
         .route("/logs/stream", get(live::stream))
+        .route(
+            "/relays",
+            get(access::list_relays).post(access::create_relay),
+        )
+        .route("/relays/{id}", delete(access::delete_relay))
+        .route(
+            "/agents",
+            get(access::list_agents).post(access::create_agent),
+        )
+        .route("/agents/{id}", delete(access::delete_agent))
         .layer(middleware::from_fn_with_state(
             app.clone(),
             session::require_origin,
