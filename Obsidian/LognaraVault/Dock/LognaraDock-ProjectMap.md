@@ -37,13 +37,20 @@ Lognara-dock/
   web/
     public/fonts/             локальные Commissioner / IBM Plex Mono, OFL, provenance
     src/index.css             общая тёмная палитра, формы, панели и адаптивные таблицы
-    src/api.ts                fetch-обёртка и тексты ошибок
+    src/api.ts                fetch-обёртка, AbortSignal и тексты ошибок
+    src/types.ts              wire-типы событий, запросов и агрегатов
+    src/logs.ts               ограниченный query parser, Live merge, контекст и CSV
+    src/logs.test.ts          query/history/live/CSV unit-тесты Node
+    src/components/Histogram.tsx count SVG, сравнение, доступные числа и drilldown
     src/webauthn.ts           base64url ↔ ArrayBuffer для navigator.credentials
-    src/App.tsx               проверка /api/me, маршруты /login, /logs, /access, /settings
+    src/App.tsx               проверка /api/me, маршруты /login, /logs, /analytics, /access, /settings
     src/pages/Login.tsx       пароль и кнопка passkey
-    src/pages/Logs.tsx        EventSource, 2000 строк, пауза, раскрытие события
+    src/pages/Logs.tsx        история/cursor/Trace, URL, отдельный Live, детали, экспорт
+    src/pages/Analytics.tsx   периоды/сервисы, count/ERROR/сравнение, переход в логи
     src/pages/Access.tsx      профили relay/агентов, создание, одноразовый токен, удаление
     src/pages/Settings.tsx    смена пароля, список и добавление passkey
+    playwright.config.ts     Chromium, Vite webServer и сценарии tests/dock.spec.ts
+    tests/dock.spec.ts        вход, аккаунт, поиск, cursor, Trace/ссылка, аналитика, Live, mobile
 ```
 
 ## Связи модулей

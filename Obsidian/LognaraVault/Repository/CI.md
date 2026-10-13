@@ -11,7 +11,7 @@ Parent: [[Index]]
 - Job `rust`: матрица отдельных crate `Lognara-agent`, `Lognara-relay`, `Lognara-spool`, `Lognara-core`, `Lognara-dock`; Rust stable с rustfmt и Clippy. Проверяет форматирование, все targets/features через Clippy с `-D warnings`, обычную сборку без тестовых features и весь набор unit, интеграционных, e2e и doc-тестов с `--all-features`. Для сборки, Clippy и тестов используется `--locked`.
 - Feature `crash-tests` у core активна в тестах, но не в обычной сборке.
 - В матрице agent и relay дополнительно запускаются `tests/check-memory-profile.py`: нагрузочные тесты, пропускаемые обычным `cargo test`, с ограничением пикового RSS 256 MiB и 2048 MiB соответственно.
-- Job `web`: Node.js 24, `npm ci`, `npm run build` в `Lognara-dock/web`; команда проверяет TypeScript и собирает Vite. Frontend unit-тестов пока нет.
+- Job `web`: Node.js 24, `npm ci`, `npm run build` в `Lognara-dock/web`; команда проверяет TypeScript и собирает Vite. `npm test` запускает Node unit-тесты parser/history/live/CSV; после установки Chromium через Playwright job запускает `npm run test:e2e`. Браузерные сценарии используют настоящий React-интерфейс и поддельные API-ответы; отдельные Rust integration tests проверяют настоящий proxy dock.
 - Job `ci` с именем проверки `CI passed`: запускается после `rust` и `web` даже при ошибках и успешен только при успехе обоих jobs, включая все элементы Rust-матрицы.
 - Job `publish-images`: только после успешного `ci` и только при push в `master`; собирает и публикует в GHCR образы core, relay и dock с тегами `master` и `sha-<полный SHA>`. Подробности в [[Repository/Images]].
 

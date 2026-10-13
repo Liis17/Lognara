@@ -19,7 +19,7 @@ Parent: [[Index]]
 | [[Agent/LognaraAgent]] | `Lognara-agent/` | HTTP, файлы и stdout/stderr через `run --`, атомарная дисковая очередь и отправка в relay; [[Agent/LogSources]]. |
 | [[Relay/LognaraRelay]] | `Lognara-relay/` | Реализованы приём пачек агентов, разбор в события, группировка по источнику, отправка в core и spool на диске. Структура в [[Relay/LognaraRelay-ProjectMap]]. |
 | [[Core/LognaraCore]] | `Lognara-core/` | Реализованы реестр подключений access.sqlite3 и admin API, авторизация relay, HTTP-приём, WAL, Arrow/Parquet, каталог SQLite, поиск Tantivy, аналитика DataFusion и retention. |
-| [[Dock/LognaraDock]] | `Lognara-dock/` | Реализованы вход по htpasswd и passkey, сессии в SQLite, смена пароля, регистрация relay/агентов через admin API core, лента логов через SSE и React-интерфейс. Структура в [[Dock/LognaraDock-ProjectMap]]. |
+| [[Dock/LognaraDock]] | `Lognara-dock/` | Реализованы вход по htpasswd/passkey, сессии в SQLite, смена пароля, регистрация relay/агентов, исторический поиск/cursor/Trace, отдельная SSE-лента и count-аналитика. React использует общий дизайн и локальные шрифты. Структура в [[Dock/LognaraDock-ProjectMap]]. |
 | [[Delivery/Spool]] | `Lognara-spool/` | Общая атомарная файловая очередь; оба процесса подтверждают приём только после durable commit. |
 | [[Repository/LocalExample]] | `Example/` | Локальный Compose: Python-сервер на 8881 и agent в одном контейнере, relay, core и dock отдельно; веб-логи на localhost:7403. |
 
@@ -59,7 +59,7 @@ Parent: [[Index]]
 
 ## Просмотр логов
 
-Браузер → nginx (TLS) → lognara-dock `:7403` → `POST /v1/logs/search` core. Dock проверяет вход по htpasswd с хоста или passkey, хранит сессии и passkey в SQLite и раздаёт новые события через SSE. Core для этого не меняется; ограничения ленты описаны в [[Dock/LognaraDock]].
+Браузер → nginx (TLS) → lognara-dock `:7403` → query API core. Dock проверяет вход по htpasswd/passkey, хранит сессии/ключи в SQLite, проксирует историю поиска, trace lookup, histogram/group-by и раздаёт новые события через SSE. Query/admin-токены остаются в dock; core для этих страниц не меняется. Ограничения ленты и независимых снимков аналитики описаны в [[Dock/LognaraDock]].
 
 ## Паттерны
 
