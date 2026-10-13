@@ -182,23 +182,32 @@ Agent обрабатывает один входящий запрос однов
 cp .env.example .env
 openssl rand -hex 32
 # Впишите результат в LOGNARA_RELAY_TOKEN в .env.
+# Так же сгенерируйте разные LOGNARA_CORE_TOKEN и LOGNARA_CORE_QUERY_TOKEN.
 ```
 
 `.env` исключён из git. Compose использует его для подстановки `${...}`; передачу значения в контейнер задаёт `environment`. При запуске бинарников `.env` автоматически не читается: задайте переменные в окружении. [Документация Docker](https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation)
 
-Ниже фрагмент для ваших существующих сервисов с настроенными `image`/`build`. `app-with-agent` обозначает контейнер приложения, в котором работает агент и принимает логи по localhost. Готовых образов и Dockerfile в репозитории пока нет. Задайте `LOGNARA_CORE_TOKEN` для своего core отдельно от общего ключа агентов.
+Ниже фрагмент для ваших существующих сервисов с настроенными `image`/`build`. `app-with-agent` обозначает контейнер приложения, в котором работает агент и принимает логи по localhost. Готовых образов и Dockerfile в репозитории пока нет. `LOGNARA_CORE_TOKEN` это ingest-токен core, `LOGNARA_CORE_QUERY_TOKEN` его query-токен; оба отличаются от общего ключа агентов и друг от друга. Если core работает вне этого Compose, уберите сервис `lognara-core` и задайте relay его HTTPS-адрес в `LOGNARA_CORE_URL`.
 
 ```yaml
 services:
+  lognara-core:
+    environment:
+      LOGNARA_LISTEN_ADDR: "0.0.0.0:7402"
+      LOGNARA_INGEST_TOKEN: ${LOGNARA_CORE_TOKEN:?Задайте LOGNARA_CORE_TOKEN}
+      LOGNARA_QUERY_TOKEN: ${LOGNARA_CORE_QUERY_TOKEN:?Задайте LOGNARA_CORE_QUERY_TOKEN}
+    volumes:
+      - ${LOGNARA_CORE_DATA:-lognara-core-data}:/var/lib/lognara-core
+    networks: [lognara-core]
   lognara-relay:
     environment:
       LOGNARA_RELAY_TOKEN: ${LOGNARA_RELAY_TOKEN:?Задайте LOGNARA_RELAY_TOKEN}
       LOGNARA_LISTEN_ADDR: "0.0.0.0:7401"
-      LOGNARA_CORE_URL: https://core.example.com/v1/batches
+      LOGNARA_CORE_URL: http://lognara-core:7402/v1/batches
       LOGNARA_CORE_TOKEN: ${LOGNARA_CORE_TOKEN:?Задайте LOGNARA_CORE_TOKEN}
     volumes:
-      - lognara-spool:/var/lib/lognara-relay/spool
-    networks: [lognara-ingest]
+      - ${LOGNARA_RELAY_DATA:-lognara-spool}:/var/lib/lognara-relay/spool
+    networks: [lognara-ingest, lognara-core]
   app-with-agent:
     environment:
       LOGNARA_SERVICE: api
@@ -207,17 +216,20 @@ services:
       LOGNARA_RELAY_URL: http://lognara-relay:7401/v1/batches
       LOGNARA_RELAY_TOKEN: ${LOGNARA_RELAY_TOKEN:?Задайте LOGNARA_RELAY_TOKEN}
     volumes:
-      - lognara-agent-spool:/var/lib/lognara-agent/spool
+      - ${LOGNARA_AGENT_DATA:-lognara-agent-spool}:/var/lib/lognara-agent/spool
     networks: [lognara-ingest]
 networks:
   lognara-ingest:
     driver: bridge
+  lognara-core:
+    driver: bridge
 volumes:
+  lognara-core-data:
   lognara-spool:
   lognara-agent-spool:
 ```
 
-Обоим сервисам обязательны постоянные volumes с правом записи. Каждый agent использует свой каталог/volume; два процесса не могут одновременно владеть одним spool. Не удаляйте volumes при обновлении. Квоты тел не заменяют свободное место для файловой metadata и одной временной группы.
+Всем трём сервисам обязательно постоянное хранилище с правом записи. По умолчанию данные лежат в Docker volumes. Чтобы хранить их в папке на хосте, задайте в `.env` абсолютный путь в `LOGNARA_AGENT_DATA`, `LOGNARA_RELAY_DATA` или `LOGNARA_CORE_DATA`, например `/srv/lognara/relay`; пустое значение оставляет volume. Создайте папку заранее и дайте право записи пользователю контейнера. Core держите на локальном диске, не на сетевой ФС. Каждый agent использует свой каталог/volume; два процесса не могут одновременно владеть одним spool. Не удаляйте volumes и папки при обновлении. Квоты тел не заменяют свободное место для файловой metadata и одной временной группы.
 
 В контейнере relay нужен `0.0.0.0`, чтобы принимать соединения от соседних контейнеров. Порт `7401` не публикуйте через `ports`, а `network_mode: host` не используйте. Агенты обращаются к контейнерному порту по имени `lognara-relay` в выделенной Docker-сети; доступ к этой сети предоставляйте доверенным контейнерам. [Документация Docker](https://docs.docker.com/compose/how-tos/networking/)
 
