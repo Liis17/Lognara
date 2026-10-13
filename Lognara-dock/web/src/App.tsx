@@ -3,6 +3,7 @@ import { Navigate, NavLink, Route, Routes, useNavigate } from "react-router";
 import { api, type Me } from "./api";
 import Login from "./pages/Login";
 import Logs from "./pages/Logs";
+import Metrics from "./pages/Metrics";
 import Settings from "./pages/Settings";
 
 export default function App() {
@@ -42,6 +43,7 @@ export default function App() {
         <strong>Lognara</strong>
         <nav>
           <NavLink to="/logs">Логи</NavLink>
+          <NavLink to="/metrics">Метрики</NavLink>
           <NavLink to="/settings">Настройки</NavLink>
         </nav>
         <span className="user">{me.username}</span>
@@ -50,6 +52,10 @@ export default function App() {
       <main>
         <Routes>
           <Route path="/logs" element={<Logs onUnauthorized={() => setMe(null)} />} />
+          <Route
+            path="/metrics"
+            element={<Metrics seriesAdmin={me.series_admin} onUnauthorized={() => setMe(null)} />}
+          />
           <Route path="/settings" element={<Settings onChange={refresh} />} />
           <Route path="*" element={<Navigate to="/logs" replace />} />
         </Routes>

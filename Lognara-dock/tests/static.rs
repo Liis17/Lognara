@@ -33,7 +33,7 @@ async fn serves_spa_with_index_fallback_and_api_404() {
     assert_eq!(headers[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
 
     // Маршруты react-router открываются напрямую.
-    for path in ["/login", "/logs", "/settings"] {
+    for path in ["/login", "/logs", "/metrics", "/settings"] {
         let (status, _, body) = get_text(&t, path).await;
         assert_eq!(
             (status, body.as_str()),

@@ -110,3 +110,99 @@ table.logs .message {
   margin: 0;
   white-space: pre-wrap;
 }
+.metrics {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+  gap: 24px;
+  align-items: start;
+}
+.metrics h2 {
+  margin: 0 0 4px;
+  font-size: 18px;
+}
+.metrics-list h3 {
+  margin: 12px 0 4px;
+  font-size: 13px;
+  color: #555;
+}
+.metric-items {
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+.metric {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  width: 100%;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.metric:hover {
+  background: #f3f3f3;
+}
+.metric.active {
+  background: #e8f0fb;
+}
+.metric .title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tag {
+  padding: 0 4px;
+  border: 1px solid #ccc;
+  border-radius: 3px;
+  color: #555;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.toolbar button.active {
+  font-weight: bold;
+}
+label.check {
+  flex-direction: row;
+  align-items: center;
+}
+.metric-editor {
+  max-width: 640px;
+  margin-bottom: 24px;
+}
+.metric-editor textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 4px 6px;
+  font: inherit;
+}
+.metric-editor textarea.pattern {
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+}
+.preview-result {
+  margin-top: 12px;
+}
+table.preview {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+}
+table.preview th,
+table.preview td {
+  text-align: left;
+  padding: 2px 8px;
+  border-bottom: 1px solid #eee;
+  vertical-align: top;
+}
+table.preview .time {
+  white-space: nowrap;
+}
+table.preview .message {
+  word-break: break-word;
+}
