@@ -14,6 +14,7 @@ pub mod live;
 pub mod passkey;
 pub mod patterns;
 pub mod query;
+pub mod series;
 pub mod session;
 pub mod store;
 

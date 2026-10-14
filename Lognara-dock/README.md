@@ -72,7 +72,7 @@ API dock: GET/POST `/api/relays`, `/api/agents`, DELETE `/api/relays/{id}`, `/ap
 | `LOGNARA_DOCK_PUBLIC_URL` | обязательна | внешний адрес, например `https://dock.liis17.com`. Используется как origin для passkey и проверки `Origin`. `http` допускается только для `localhost` |
 | `LOGNARA_DOCK_CORE_URL` | обязательна | базовый адрес core, например `http://lognara-core:7402` |
 | `LOGNARA_DOCK_CORE_TOKEN` | обязательна | равен `LOGNARA_QUERY_TOKEN` core, ASCII без пробелов |
-| `LOGNARA_DOCK_CORE_ADMIN_TOKEN` | обязательна | равен `LOGNARA_ADMIN_TOKEN` core, ASCII без пробелов, отличается от query |
+| `LOGNARA_DOCK_CORE_ADMIN_TOKEN` | обязательна | равен `LOGNARA_ADMIN_TOKEN` core, ASCII без пробелов, отличается от query; нужен для relay, агентов и определений метрик |
 | `LOGNARA_DOCK_LISTEN_ADDR` | `127.0.0.1:7403` | в контейнере `0.0.0.0:7403` (задано в образе) |
 | `LOGNARA_DOCK_HTPASSWD_FILE` | `/etc/lognara-dock/auth/htpasswd` | файл пользователей внутри смонтированной папки |
 | `LOGNARA_DOCK_DATA_DIR` | `/var/lib/lognara-dock` | SQLite с сессиями и passkey, lock-файл |
@@ -127,9 +127,16 @@ docker compose up -d
 | `POST /api/stats/histogram` | сессия + Origin | from/to/filters/interval_seconds; buckets count и as_of |
 | `POST /api/stats/group-by` | сессия + Origin | from/to/filters/group_by/limit; groups count и as_of |
 | `POST /api/stats/summary` | сессия + Origin | from/to/filters/text/interval_seconds/search_limit; согласованные total/buckets/levels/error_services/duration/actions/page/as_of |
+| `GET /api/series` | сессия | список метрик core (`GET /v1/series`) |
+| `POST /api/series/query` | сессия | значения серии по корзинам (`POST /v1/series/query`), таймаут 35 с |
+| `GET`, `POST /api/series/definitions` | сессия, admin | список и создание определений |
+| `PUT`, `DELETE /api/series/definitions/{id}` | сессия, admin | замена и удаление определения |
+| `POST /api/series/preview` | сессия, admin | предпросмотр правила на логах core |
 | `GET /*` | открыт | SPA, неизвестный путь отдаёт `index.html` |
 
-Ошибки возвращаются как JSON `{"error": "<код>"}`: `unauthorized`, `forbidden`, `too_many_attempts`, `invalid_current_password`, `password_too_short`, `password_too_long`, `invalid_name`, `challenge_expired`, `passkey_rejected`, `passkey_exists`, `not_found`.
+Маршруты с пометкой admin dock вызывает в core с `LOGNARA_DOCK_CORE_ADMIN_TOKEN`. Тело запроса к core передаётся как есть, проверяет его core.
+
+Ошибки возвращаются как JSON `{"error": "<код>"}`: `unauthorized`, `forbidden`, `too_many_attempts`, `invalid_current_password`, `password_too_short`, `password_too_long`, `invalid_name`, `challenge_expired`, `passkey_rejected`, `passkey_exists`, `not_found`. Для метрик добавлены `core_unavailable` (502: core недоступен, не ответил вовремя или вернул 5xx) и `invalid` (400: ответ содержит `detail` с причиной от core).
 
 Страница событий получает первую страницу, общий подсчёт и stacked-график одним summary, включая текстовые фильтры. Аналитика использует одну сводку на окно, показывает приблизительный p95 `duration_ms`, покрытие измерений и до 20 action-групп по числу событий. Прошлое окно получает отдельную сводку. [Контракт summary](../docs/DockSummaryContract.md).
 

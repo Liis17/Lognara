@@ -4,9 +4,9 @@ Parent: [[Index]]
 
 ## Назначение
 
-Веб-интерфейс Lognara за nginx (TLS). Rust-сервис в `Lognara-dock/` отдаёт React-приложение из `web/`, проверяет вход и показывает логи [[Core/LognaraCore]] в реальном времени. Query- и admin-токены core хранятся только в dock.
+Веб-интерфейс Lognara за nginx (TLS). Rust-сервис в `Lognara-dock/` отдаёт React-приложение из `web/`, проверяет вход, регистрирует relay и агентов, показывает логи [[Core/LognaraCore]] в реальном времени и графики метрик (раздел «Метрики»). Query- и admin-токены core хранятся только в dock.
 
-Поток: браузер → nginx :443 → dock :7403 → `POST /v1/logs/search` core с Bearer query-токеном.
+Поток: браузер → nginx :443 → dock :7403 → `POST /v1/logs/search` core с Bearer query-токеном. Метрики: `/api/series*` → `/v1/series*` с тем же query-токеном; определения и предпросмотр → `/v1/admin/series/*` с admin-токеном.
 
 Файлы и связи модулей описаны в [[Dock/LognaraDock-ProjectMap]].
 
@@ -71,11 +71,25 @@ API: `POST /api/issues/search`, `POST /api/issues/{fingerprint}/details`, `POST 
 
 ## Инфраструктура
 
-`/infrastructure` использует `GET /api/infrastructure` с сессией и no-store. `infra::overview(State<AppState>, AuthUser): Json<Infrastructure>` параллельно объединяет query status core, admin-реестр и активные сессии Dock. `CoreClient::status(&self): Result<CoreStatus, CoreError>` получает типизированный status; `Live::clients(): usize` считает открытые SSE receivers, `Sessions::active(): Result<u64, StoreError>` — записи сессий в пределах TTL/idle (ошибка → null).
+`/infrastructure` использует `GET /api/infrastructure` с сессией и no-store. `infra::overview(State<AppState>, AuthUser): Json<Infrastructure>` параллельно объединяет query status core, admin-реестр и активные сессии Dock. `CoreClient::status(&self): Result<CoreStatus, CoreQueryError>` получает типизированный status; `Live::clients(): usize` считает открытые SSE receivers, `Sessions::active(): Result<u64, StoreError>` — записи сессий в пределах TTL/idle (ошибка → null).
 
 Свежесть относительно as_of core: TTL 60 секунд, idle 300 секунд, spool degraded от 80%; недавняя ошибка после последнего успеха тоже degraded. До первого heartbeat unknown; устаревший агент при молчащем relay unknown/relay_silent. Узлы сортируются по приоритету offline/degraded/unknown/idle/online. Опрос UI через 10 секунд после завершения предыдущего запроса, ручное обновление; при ошибке последний снимок помечается устаревшим. Core ready=false и недоступность/частичный отказ реестра показываются отдельно.
 
 Хранилище: filesystem total/free, Parquet/индексы (включая активный)/WAL, oldest event и retention. Source-ссылки агента строят фильтры по конфигурации за час, не подтверждают agent_id события. История телеметрии, per-node dropped, p95 доставки и прогноз диска отсутствуют. Полный [контракт инфраструктуры](../../../docs/DockInfrastructureContract.md).
+Опрос `Live` использует общий `CoreClient` из `App`, а не собственный клиент.
+
+## Метрики
+
+Страница `/metrics` (пункт «Метрики» в меню) показывает серии core. Список берётся из `GET /api/series`, график из `POST /api/series/query`. Диапазоны: 1 час, 24 часа, 7 дней, 30 дней, 1 год и «всё время» (от первой точки метрики). Шаг выбирает браузер: самый мелкий из списка от 10 секунд до 7 дней, при котором не больше 1000 корзин. Разбиение: сумма, по экземплярам или по меткам.
+
+- Select «Окружение» рядом с разбиением появляется, если у метрики есть `environments` из `GET /api/series`; по умолчанию «Все окружения», и поле `environment` в запросе не передаётся. Смена метрики сбрасывает окружение, смена окружения перезапрашивает график.
+- Метрики и редактор используют общую тёмную палитру; список метрик изолирован от KPI-карточек, на узком экране список и график идут друг под другом. График рисует `components/Chart.tsx` на uPlot (оси и сетка из CSS-переменных): восемь категориальных цветов по порядку, серии сверх них серые.
+- Редактор `pages/MetricEditor.tsx` создаёт правило из текста логов, настраивает метрику по имени, проверяет правило предпросмотром (`POST /api/series/preview`, окно фиксировано 60 минут) и сохраняет (`POST`/`PUT /api/series/definitions`) или удаляет (`DELETE`) определение.
+- Кнопки редактора видны всегда: `LOGNARA_DOCK_CORE_ADMIN_TOKEN` обязателен.
+
+`series.rs` - прокси: тело запроса передаётся core как есть, проверяет его core. Запрос серий ждёт core 35 секунд (`SERIES_QUERY_TIMEOUT`), остальные вызовы 10 секунд (`REQUEST_TIMEOUT`). Core отрезает запрос по `LOGNARA_QUERY_TIMEOUT_SECONDS` (30 секунд по умолчанию), то есть таймаут dock на 5 секунд больше. Ответы core переводятся в коды ошибок API: `invalid` (с `detail`), `not_found`, `core_unavailable` (502: сеть, таймаут, 5xx), `internal` (core отклонил токен). Таблица кодов: [[Dock/LognaraDock-ProjectMap]] и `Lognara-dock/README.md`.
+
+Ограничения: диапазон «1 год» получает шаг 12 часов (730 корзин), такой шаг не измерялся: замер года выполнен для шага 1 день (см. [[Design/Metrics]], раздел «Суточные агрегаты»).
 
 ## Параметры запуска
 
@@ -84,7 +98,7 @@ API: `POST /api/issues/search`, `POST /api/issues/{fingerprint}/details`, `POST 
 | `LOGNARA_DOCK_PUBLIC_URL` | да | - | внешний адрес; origin для passkey и проверки Origin; http только для localhost |
 | `LOGNARA_DOCK_CORE_URL` | да | - | базовый адрес core |
 | `LOGNARA_DOCK_CORE_TOKEN` | да | - | query-токен core, скрыт в Debug |
-| `LOGNARA_DOCK_CORE_ADMIN_TOKEN` | да | - | отдельный admin-токен core, ASCII без пробелов/control, скрыт в Debug |
+| `LOGNARA_DOCK_CORE_ADMIN_TOKEN` | да | - | отдельный admin-токен core для relay, агентов и определений метрик, ASCII без пробелов/control, скрыт в Debug |
 | `LOGNARA_DOCK_LISTEN_ADDR` | нет | `127.0.0.1:7403` | в образе `0.0.0.0:7403` |
 | `LOGNARA_DOCK_HTPASSWD_FILE` | нет | `/etc/lognara-dock/auth/htpasswd` | файл пользователей |
 | `LOGNARA_DOCK_DATA_DIR` | нет | `/var/lib/lognara-dock` | SQLite и lock |
@@ -141,11 +155,21 @@ API: `POST /api/issues/search`, `POST /api/issues/{fingerprint}/details`, `POST 
 - `Store::reopen_issue(&self, fingerprint: String, username: String): Result<(), StoreError>` — открывает решённую
 - `Store::issue_watch(&self): Result<(Option<u64>, Vec<(String, i64)>), StoreError>` — checkpoint и решённые проблемы
 - `Store::record_recurrences(&self, after: u64, watermark: u64, found: Vec<Recurrence>): Result<Vec<String>, StoreError>` — возвраты и новый checkpoint одной транзакцией
+- `CoreClient::call_within(&self, method: Method, path: &str, token: &str, body: Option<&Value>, timeout: Duration): Result<CoreReply, CoreError>` - общий HTTP-вызов core с явным таймаутом; `call` подставляет 10 секунд
+- `CoreClient::series_query(&self, query: &Value): Result<CoreReply, CoreError>` - `POST /v1/series/query` с таймаутом 35 секунд
+- ~~`CoreClient::admin_enabled`~~ (удалён: 2026-10-14)
+- `CoreClient::preview(&self, request: &Value): Result<CoreReply, CoreError>` - предпросмотр правила, admin-токен
+- `From<CoreError> for ApiError` (`api.rs`) - перевод ответов core в коды ошибок API
+- `Live::new(config: &Config, core: Arc<CoreClient>, shutdown: CancellationToken): Arc<Live>` - опрос использует общий клиент
 - `live::stream(State, AuthUser): Sse<...>` — SSE `logs`, `core_error`, `core_ok`, `lagged`
+- `series::query(State, AuthUser, Json<Value>): Result<(StatusCode, Json<Value>), ApiError>` - `POST /api/series/query`, тело передаётся core как есть
+- `series::list(State, AuthUser): Result<(StatusCode, Json<Value>), ApiError>` - `GET /api/series`
+- `series::create_definition(State, AuthUser, Json<Value>): Result<(StatusCode, Json<Value>), ApiError>` - `POST /api/series/definitions`, admin-токен
 
 ## Зависимости
 
-- Использует: [[Core/LognaraCore]] (`POST /v1/logs/search` и `/v1/admin/*`).
+- Использует: [[Core/LognaraCore]] (`POST /v1/logs/search`, `GET /v1/series`, `POST /v1/series/query` с query-токеном; `/v1/admin/*`, включая `/v1/admin/series/*`, с admin-токеном).
+- Библиотеки фронтенда: uPlot (`web/package.json`, график метрик), React и react-router.
 - Используется в: браузер через nginx.
 
 ## Подключения

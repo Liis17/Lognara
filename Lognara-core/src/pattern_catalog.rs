@@ -185,6 +185,8 @@ pub(crate) fn next_chunk(snapshot: &Snapshot, checkpoint: u64) -> Option<Snapsho
     };
     (watermark >= checkpoint).then(|| Snapshot {
         closed,
+        // Каталог паттернов читает только raw-логи этого chunk, не серии метрик.
+        series_files: vec![],
         active,
         watermark,
         generation: snapshot.generation,
