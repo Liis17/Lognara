@@ -12,6 +12,7 @@ pub mod journal;
 pub mod metrics;
 pub mod model;
 pub mod query;
+pub mod rollup;
 pub mod series;
 pub mod series_query;
 pub mod storage;

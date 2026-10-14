@@ -9,6 +9,7 @@ use crate::{
     journal::Journal,
     metrics::Metrics,
     model::{StoredEvent, now_nanos},
+    rollup::{self, RollupFile},
     series::{self, SeriesFile, SeriesFileMeta},
     wal::{Position, failpoint, sync_dir},
     wire,
@@ -64,7 +65,10 @@ pub struct Core {
     pub search_slots: Arc<Semaphore>,
     pub analytics_slots: Arc<Semaphore>,
     pub query_runtime: Arc<datafusion::execution::runtime_env::RuntimeEnv>,
+    /// Готовые суточные агрегаты; публикует поток lognara-rollups.
+    pub rollups: RwLock<Arc<Vec<Arc<RollupFile>>>>,
     worker: Mutex<Option<JoinHandle<Result<()>>>>,
+    rollup_worker: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Core {
@@ -98,7 +102,9 @@ impl Core {
             search_slots: Arc::new(Semaphore::new(4)),
             analytics_slots: Arc::new(Semaphore::new(2)),
             query_runtime,
+            rollups: RwLock::new(Arc::new(vec![])),
             worker: Mutex::new(None),
+            rollup_worker: Mutex::new(None),
         });
         let mut worker = Materializer::recover(core.clone())?;
         while worker.next()? {}
@@ -112,6 +118,8 @@ impl Core {
             result
         })?;
         *core.worker.lock().unwrap() = Some(handle);
+        let rollups = rollup::spawn(core.clone())?;
+        *core.rollup_worker.lock().unwrap() = Some(rollups);
         Ok(core)
     }
 
@@ -121,6 +129,13 @@ impl Core {
 
     pub fn shutdown(&self) -> Result<()> {
         self.journal.stopping.store(true, Ordering::Release);
+        let rollups = self.rollup_worker.lock().unwrap().take();
+        if let Some(handle) = rollups {
+            handle.thread().unpark();
+            if handle.join().is_err() {
+                tracing::error!("rollup worker panicked; rollups are derived and rebuilt on start");
+            }
+        }
         let handle = self.worker.lock().unwrap().take();
         if let Some(handle) = handle {
             handle.thread().unpark();
@@ -129,6 +144,13 @@ impl Core {
                 .map_err(|_| anyhow::anyhow!("segment worker panicked"))??;
         }
         Ok(())
+    }
+
+    /// Будит поток агрегатов после изменения файлов серий.
+    fn wake_rollups(&self) {
+        if let Some(handle) = self.rollup_worker.lock().unwrap().as_ref() {
+            handle.thread().unpark();
+        }
     }
 }
 
@@ -617,6 +639,7 @@ impl Materializer {
             .metrics
             .sealed_segments
             .fetch_add(1, Ordering::Relaxed);
+        self.core.wake_rollups();
         Ok(())
     }
 
@@ -828,6 +851,7 @@ impl Materializer {
             .metrics
             .series_compactions
             .fetch_add(1, Ordering::Relaxed);
+        self.core.wake_rollups();
         Ok(())
     }
 
@@ -881,7 +905,7 @@ fn sync_ancestors(start: &Path, root: &Path) -> Result<()> {
 }
 
 /// Каталоги ровно на указанной глубине под root (например, segments/YYYY/MM/DD/<id>).
-fn nested_directories(root: &Path, depth: usize) -> Result<Vec<PathBuf>> {
+pub(crate) fn nested_directories(root: &Path, depth: usize) -> Result<Vec<PathBuf>> {
     let mut level = vec![root.to_path_buf()];
     for _ in 0..depth {
         let mut next = vec![];

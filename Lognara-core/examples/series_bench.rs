@@ -1,7 +1,11 @@
 //! Стенд графиков метрик: год файлов серий и время series_query::query. Данные во временном каталоге.
-use std::{fs, path::Path, time::Instant};
+use std::{
+    fs,
+    path::Path,
+    time::{Duration, Instant},
+};
 
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use lognara_core::{
     catalog::{Catalog, SeriesName},
     columns,
@@ -127,6 +131,14 @@ fn register(data: &Path, files: &[SeriesFileMeta]) -> Result<()> {
     Ok(())
 }
 
+/// Суток старше недельного порога LOGNARA_SERIES_RAW_DAYS по умолчанию: им положен агрегат.
+fn eligible_days() -> usize {
+    let cutoff = OffsetDateTime::now_utc().unix_timestamp() - 7 * DAY_SECONDS;
+    (0..DAYS)
+        .filter(|day| START_SECONDS + (day + 1) * DAY_SECONDS <= cutoff)
+        .count()
+}
+
 fn dir_bytes(path: &Path) -> Result<u64> {
     let mut total = 0;
     for entry in fs::read_dir(path)? {
@@ -168,7 +180,33 @@ async fn main() -> Result<()> {
         _ => None,
     })?;
     config.data_dir = dir.path().into();
+    // Пауза по умолчанию растянула бы стенд на минуты; время ниже - только построение агрегатов.
+    config.series_rollup_pause = Duration::from_millis(1);
+    let eligible = eligible_days();
+    let started = Instant::now();
     let core = Core::open(config)?;
+    while core.rollups.read().unwrap().len() < eligible {
+        ensure!(
+            started.elapsed() < Duration::from_secs(3600),
+            "rollups were not built within an hour"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let rollups = core.rollups.read().unwrap().clone();
+    let hourly = rollups
+        .iter()
+        .filter(|file| file.meta.resolution == 3600)
+        .count();
+    println!(
+        "rollups: {} days ({hourly} hourly, {} 12-hour) built in {:.1} s",
+        rollups.len(),
+        rollups.len() - hourly,
+        started.elapsed().as_secs_f64()
+    );
+    println!(
+        "rollups/ size: {:.1} MiB",
+        dir_bytes(&dir.path().join("rollups"))? as f64 / (1024.0 * 1024.0)
+    );
     let cases = [
         (
             "1 year, step 1 day",

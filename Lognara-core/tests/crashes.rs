@@ -1,7 +1,9 @@
 //! Subprocess tests stop the real binary between durability boundaries.
 #![cfg(feature = "crash-tests")]
+use lognara_core::catalog::Catalog;
 use reqwest::Client;
 use std::{
+    fs,
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
@@ -69,7 +71,7 @@ async fn start(path: &std::path::Path, point: Option<&str>) -> Process {
     process
 }
 
-fn batch() -> Vec<u8> {
+fn batch(time: &str) -> Vec<u8> {
     let mut batch =
         lognara_core::wire::decode(include_bytes!("fixtures/relay-batch.bin"), 1 << 20).unwrap();
     let event = batch.groups[0].events[0].clone();
@@ -79,7 +81,7 @@ fn batch() -> Vec<u8> {
             event.message = format!("crash row {i}");
             event.attributes.insert(
                 "Metrics".into(),
-                serde_json::json!({"SchemaVersion": 2, "Counters": {"crash_runs": 1}, "Timestamp": "2026-10-13T15:14:00.4480321Z"}),
+                serde_json::json!({"SchemaVersion": 2, "Counters": {"crash_runs": 1}, "Timestamp": time}),
             );
             event
         })
@@ -122,7 +124,7 @@ async fn crashes_at_each_publication_boundary_recover_without_loss_or_duplicates
         .timeout(Duration::from_secs(5))
         .build()
         .unwrap();
-    let body = batch();
+    let body = batch("2026-10-13T15:14:00.4480321Z");
     for point in [
         "wal_before_sync",
         "wal_before_rename",
@@ -187,7 +189,8 @@ async fn crashes_at_each_publication_boundary_recover_without_loss_or_duplicates
 async fn restart_finishes_marked_retention_without_reaccepting_deleted_batch() {
     let dir = tempfile::tempdir().unwrap();
     let client = Client::new();
-    let mut decoded = lognara_core::wire::decode(&batch(), 1 << 20).unwrap();
+    let mut decoded =
+        lognara_core::wire::decode(&batch("2026-10-13T15:14:00.4480321Z"), 1 << 20).unwrap();
     // Две полные секции, без открытого остатка на момент удаления.
     decoded.groups[0].events.truncate(4);
     let body = zstd::encode_all(&rmp_serde::to_vec_named(&decoded).unwrap()[..], 3).unwrap();
@@ -219,7 +222,7 @@ async fn restart_finishes_marked_retention_without_reaccepting_deleted_batch() {
 async fn sigkill_after_successful_ack_preserves_the_batch() {
     let dir = tempfile::tempdir().unwrap();
     let client = Client::new();
-    let body = batch();
+    let body = batch("2026-10-13T15:14:00.4480321Z");
     let mut process = start(dir.path(), None).await;
     assert_eq!(
         send(&client, &process.url, &body).await.unwrap().status(),
@@ -235,4 +238,51 @@ async fn sigkill_after_successful_ack_preserves_the_batch() {
         204
     );
     assert_eq!(count(&client, &process.url).await, 5);
+}
+
+#[tokio::test]
+async fn crashes_in_rollup_builds_leave_one_registered_rollup_after_restart() {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    // День старше семи суток: агрегат строится фоном после запечатывания сегмента.
+    let body = batch("2026-01-05T10:00:00Z");
+    for point in ["rollup_after_parquet", "rollup_after_mark"] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut process = start(dir.path(), Some(point)).await;
+        let _ = send(&client, &process.url, &body).await;
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if let Some(status) = process.child.try_wait().unwrap() {
+                assert_eq!(status.code(), Some(86), "{point}");
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "crash point {point} was not reached"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        drop(process);
+        let _restarted = start(dir.path(), None).await;
+        // Незарегистрированный файл удаляется, строка без файла пересобирается; старый файл уходит после замены.
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let catalog = Catalog::open(&dir.path().join("catalog.sqlite")).unwrap();
+            let ready = catalog.rollups("ready").unwrap();
+            if let [rollup] = ready.as_slice() {
+                let file = dir.path().join(&rollup.path);
+                let files = fs::read_dir(file.parent().unwrap()).unwrap().count();
+                if file.is_file() && files == 1 {
+                    break;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "rollup was not rebuilt after {point}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
 }

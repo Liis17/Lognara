@@ -382,57 +382,63 @@ async fn read_buckets(
         col("timestamp"),
         timestamp(0),
     );
-    let frame = frame(core, snapshot, from, to)
-        .await?
-        .filter(predicate)?
-        .aggregate(
-            vec![
-                col("service"),
-                col("environment"),
-                col("server"),
-                col("backend"),
-                col("service_instance"),
-                col("name"),
-                col("origin"),
-                col("rule_id"),
-                col("labels"),
-                col("timestamp"),
-                col("event_id"),
-            ],
-            vec![max(col("value")).alias("value")],
-        )?
-        .aggregate(
-            vec![
-                bucket.alias("bucket"),
-                split.alias("split"),
-                col("environment"),
-                col("server"),
-                col("backend"),
-                col("service_instance"),
-                col("origin"),
-                col("rule_id"),
-                col("labels"),
-            ],
-            vec![
-                sum(col("value")).alias("sum"),
-                count(lit(1u8)).alias("count"),
-                min(col("value")).alias("min"),
-                max(col("value")).alias("max"),
-                last_value(
-                    col("value"),
-                    vec![
-                        col("timestamp").sort(true, false),
-                        col("value").sort(true, false),
-                    ],
-                )
-                .alias("last"),
-            ],
-        )?;
+    let frame = dedup(frame(core, snapshot, from, to).await?.filter(predicate)?)?.aggregate(
+        vec![
+            bucket.alias("bucket"),
+            split.alias("split"),
+            col("environment"),
+            col("server"),
+            col("backend"),
+            col("service_instance"),
+            col("origin"),
+            col("rule_id"),
+            col("labels"),
+        ],
+        vec![
+            sum(col("value")).alias("sum"),
+            count(lit(1u8)).alias("count"),
+            min(col("value")).alias("min"),
+            max(col("value")).alias("max"),
+            last_value(
+                col("value"),
+                vec![
+                    col("timestamp").sort(true, false),
+                    col("value").sort(true, false),
+                ],
+            )
+            .alias("last"),
+        ],
+    )?;
     Ok(frame.execute_stream().await?.try_collect().await?)
 }
 
+/// Повторно доставленные точки схлопываются: одна строка на серию, время и event_id, значение - максимум.
+pub(crate) fn dedup(frame: DataFrame) -> Result<DataFrame> {
+    Ok(frame.aggregate(
+        vec![
+            col("service"),
+            col("environment"),
+            col("server"),
+            col("backend"),
+            col("service_instance"),
+            col("name"),
+            col("origin"),
+            col("rule_id"),
+            col("labels"),
+            col("timestamp"),
+            col("event_id"),
+        ],
+        vec![max(col("value")).alias("value")],
+    )?)
+}
+
 /// Точки серий: Parquet файлов, пересекающих окно, и открытые точки сегмента из того же снимка.
-async fn frame(core: &Core, snapshot: &Snapshot, from: i64, to: i64) -> Result<DataFrame> {
+pub(crate) async fn frame(
+    core: &Core,
+    snapshot: &Snapshot,
+    from: i64,
+    to: i64,
+) -> Result<DataFrame> {
     let config = SessionConfig::new()
         .with_target_partitions(2)
         .with_batch_size(8192)
@@ -442,7 +448,7 @@ async fn frame(core: &Core, snapshot: &Snapshot, from: i64, to: i64) -> Result<D
     let paths: Vec<String> = snapshot
         .series_files
         .iter()
-        .filter(|file| file.meta.max_timestamp >= from && file.meta.min_timestamp < to)
+        .filter(|file| file.meta.overlaps(from, to))
         .map(|file| file.path.to_string_lossy().into_owned())
         .collect();
     let memory = snapshot
@@ -571,7 +577,7 @@ fn text(column: &StringArray, row: usize) -> Option<String> {
     (!column.is_null(row)).then(|| column.value(row).to_owned())
 }
 
-fn timestamp(value: i64) -> Expr {
+pub(crate) fn timestamp(value: i64) -> Expr {
     lit(ScalarValue::TimestampNanosecond(
         Some(value),
         Some("UTC".into()),

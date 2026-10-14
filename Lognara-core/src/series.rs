@@ -132,6 +132,13 @@ pub struct SeriesFileMeta {
     pub closed_at: i64,
 }
 
+impl SeriesFileMeta {
+    /// Есть ли у файла точки во времени [from, to).
+    pub fn overlaps(&self, from: i64, to: i64) -> bool {
+        self.max_timestamp >= from && self.min_timestamp < to
+    }
+}
+
 pub struct SeriesFile {
     pub meta: SeriesFileMeta,
     pub path: PathBuf,

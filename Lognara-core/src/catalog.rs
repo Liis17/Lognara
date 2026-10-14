@@ -1,6 +1,7 @@
 //! Каталог и checkpoint фиксируются одной FULL-синхронной транзакцией SQLite.
 use crate::{
     definitions::Definition,
+    rollup::RollupMeta,
     series::SeriesFileMeta,
     wal::{Position, Receipt, sync_dir},
 };
@@ -58,6 +59,8 @@ impl Catalog {
             CREATE TABLE IF NOT EXISTS series_names (service TEXT NOT NULL, name TEXT NOT NULL, origin TEXT NOT NULL, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, PRIMARY KEY(service, name, origin));
             CREATE TABLE IF NOT EXISTS series_environments (service TEXT NOT NULL, name TEXT NOT NULL, environment TEXT NOT NULL, PRIMARY KEY(service, name, environment));
             CREATE TABLE IF NOT EXISTS series_definitions (id TEXT PRIMARY KEY, service TEXT NOT NULL, name TEXT NOT NULL, body TEXT NOT NULL, UNIQUE(service, name));
+            CREATE TABLE IF NOT EXISTS series_rollups (id TEXT PRIMARY KEY, day TEXT NOT NULL, resolution INTEGER NOT NULL, path TEXT NOT NULL, fingerprint TEXT NOT NULL, built_at INTEGER NOT NULL, state TEXT NOT NULL CHECK(state IN ('ready','deleting')));
+            CREATE UNIQUE INDEX IF NOT EXISTS series_rollups_ready ON series_rollups(day, resolution) WHERE state='ready';
             PRAGMA user_version=2;")?;
         sync_dir(path.parent().expect("catalog has a parent"))?;
         Ok(Self { connection })
@@ -110,6 +113,24 @@ impl Catalog {
                 Ok(meta)
             })
             .collect()
+    }
+
+    pub fn rollups(&self, state: &str) -> Result<Vec<RollupMeta>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id,day,resolution,path,fingerprint,built_at FROM series_rollups WHERE state=?1 ORDER BY day,resolution",
+        )?;
+        Ok(statement
+            .query_map([state], |row| {
+                Ok(RollupMeta {
+                    id: row.get(0)?,
+                    day: row.get(1)?,
+                    resolution: row.get(2)?,
+                    path: row.get(3)?,
+                    fingerprint: row.get(4)?,
+                    built_at: row.get(5)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?)
     }
 
     pub fn series_names(&self) -> Result<Vec<SeriesName>> {
@@ -295,6 +316,41 @@ impl Catalog {
     pub fn finish_deleting_series(&self, id: &str) -> Result<()> {
         self.connection.execute(
             "DELETE FROM series_files WHERE id=?1 AND state='deleting'",
+            [id],
+        )?;
+        Ok(())
+    }
+
+    /// Замена агрегатов одной транзакцией: старые строки становятся deleting, новая - ready.
+    /// Старые переводятся первыми: частичный индекс допускает одну ready строку на (day, resolution).
+    pub fn replace_rollups(&mut self, new: Option<&RollupMeta>, retired: &[String]) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        for id in retired {
+            transaction.execute(
+                "UPDATE series_rollups SET state='deleting' WHERE id=?1",
+                [id],
+            )?;
+        }
+        if let Some(meta) = new {
+            transaction.execute(
+                "INSERT INTO series_rollups VALUES(?1,?2,?3,?4,?5,?6,'ready')",
+                params![
+                    meta.id,
+                    meta.day,
+                    meta.resolution,
+                    meta.path,
+                    meta.fingerprint,
+                    meta.built_at
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn finish_deleting_rollup(&self, id: &str) -> Result<()> {
+        self.connection.execute(
+            "DELETE FROM series_rollups WHERE id=?1 AND state='deleting'",
             [id],
         )?;
         Ok(())
