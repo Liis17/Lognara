@@ -105,6 +105,10 @@ pub enum QueryError {
     Timeout,
     #[error("query capacity is exhausted")]
     Busy,
+    #[error("pattern index is not ready")]
+    NotReady,
+    #[error("pattern not found in range")]
+    NotFound,
     #[error("storage query failed")]
     Storage(#[from] anyhow::Error),
 }
@@ -157,6 +161,12 @@ impl PreparedFilter {
                     }
                     "trace_id" => normalize_hex(value, 16)?,
                     "span_id" | "parent_span_id" => normalize_hex(value, 8)?,
+                    "pattern_id" => {
+                        value.make_ascii_lowercase();
+                        if !crate::pattern_identity::valid_id(value) {
+                            return Err(QueryError::Invalid("invalid pattern_id".into()));
+                        }
+                    }
                     "level" => {
                         level(value).ok_or_else(|| QueryError::Invalid("unknown level".into()))?;
                     }

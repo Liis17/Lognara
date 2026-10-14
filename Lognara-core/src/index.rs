@@ -27,6 +27,7 @@ pub const EXACT_FIELDS: &[&str] = &[
     "span_id",
     "parent_span_id",
     "request_id",
+    "pattern_id",
 ];
 
 pub fn schema() -> Schema {
@@ -129,6 +130,13 @@ impl ActiveIndex {
             doc.add_text(field("parent_span_id"), hex::encode(id.0));
         }
         doc.add_text(field("message"), &row.event.message);
+        let identity = crate::pattern_identity::identify(
+            row.source.environment.as_deref(),
+            &row.source.service,
+            row.event.level.as_str(),
+            &row.event.message,
+        );
+        doc.add_text(field("pattern_id"), identity.id);
         self.writer.add_document(doc)?;
         Ok(())
     }

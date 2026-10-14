@@ -6,6 +6,7 @@ use crate::{
     index::{ActiveIndex, IndexCache},
     journal::Journal,
     model::{StoredEvent, now_nanos},
+    pattern_catalog::PatternCatalog,
     wal::{Position, failpoint, sync_dir},
     wire,
 };
@@ -55,7 +56,9 @@ pub struct Core {
     pub search_slots: Arc<Semaphore>,
     pub analytics_slots: Arc<Semaphore>,
     pub query_runtime: Arc<datafusion::execution::runtime_env::RuntimeEnv>,
+    pub patterns: PatternCatalog,
     worker: Mutex<Option<JoinHandle<Result<()>>>>,
+    pattern_worker: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Core {
@@ -87,7 +90,9 @@ impl Core {
             search_slots: Arc::new(Semaphore::new(4)),
             analytics_slots: Arc::new(Semaphore::new(2)),
             query_runtime,
+            patterns: PatternCatalog::new(),
             worker: Mutex::new(None),
+            pattern_worker: Mutex::new(None),
         });
         let mut worker = Materializer::recover(core.clone())?;
         while worker.next()? {}
@@ -101,6 +106,7 @@ impl Core {
             result
         })?;
         *core.worker.lock().unwrap() = Some(handle);
+        *core.pattern_worker.lock().unwrap() = Some(PatternCatalog::start(core.clone())?);
         Ok(core)
     }
 
@@ -110,6 +116,12 @@ impl Core {
 
     pub fn shutdown(&self) -> Result<()> {
         self.journal.stopping.store(true, Ordering::Release);
+        if let Some(handle) = self.pattern_worker.lock().unwrap().take() {
+            handle.thread().unpark();
+            handle
+                .join()
+                .map_err(|_| anyhow::anyhow!("pattern worker panicked"))?;
+        }
         let handle = self.worker.lock().unwrap().take();
         if let Some(handle) = handle {
             handle.thread().unpark();

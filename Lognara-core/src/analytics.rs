@@ -237,50 +237,10 @@ pub(crate) async fn frame(
     snapshot: &Snapshot,
     filter: &PreparedFilter,
 ) -> Result<DataFrame> {
-    let config = SessionConfig::new()
-        .with_target_partitions(2)
-        .with_batch_size(8192)
-        .with_collect_statistics(false)
-        .with_parquet_pruning(true);
-    let context = SessionContext::new_with_config_rt(config, core.query_runtime.clone());
-    let paths: Vec<_> = snapshot
-        .closed
-        .iter()
-        .filter(|segment| filter.overlaps(segment.meta.min_timestamp, segment.meta.max_timestamp))
-        .map(|segment| {
-            segment
-                .path
-                .join("logs.parquet")
-                .to_string_lossy()
-                .into_owned()
-        })
-        .collect();
-    let active = snapshot
-        .active
-        .as_ref()
-        .filter(|active| filter.overlaps(active.meta.min_timestamp, active.meta.max_timestamp));
-    let memory = active.map_or_else(
-        || vec![RecordBatch::new_empty(columns::schema())],
-        |active| active.batches.clone(),
-    );
-    let mut frame = context.read_table(Arc::new(MemTable::try_new(
-        columns::schema(),
-        vec![memory],
-    )?))?;
-    if !paths.is_empty() {
-        // Явная Arrow-схема сохраняет nullability/типы при union с MemTable.
-        let parquet = context
-            .read_parquet(
-                paths,
-                ParquetReadOptions::default().schema(&columns::schema()),
-            )
-            .await?;
-        frame = frame.union(parquet)?;
-    }
+    let frame = raw_frame(core, snapshot, Some(filter)).await?;
     let mut predicate = col("timestamp")
         .gt_eq(timestamp(filter.from))
-        .and(col("timestamp").lt(timestamp(filter.to)))
-        .and(col("sequence").lt_eq(lit(snapshot.watermark)));
+        .and(col("timestamp").lt(timestamp(filter.to)));
     for (field, values) in &filter.filters {
         let literals: Result<Vec<_>> = values
             .iter()
@@ -301,7 +261,66 @@ pub(crate) async fn frame(
                 })
             })
             .collect();
-        predicate = predicate.and(col(field).in_list(literals?, false));
+        let column = if field == "pattern_id" {
+            crate::patterns::id_expr()
+        } else {
+            col(field)
+        };
+        predicate = predicate.and(column.in_list(literals?, false));
     }
     Ok(frame.filter(predicate)?)
+}
+
+/// None deliberately reads the entire timestamp domain, including i64::MAX.
+pub(crate) async fn raw_frame(
+    core: &Core,
+    snapshot: &Snapshot,
+    filter: Option<&PreparedFilter>,
+) -> Result<DataFrame> {
+    let config = SessionConfig::new()
+        .with_target_partitions(2)
+        .with_batch_size(8192)
+        .with_collect_statistics(false)
+        .with_parquet_pruning(true);
+    let context = SessionContext::new_with_config_rt(config, core.query_runtime.clone());
+    let paths: Vec<_> = snapshot
+        .closed
+        .iter()
+        .filter(|segment| {
+            filter.is_none_or(|filter| {
+                filter.overlaps(segment.meta.min_timestamp, segment.meta.max_timestamp)
+            })
+        })
+        .map(|segment| {
+            segment
+                .path
+                .join("logs.parquet")
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    let active = snapshot.active.as_ref().filter(|active| {
+        filter.is_none_or(|filter| {
+            filter.overlaps(active.meta.min_timestamp, active.meta.max_timestamp)
+        })
+    });
+    let memory = active.map_or_else(
+        || vec![RecordBatch::new_empty(columns::schema())],
+        |active| active.batches.clone(),
+    );
+    let mut frame = context.read_table(Arc::new(MemTable::try_new(
+        columns::schema(),
+        vec![memory],
+    )?))?;
+    if !paths.is_empty() {
+        // Явная Arrow-схема сохраняет nullability/типы при union с MemTable.
+        let parquet = context
+            .read_parquet(
+                paths,
+                ParquetReadOptions::default().schema(&columns::schema()),
+            )
+            .await?;
+        frame = frame.union(parquet)?;
+    }
+    Ok(frame.filter(col("sequence").lt_eq(lit(snapshot.watermark)))?)
 }

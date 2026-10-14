@@ -20,6 +20,7 @@ use crate::{
     access::{Access, AccessError},
     analytics::{self, GroupRequest, HistogramRequest},
     journal::{IngestError, Journal},
+    patterns::{self, DetailsRequest, PatternRequest},
     query::{self, QueryError, SearchRequest},
     storage::Core,
     summary::{self, SummaryRequest},
@@ -33,6 +34,8 @@ pub fn router(core: Arc<Core>) -> Router {
         .route("/v1/stats/histogram", post(histogram))
         .route("/v1/stats/group-by", post(group_by))
         .route("/v1/stats/summary", post(summary))
+        .route("/v1/patterns/search", post(pattern_search))
+        .route("/v1/patterns/{pattern_id}/details", post(pattern_details))
         .route_layer(middleware::from_fn_with_state(
             token_hash(&core.journal.config.query_token),
             authorize,
@@ -69,6 +72,29 @@ async fn summary(
 ) -> Response {
     match request {
         Ok(Json(request)) => run_query(&core, summary::summary(core.clone(), request)).await,
+        Err(error) => QueryError::Invalid(error.body_text()).into_response(),
+    }
+}
+
+async fn pattern_search(
+    State(core): State<Arc<Core>>,
+    request: Result<Json<PatternRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    match request {
+        Ok(Json(request)) => run_analytics(&core, patterns::search(&core, request)).await,
+        Err(error) => QueryError::Invalid(error.body_text()).into_response(),
+    }
+}
+
+async fn pattern_details(
+    State(core): State<Arc<Core>>,
+    Path(pattern_id): Path<String>,
+    request: Result<Json<DetailsRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    match request {
+        Ok(Json(request)) => {
+            run_analytics(&core, patterns::details(&core, &pattern_id, request)).await
+        }
         Err(error) => QueryError::Invalid(error.body_text()).into_response(),
     }
 }
@@ -230,7 +256,8 @@ impl IntoResponse for QueryError {
             Self::Invalid(_) => StatusCode::BAD_REQUEST,
             Self::Gone => StatusCode::GONE,
             Self::Timeout => StatusCode::GATEWAY_TIMEOUT,
-            Self::Busy => StatusCode::SERVICE_UNAVAILABLE,
+            Self::Busy | Self::NotReady => StatusCode::SERVICE_UNAVAILABLE,
+            Self::NotFound => StatusCode::NOT_FOUND,
             Self::Storage(error) => {
                 tracing::error!(%error, "query failed");
                 StatusCode::SERVICE_UNAVAILABLE
