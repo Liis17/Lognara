@@ -2,6 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 import { api, ApiError, errorText } from "../api";
 import Histogram from "../components/Histogram";
+import Patterns from "../components/Patterns";
 import { appendHistory, contextBounds, eventBounds, eventsToCsv, LOG_LEVELS, matchesQuery, MAX_LIVE_ROWS,
   parseQuery, prependLive, sourceQuery } from "../logs";
 import type { ParsedQuery } from "../logs";
@@ -59,7 +60,7 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
     const range: Range = Object.hasOwn(RANGES, params.get("range") ?? "") ? params.get("range") as Range : "1h";
     const now = Date.now();
     return {
-      view: params.get("view") === "trace" ? "trace" as const : "events" as const,
+      view: params.get("view") === "trace" || params.get("view") === "patterns" ? params.get("view") as "trace" | "patterns" : "events" as const,
       q: params.get("q") ?? "", range,
       from: params.get("from") ?? new Date(now - RANGES[range]).toISOString(),
       to: params.get("to") ?? new Date(now).toISOString(),
@@ -162,8 +163,10 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
     const current = ++generation.current;
     const controller = new AbortController();
     pagingAbort.current?.abort();
-    setPage(emptyPage); setSummary(null); setSearchError(""); setExpired(false); setPaging(false); setLoading(!parsed.error);
-    if (!parsed.error) {
+    // Паттерны загружает отдельный компонент со своим серверным запросом.
+    const enabled = !parsed.error && location.view !== "patterns";
+    setPage(emptyPage); setSummary(null); setSearchError(""); setExpired(false); setPaging(false); setLoading(enabled);
+    if (enabled) {
       const request = location.view === "events" && !summaryUnavailable
         ? api<SummaryResponse>("POST", "/api/stats/summary", {
           from: location.from, to: location.to, ...parsed.query,
@@ -203,7 +206,7 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
     const controller = new AbortController();
     setSelectedEvent(null); setSelectionNote("");
     const selected = location.selected;
-    if (!selected || parsed.error || liveEnabled || loading || selectedIndex !== -1) {
+    if (!selected || parsed.error || liveEnabled || loading || selectedIndex !== -1 || location.view === "patterns") {
       return () => controller.abort();
     }
     setSelectionNote("Загружаем событие из ссылки…");
@@ -233,7 +236,7 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
   }, [location.selected, location.selectedTimestamp, location.occurrence, selectedIndex, queryKey, page.events, loading, liveEnabled, parsed.error]);
   useEffect(() => {
     pausedRef.current = false; setPaused(false); pending.current = []; setPendingCount(0); setLiveRows([]); setLiveNotice("");
-    if (location.view === "trace" || parsed.error) { setLiveEnabled(false); return; }
+    if (location.view !== "events" || parsed.error || parsed.query.filters.pattern_id) { setLiveEnabled(false); return; }
     if (!liveEnabled) return;
     const source = new EventSource("/api/logs/stream");
     const seen = new Set<string>();
@@ -348,7 +351,9 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
     <div className="filter-bar">
       <div className="segmented" role="group" aria-label="Вид логов">
         <button type="button" aria-pressed={location.view === "events"} onClick={() => updateLocation({ view: "events", selected: null })}>События</button>
-        <button type="button" disabled title="Паттерны сообщений: следующий этап">Паттерны</button>
+        <button type="button" aria-pressed={location.view === "patterns"} onClick={() => {
+          setLiveEnabled(false); updateLocation({ view: "patterns", trace_id: null, selected: null });
+        }}>Паттерны</button>
         <button type="button" aria-pressed={location.view === "trace"} onClick={() => {
           setLiveEnabled(false); updateLocation({ view: "trace", q: null, selected: null });
         }}>Trace</button>
@@ -367,10 +372,12 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
         {fixedRange && <option value="fixed" disabled>Точный диапазон</option>}
         <option value="1h">1 час</option><option value="24h">24 часа</option><option value="7d">7 дней</option>
       </select>
-      <button type="button" className="button" aria-pressed={liveEnabled} disabled={location.view === "trace" || !!parsed.error}
-        title={location.view === "trace" ? "Trace показывает историю связанных логов" : "Переключить отдельную ленту Live"}
+      <button type="button" className="button" aria-pressed={liveEnabled} disabled={location.view !== "events" || !!parsed.error || !!parsed.query.filters.pattern_id}
+        title={location.view === "trace" ? "Trace показывает историю связанных логов" :
+          location.view === "patterns" ? "Паттерны строятся по обработанной истории" :
+          parsed.query.filters.pattern_id ? "pattern_id вычисляет core: фильтр доступен только в истории" : "Переключить отдельную ленту Live"}
         onClick={() => setLiveEnabled((current) => !current)}>Live {liveEnabled ? "вкл" : "выкл"}</button>
-      <button type="button" className="button" aria-expanded={exportsOpen} disabled={!rows.length}
+      <button type="button" className="button" aria-expanded={exportsOpen} disabled={!rows.length || location.view === "patterns"}
         onClick={() => setExportsOpen((current) => !current)}>Экспорт</button>
     </div>
     {exportsOpen && <div className="export-menu panel"><span>Только загруженные строки: {rows.length}.</span>
@@ -379,10 +386,12 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
       <span className="muted">CSV экранирует формулы; JSON сохраняет исходные значения.</span>
     </div>}
     <details className="search-help"><summary>Синтаксис поиска</summary><p>
-      Точные поля: service, service_instance, environment, server, backend, action, level, id, trace_id, span_id, parent_span_id, request_id.
+      Точные поля: service, service_instance, environment, server, backend, action, level, id, trace_id, span_id, parent_span_id, request_id, pattern_id.
       AND соединяет поля, OR работает внутри одного поля: <code>level:(ERROR OR WARN)</code>.
       Слова ищутся все; <code>message:"connection refused"</code> или фраза в двойных кавычках ищутся подряд.
       NOT и OR между полями пока недоступны.</p></details>
+    {location.view === "patterns" ? <Patterns from={location.from} to={location.to} range={location.range} q={location.q}
+      query={parsed.query} error={parsed.error} intervalSeconds={intervalSeconds} revision={revision} onUnauthorized={onUnauthorized} /> : <>
     <div className="summary"><h1>{location.view === "trace" ? "Связанные логи Trace" : "События"}</h1>
       <div className="chips"><span className="chip">Загружено {rows.length}</span>
         {!liveEnabled && total !== undefined && <span className="chip">В диапазоне {total.toLocaleString("ru-RU")}</span>}
@@ -463,6 +472,6 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
         {page.next_cursor && <button type="button" className="button" disabled={paging || expired} onClick={loadMore}>{paging ? "Загрузка…" : "Загрузить ещё 50"}</button>}
         <button type="button" className="button" disabled={loading || paging || !!parsed.error} onClick={restart}>Обновить поиск</button>
       </div>}
-    </div>
+    </div></>}
   </section>;
 }

@@ -35,6 +35,14 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX passkeys_username ON passkeys(username);
 ",
+    "
+    CREATE TABLE hidden_patterns (
+        username TEXT NOT NULL,
+        pattern_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (username, pattern_id)
+    );
+",
 ];
 
 #[derive(Debug, thiserror::Error)]
@@ -52,6 +60,63 @@ pub struct Store {
 }
 
 impl Store {
+    pub async fn hidden_patterns(&self, username: String) -> Result<Vec<String>, StoreError> {
+        self.call(move |conn| {
+            let mut statement = conn.prepare(
+                "SELECT pattern_id FROM hidden_patterns WHERE username = ?1 ORDER BY pattern_id",
+            )?;
+            statement.query_map([username], |row| row.get(0))?.collect()
+        })
+        .await
+    }
+
+    /// Проверка лимита и запись атомарны; повторное скрытие остаётся успешным.
+    pub async fn hide_pattern(
+        &self,
+        username: String,
+        pattern_id: String,
+    ) -> Result<bool, StoreError> {
+        self.call(move |conn| {
+            let tx = conn.transaction()?;
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM hidden_patterns WHERE username = ?1 AND pattern_id = ?2)",
+                (&username, &pattern_id), |row| row.get(0),
+            )?;
+            if exists {
+                return Ok(true);
+            }
+            let count: i64 = tx.query_row(
+                "SELECT count(*) FROM hidden_patterns WHERE username = ?1",
+                [&username], |row| row.get(0),
+            )?;
+            if count >= 1000 {
+                return Ok(false);
+            }
+            tx.execute(
+                "INSERT INTO hidden_patterns(username, pattern_id, created_at) VALUES (?1, ?2, ?3)",
+                (&username, &pattern_id, now_ms()),
+            )?;
+            tx.commit()?;
+            Ok(true)
+        })
+        .await
+    }
+
+    pub async fn show_pattern(
+        &self,
+        username: String,
+        pattern_id: String,
+    ) -> Result<(), StoreError> {
+        self.call(move |conn| {
+            conn.execute(
+                "DELETE FROM hidden_patterns WHERE username = ?1 AND pattern_id = ?2",
+                (username, pattern_id),
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
     /// Создаёт каталог, берёт эксклюзивную блокировку и применяет миграции.
     pub fn open(dir: &Path) -> io::Result<Self> {
         fs::create_dir_all(dir)?;

@@ -72,3 +72,31 @@ export interface SummaryResponse {
   actions: { action: string | null; count: number; duration: Duration }[];
   page: SearchResponse | null;
 }
+
+export type PatternVariableType = "ip" | "uuid" | "id" | "duration" | "hex";
+export type PatternPart = { kind: "literal"; text: string } |
+  { kind: "variable"; name: string; variable_type: PatternVariableType };
+export type PatternSort = "count" | "growth" | "last_seen";
+export interface PatternRequest {
+  from: string; to: string; filters: QueryFilters; text?: TextQuery;
+  interval_seconds: number; limit?: number; sort?: PatternSort;
+}
+export interface MessagePattern {
+  pattern_id: string; environment: string | null; service: string; level: LogLevel;
+  template: string; parts: PatternPart[]; exact: boolean;
+  count: number; share: number; previous_count: number; growth_percent: number | null;
+  is_new: boolean | null; first_seen: string; last_seen: string;
+  buckets: HistogramBucket[];
+}
+export interface PatternResponse {
+  algorithm_version: 1; as_of: string; watermark: number; core_watermark: number;
+  history_from: string | null; history_complete: boolean;
+  total_events: number; total_patterns: number; visible_patterns: number; new_patterns: number | null;
+  patterns: MessagePattern[];
+}
+export interface PatternDetailsResponse {
+  as_of: string; pattern: MessagePattern;
+  variables: { name: string; variable_type: PatternVariableType; total: number;
+    values: { value: string; count: number }[]; other_count: number }[];
+  examples: LogEvent[];
+}

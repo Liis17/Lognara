@@ -11,6 +11,7 @@ use time::format_description::well_known::Rfc3339;
 use url::Url;
 
 use crate::config::Config;
+use crate::patterns::{DetailsRequest, DetailsResponse, PatternRequest, PatternResponse};
 use crate::query::{
     DurationStats, GroupRequest, GroupResponse, HistogramRequest, HistogramResponse, SearchRequest,
     SearchResponse, SummaryRequest, SummaryResponse, TraceParams,
@@ -32,6 +33,10 @@ pub enum CoreQueryError {
     Timeout,
     #[error("unexpected core response")]
     Unexpected,
+    #[error("pattern not found in range")]
+    NotFound,
+    #[error("pattern index is not ready")]
+    NotReady,
 }
 
 impl From<reqwest::Error> for CoreQueryError {
@@ -226,6 +231,48 @@ impl CoreClient {
         Ok(reply)
     }
 
+    /// Паттерны обработанного снимка; скрытые ID не должны вернуться в списке.
+    pub async fn patterns(
+        &self,
+        request: &PatternRequest,
+    ) -> Result<PatternResponse, CoreQueryError> {
+        let url = self
+            .query_url
+            .join("patterns/search")
+            .expect("core url joins path");
+        let reply: PatternResponse = self.query(self.http.post(url).json(request)).await?;
+        if !reply.valid(request.limit)
+            || reply
+                .patterns
+                .iter()
+                .any(|pattern| request.exclude_patterns.contains(&pattern.pattern_id))
+        {
+            return Err(CoreQueryError::Unexpected);
+        }
+        Ok(reply)
+    }
+
+    pub async fn pattern_details(
+        &self,
+        pattern_id: &str,
+        request: &DetailsRequest,
+    ) -> Result<DetailsResponse, CoreQueryError> {
+        let mut url = self
+            .query_url
+            .join("patterns/")
+            .expect("core url joins path");
+        url.path_segments_mut()
+            .expect("core url has path segments")
+            .pop_if_empty()
+            .push(pattern_id)
+            .push("details");
+        let reply: DetailsResponse = self.query(self.http.post(url).json(request)).await?;
+        if !reply.valid(pattern_id) {
+            return Err(CoreQueryError::Unexpected);
+        }
+        Ok(reply)
+    }
+
     /// Передаёт только типизированный успешный ответ и статическую классификацию ошибок.
     async fn query<T: DeserializeOwned>(
         &self,
@@ -240,7 +287,16 @@ impl CoreClient {
             StatusCode::OK => Ok(response.json().await?),
             StatusCode::BAD_REQUEST => Err(CoreQueryError::Invalid),
             StatusCode::GONE => Err(CoreQueryError::Gone),
-            StatusCode::SERVICE_UNAVAILABLE => Err(CoreQueryError::Unavailable),
+            StatusCode::NOT_FOUND => Err(CoreQueryError::NotFound),
+            StatusCode::SERVICE_UNAVAILABLE => {
+                // Только неготовый каталог паттернов отличается от общей недоступности.
+                let reply: Value = response.json().await.unwrap_or(Value::Null);
+                if reply["error"] == "pattern index is not ready" {
+                    Err(CoreQueryError::NotReady)
+                } else {
+                    Err(CoreQueryError::Unavailable)
+                }
+            }
             StatusCode::GATEWAY_TIMEOUT => Err(CoreQueryError::Timeout),
             _ => Err(CoreQueryError::Unexpected),
         }

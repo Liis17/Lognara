@@ -4,7 +4,7 @@ export const MAX_LIVE_ROWS = 2000;
 export const LOG_LEVELS = ["trace", "debug", "info", "warn", "error", "fatal", "unknown"] as const;
 const EXACT_FIELDS = new Set([
   "id", "environment", "server", "backend", "service", "service_instance", "action",
-  "trace_id", "span_id", "parent_span_id", "request_id", "level",
+  "trace_id", "span_id", "parent_span_id", "request_id", "level", "pattern_id",
 ]);
 
 export interface ParsedQuery {
@@ -121,6 +121,10 @@ export function parseQuery(query: string): ParsedQuery {
             const hex = value.replaceAll("-", "").toLowerCase();
             value = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
           }
+          if (field === "pattern_id") {
+            if (!/^p1_[a-f0-9]{64}$/iu.test(value)) throw new Error("Некорректный pattern_id: ожидается p1_ и 64 шестнадцатеричных символа.");
+            value = value.toLowerCase();
+          }
           if (["trace_id", "span_id", "parent_span_id"].includes(field)) {
             const length = field === "trace_id" ? 32 : 16;
             if (!new RegExp(`^[a-fA-F0-9]{${length}}$`).test(value)) throw new Error(`Некорректный ${field}.`);
@@ -222,4 +226,18 @@ export function eventsToCsv(events: LogEvent[]): string {
   };
   return "\uFEFF" + [CSV_FIELDS.map(cell).join(","), ...events.map((event) =>
     CSV_FIELDS.map((field) => cell(event[field])).join(","))].join("\r\n") + "\r\n";
+}
+
+/** Сохраняет смысл запроса и заменяет точный фильтр, включая OR-список старых ID. */
+export function withPatternFilter(query: string, patternId: string): string {
+  const parsed = parseQuery(query);
+  const validated = parseQuery(`pattern_id:${patternId}`).filters.pattern_id;
+  const filters = { ...parsed.filters, pattern_id: validated };
+  const clauses = Object.entries(filters).map(([field, values]) => values.length === 1
+    ? `${field}:${JSON.stringify(values[0])}`
+    : `${field}:(${values.map((value) => JSON.stringify(value)).join(" OR ")})`);
+  if (parsed.text) clauses.push(parsed.text.mode === "phrase"
+    ? `message:${JSON.stringify(parsed.text.query)}`
+    : parsed.text.query.split(/\s+/u).map((word) => `message:${word}`).join(" AND "));
+  return clauses.join(" AND ");
 }

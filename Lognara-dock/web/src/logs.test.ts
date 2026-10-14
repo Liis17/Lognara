@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { appendHistory, contextBounds, eventBounds, eventsToCsv, matchesQuery, parseQuery, prependLive, sourceQuery } from "./logs.ts";
+import { appendHistory, contextBounds, eventBounds, eventsToCsv, matchesQuery, parseQuery, prependLive, sourceQuery,
+  withPatternFilter } from "./logs.ts";
 import type { LogEvent } from "./types.ts";
 
 const event = (overrides: Partial<LogEvent> = {}): LogEvent => ({
@@ -129,4 +130,17 @@ test('event lookup bounds preserve nanoseconds, carry seconds and handle pre-epo
   assert.equal(eventBounds('2026-10-14T12:00:00.999999999Z').to, '2026-10-14T12:00:01.000000000Z');
   assert.equal(eventBounds('1969-12-31T23:59:59.123456789Z').to, '1969-12-31T23:59:59.123456790Z');
   assert.throws(() => eventBounds('bad-time'));
+});
+
+test("pattern_id is validated, lowercased and replaces only the pattern filter in event links", () => {
+  const id = `p1_${"ab".repeat(32)}`;
+  assert.deepEqual(parseQuery(`pattern_id:${id.toUpperCase().replace("P1_", "p1_")}`), { filters: { pattern_id: [id] } });
+  assert.throws(() => parseQuery("pattern_id:p1_123"), /pattern_id/);
+  const link = withPatternFilter(`service:"prod api" AND pattern_id:(p1_${"0".repeat(64)} OR p1_${"1".repeat(64)}) AND "connection refused"`, id);
+  assert.deepEqual(parseQuery(link), {
+    filters: { service: ["prod api"], pattern_id: [id] }, text: { query: "connection refused", mode: "phrase" },
+  });
+  assert.deepEqual(parseQuery(withPatternFilter("payment failed", id)), {
+    filters: { pattern_id: [id] }, text: { query: "payment failed", mode: "all" },
+  });
 });

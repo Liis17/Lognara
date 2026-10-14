@@ -275,6 +275,9 @@ impl From<CoreQueryError> for ApiError {
             CoreQueryError::Unavailable => Self::QueryUnavailable,
             CoreQueryError::Timeout => Self::QueryTimeout,
             CoreQueryError::Unexpected => Self::CoreUnavailable,
+            // Эти ответы ожидаются только от маршрутов паттернов, см. patterns::core_error.
+            CoreQueryError::NotFound => Self::CoreUnavailable,
+            CoreQueryError::NotReady => Self::QueryUnavailable,
         }
     }
 }

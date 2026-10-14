@@ -24,6 +24,7 @@ use crate::core_client::CoreClient;
 use crate::htpasswd::Htpasswd;
 use crate::live::{self, Live};
 use crate::passkey::{self, Challenges};
+use crate::patterns;
 use crate::query;
 use crate::session::{self, Sessions};
 use crate::store::{Store, StoreError};
@@ -82,6 +83,8 @@ pub enum ApiError {
     CursorExpired,
     QueryUnavailable,
     QueryTimeout,
+    PatternNotFound,
+    PatternsNotReady,
 }
 
 impl From<StoreError> for ApiError {
@@ -111,6 +114,8 @@ impl IntoResponse for ApiError {
             Self::CursorExpired => (StatusCode::GONE, "cursor_expired"),
             Self::QueryUnavailable => (StatusCode::SERVICE_UNAVAILABLE, "query_unavailable"),
             Self::QueryTimeout => (StatusCode::GATEWAY_TIMEOUT, "query_timeout"),
+            Self::PatternNotFound => (StatusCode::NOT_FOUND, "pattern_not_found"),
+            Self::PatternsNotReady => (StatusCode::SERVICE_UNAVAILABLE, "patterns_not_ready"),
         };
         (status, Json(json!({ "error": code }))).into_response()
     }
@@ -134,6 +139,13 @@ pub fn router(app: AppState) -> Router {
         .route("/stats/histogram", post(query::histogram))
         .route("/stats/group-by", post(query::group_by))
         .route("/stats/summary", post(query::summary))
+        .route("/patterns/search", post(patterns::search))
+        .route("/patterns/hidden", get(patterns::hidden))
+        .route("/patterns/{id}/details", post(patterns::details))
+        .route(
+            "/patterns/{id}/hide",
+            post(patterns::hide).delete(patterns::show),
+        )
         .route(
             "/relays",
             get(access::list_relays).post(access::create_relay),
