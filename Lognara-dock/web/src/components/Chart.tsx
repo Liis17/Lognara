@@ -6,7 +6,7 @@ import type { SeriesLine } from "../api";
 const HEIGHT = 320;
 
 /**
- * Восемь категориальных цветов по порядку: проверены валидатором на светлом фоне.
+ * Восемь категориальных цветов серий по порядку.
  * Серии сверх них получают нейтральный цвет, новые оттенки без проверки не добавляем.
  */
 const palette = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"];
@@ -24,6 +24,10 @@ export default function Chart({ buckets, series, unit }: Props) {
 
   useEffect(() => {
     const container = ref.current!;
+    const theme = getComputedStyle(container);
+    const ink = theme.getPropertyValue("--ink3").trim();
+    const line = theme.getPropertyValue("--line").trim();
+    const axis = { stroke: ink, grid: { stroke: line }, ticks: { stroke: line } };
     const data: uPlot.AlignedData = [
       buckets.map((bucket) => Date.parse(bucket) / 1000),
       ...series.map((line) => line.values),
@@ -40,7 +44,7 @@ export default function Chart({ buckets, series, unit }: Props) {
             width: 2,
           })),
         ],
-        axes: [{}, { values: (_, splits) => splits.map((value) => `${value} ${unit}`.trim()) }],
+        axes: [axis, { ...axis, values: (_, splits) => splits.map((value) => `${value} ${unit}`.trim()) }],
       },
       data,
       container,

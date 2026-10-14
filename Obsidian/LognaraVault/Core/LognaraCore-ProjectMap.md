@@ -13,17 +13,25 @@ Parent: [[Core/LognaraCore]]
 | journal, wal | Долговечный приём и дедупликация |
 | catalog | SQLite (user_version 2): сегменты, файлы точек, имена и окружения серий, агрегаты суток (`series_rollups`), определения метрик, receipts, checkpoint |
 | columns | Arrow/Parquet и физические строки; запись Parquet через `.tmp` для логов и серий |
-| storage | Материализация, точки метрик, снимки, seal, retention, слияние файлов метрик; запуск и остановка потока `lognara-rollups` |
+| storage | Материализация, точки метрик, снимки, seal, retention, слияние файлов метрик; запуск и остановка потоков `lognara-rollups` и каталога паттернов |
 | index | Индексация и ограниченный кеш читателей |
 | query | Проверка фильтров, top-k, чтение строк, HMAC-курсоры |
-| analytics | Типизированные агрегаты DataFusion, общий memory pool, предпросмотр правил |
+| analytics | Типизированные агрегаты DataFusion, общий memory pool, общий фильтр Arrow/Parquet и предпросмотр правил |
+| summary | Единый Snapshot, text-aware count/stacked histogram, p95 duration_ms/coverage, action groups и первая страница |
+| pattern_identity | Консервативная нормализация v1 и SHA-256 pattern_id |
+| pattern_catalog | Фоновый каталог `patterns.sqlite` v2: checkpoint, полнота истории, lifetime first/last паттернов и проблем |
+| patterns | API паттернов и деталей по сырым событиям, UDF `log_pattern_id`, общие окно и сканирование |
+| issue_identity | Fingerprint проблемы v1: exception.type и фреймы без позиций, fallback к pattern_id |
+| issues | API проблем, деталей и возвратов, UDF `log_issue_fingerprint` |
+| telemetry | Heartbeat DTO, проверка возрастов и перевод в часы core |
+| status | Версия/ready/WAL, размеры Parquet/индексов и filesystem data_dir |
+| tests | issues.rs: группировка, статусы вкладок, fingerprint в search/summary, рестарт, возвраты после checkpoint; patterns.rs: counts, прошлое окно, скрытие, pattern_id в search/summary, рестарт, поздние события и неполная история; access.rs: CRUD, изоляция и отзыв токенов; контракт, HTTP, WAL, Parquet, поиск, аналитика, retention, аварийные subprocess и настоящие agent/relay и восстановление всей цепочки после недоступности core |
 | series | Схема и запись Parquet точек метрик (`timestamp`, источник, `name`, `origin`, `rule_id`, `labels`, `value`, `event_id`) |
 | extract | Точки из `attributes.Metrics` версии 2 и из правил regex |
 | definitions | Определения метрик, валидация, `RuleSet`, `LabelGuard` (лимит меток) |
 | series_query | `GET /v1/series` и `POST /v1/series/query`: корзины, split, `environment`, приращения, план чтения по суткам (агрегат или точки), до 20 серий |
 | rollup | Суточные агрегаты точек: уровни по возрасту, отпечаток, фоновый поток `lognara-rollups`, ночная перепроверка, восстановление при старте |
 | metrics | Счётчики и gauges Prometheus, включая `lognara_core_series_*` |
-| tests | access.rs: CRUD, изоляция и отзыв токенов; контракт, HTTP, WAL, Parquet, поиск, аналитика, retention, аварийные subprocess и настоящие agent/relay и восстановление всей цепочки после недоступности core |
 | tests/series.rs | Точки из отчётов, сохранность файлов после рестарта, retention не трогает метрики, слияние дня, состояния незавершённого слияния (файлы и каталог) |
 | tests/crashes.rs | Subprocess с feature `crash-tests`: точки `series_after_parquet` и `series_compact_*` в списке аварийных точек; тест агрегатов с `rollup_after_parquet` и `rollup_after_mark` |
 | tests/series_query.rs | Повтор одного отчёта, суммы по экземплярам, cumulative, gauge, открытый сегмент, список, окружение (фильтр и список), ошибки запросов, токен; план чтения по суткам: агрегаты, смешанные окна, устаревший агрегат, открытые точки суток |

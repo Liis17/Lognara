@@ -10,6 +10,11 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+use crate::{
+    model::now_nanos,
+    telemetry::{RelayHeartbeat, before},
+};
+
 #[derive(Debug, thiserror::Error)]
 pub enum AccessError {
     #[error("invalid_name")]
@@ -39,6 +44,9 @@ pub struct Relay {
     pub id: i64,
     pub name: String,
     pub created_at: String,
+    /// Последний heartbeat; поле отсутствует, пока heartbeat не приходил.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub heartbeat: Option<serde_json::Value>,
 }
 #[derive(Clone, Serialize)]
 pub struct Agent {
@@ -46,6 +54,8 @@ pub struct Agent {
     pub name: String,
     pub relay_id: i64,
     pub created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub heartbeat: Option<serde_json::Value>,
 }
 #[derive(Serialize)]
 pub struct CreatedRelay {
@@ -72,6 +82,7 @@ impl Access {
         connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;
             CREATE TABLE IF NOT EXISTS relays(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, token_hash BLOB NOT NULL UNIQUE, created_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS agents(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, relay_id INTEGER NOT NULL REFERENCES relays(id), token_hash BLOB NOT NULL UNIQUE, created_at TEXT NOT NULL, UNIQUE(relay_id,name));
+            CREATE TABLE IF NOT EXISTS heartbeats(kind TEXT NOT NULL CHECK(kind IN ('relay','agent')), node_id INTEGER NOT NULL, received_at INTEGER NOT NULL, telemetry TEXT NOT NULL, PRIMARY KEY(kind,node_id));
             PRAGMA user_version=1;")?;
         crate::wal::sync_dir(path.parent().expect("access has a parent"))?;
         let access = Self {
@@ -114,6 +125,7 @@ impl Access {
             id: connection.last_insert_rowid(),
             name,
             created_at,
+            heartbeat: None,
         };
         self.reload_relays(&connection)?;
         Ok(CreatedRelay { relay, token })
@@ -152,6 +164,7 @@ impl Access {
             name,
             relay_id,
             created_at,
+            heartbeat: None,
         };
         self.reload_relays(&connection)?;
         Ok(CreatedAgent { agent, token })
@@ -159,14 +172,17 @@ impl Access {
 
     pub fn list_relays(&self) -> Result<Vec<Relay>> {
         let connection = self.connection.lock().unwrap();
-        let mut statement =
-            connection.prepare("SELECT id,name,created_at FROM relays ORDER BY id")?;
+        let mut statement = connection.prepare(
+            "SELECT id,name,created_at,telemetry FROM relays
+             LEFT JOIN heartbeats ON kind='relay' AND node_id=id ORDER BY id",
+        )?;
         Ok(statement
             .query_map([], |row| {
                 Ok(Relay {
                     id: row.get(0)?,
                     name: row.get(1)?,
                     created_at: row.get(2)?,
+                    heartbeat: telemetry(row.get(3)?),
                 })
             })?
             .collect::<std::result::Result<_, _>>()?)
@@ -174,8 +190,10 @@ impl Access {
 
     pub fn list_agents(&self) -> Result<Vec<Agent>> {
         let connection = self.connection.lock().unwrap();
-        let mut statement =
-            connection.prepare("SELECT id,name,relay_id,created_at FROM agents ORDER BY id")?;
+        let mut statement = connection.prepare(
+            "SELECT id,name,relay_id,created_at,telemetry FROM agents
+             LEFT JOIN heartbeats ON kind='agent' AND node_id=id ORDER BY id",
+        )?;
         Ok(statement
             .query_map([], |row| {
                 Ok(Agent {
@@ -183,6 +201,7 @@ impl Access {
                     name: row.get(1)?,
                     relay_id: row.get(2)?,
                     created_at: row.get(3)?,
+                    heartbeat: telemetry(row.get(4)?),
                 })
             })?
             .collect::<std::result::Result<_, _>>()?)
@@ -204,6 +223,10 @@ impl Access {
         if connection.execute("DELETE FROM relays WHERE id=?1", [id])? == 0 {
             return Err(AccessError::NotFound);
         }
+        connection.execute(
+            "DELETE FROM heartbeats WHERE kind='relay' AND node_id=?1",
+            [id],
+        )?;
         self.reload_relays(&connection)
     }
 
@@ -212,6 +235,10 @@ impl Access {
         if connection.execute("DELETE FROM agents WHERE id=?1", [id])? == 0 {
             return Err(AccessError::NotFound);
         }
+        connection.execute(
+            "DELETE FROM heartbeats WHERE kind='agent' AND node_id=?1",
+            [id],
+        )?;
         self.reload_relays(&connection)
     }
 
@@ -228,6 +255,53 @@ impl Access {
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(hashes.into_iter().map(hex::encode).collect())
     }
+}
+
+impl Access {
+    /// Сохраняет heartbeat relay и его агентов одной транзакцией. Агент учитывается, только
+    /// если хеш его токена зарегистрирован за этим relay; чужие и отозванные пропускаются.
+    /// Более старый heartbeat не заменяет новый. Возвращает число принятых агентов.
+    pub fn record_heartbeat(&self, relay_id: i64, heartbeat: RelayHeartbeat) -> Result<usize> {
+        let now = now_nanos();
+        let mut connection = self.connection.lock().unwrap();
+        let transaction = connection.transaction()?;
+        let upsert = |kind: &str, id: i64, received_at: i64, state: String| {
+            transaction.execute(
+                "INSERT INTO heartbeats VALUES(?1,?2,?3,?4) ON CONFLICT(kind,node_id) DO UPDATE
+                 SET received_at=excluded.received_at, telemetry=excluded.telemetry
+                 WHERE excluded.received_at>=heartbeats.received_at",
+                params![kind, id, received_at, state],
+            )
+        };
+        let state =
+            serde_json::to_string(&heartbeat.relay.state(now)).map_err(anyhow::Error::from)?;
+        upsert("relay", relay_id, now, state)?;
+        let mut accepted = 0;
+        for agent in heartbeat.agents {
+            let Some(hash) = agent.hash() else { continue };
+            let Some(id) = transaction
+                .query_row(
+                    "SELECT id FROM agents WHERE relay_id=?1 AND token_hash=?2",
+                    params![relay_id, hash.as_slice()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?
+            else {
+                continue;
+            };
+            let received_at = before(now, agent.heartbeat_ms_ago);
+            let state = serde_json::to_string(&agent.telemetry.state(received_at))
+                .map_err(anyhow::Error::from)?;
+            upsert("agent", id, received_at, state)?;
+            accepted += 1;
+        }
+        transaction.commit()?;
+        Ok(accepted)
+    }
+}
+
+fn telemetry(json: Option<String>) -> Option<serde_json::Value> {
+    serde_json::from_str(&json?).ok()
 }
 
 fn valid_name(name: &str) -> Result<String> {

@@ -11,12 +11,18 @@ export class ApiError extends Error {
   }
 }
 
-export async function api<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
+export async function api<T = unknown>(
+  method: string,
+  path: string,
+  body?: unknown,
+  options?: { signal?: AbortSignal },
+): Promise<T> {
   const response = await fetch(path, {
     method,
     credentials: "same-origin",
     headers: body === undefined ? {} : { "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
+    signal: options?.signal,
   });
   const text = await response.text();
   const data = text ? JSON.parse(text) : null;
@@ -144,6 +150,16 @@ const messages: Record<string, string> = {
   relay_not_found: "Relay не найден, обновите страницу",
   not_found: "Запись не найдена, обновите страницу",
   core_unavailable: "Core недоступен или ответил ошибкой",
+  invalid_query: "Проверьте запрос и диапазон времени",
+  cursor_expired: "Результаты поиска устарели. Выполните запрос заново",
+  query_unavailable: "Поиск временно недоступен. Попробуйте ещё раз",
+  pattern_limit: "Можно скрыть не больше 1000 паттернов. Покажите один из скрытых и повторите действие",
+  pattern_not_found: "Паттерн не найден в выбранном диапазоне",
+  patterns_not_ready: "Индекс паттернов ещё обрабатывает историю. Повторите запрос через несколько секунд",
+  issue_limit: "Достигнут предел 10 000 проблем со статусом",
+  issue_not_found: "Проблема не найдена: история индекса не содержит этот fingerprint",
+  issues_not_ready: "Индекс проблем ещё обрабатывает историю. Повторите запрос через несколько секунд",
+  query_timeout: "Запрос выполняется слишком долго. Уменьшите диапазон времени",
   challenge_expired: "Время подтверждения истекло, попробуйте снова",
   passkey_rejected: "Ключ не принят",
   passkey_exists: "Этот ключ уже добавлен",

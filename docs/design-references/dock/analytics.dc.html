@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Lognara Dock — Аналитика</title>
+<script src="./vendor/react.js"></script>
+<script src="./vendor/react-dom.js"></script>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Commissioner:wght@400;500;600;700&amp;family=IBM+Plex+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0;background:#151311}
+.f{--bg:#151311;--panel:#1C1916;--raised:#25211D;--line:#2F2A25;--ink:#EEE7DD;--ink2:#BDB3A6;--ink3:#9C9184;--accent:#A9B8FF;--accent-ink:#141A3A;--err:#F2806F;--warn:#E8B65A;--info:#8FB0D8;--dbg:#6E655B;
+box-sizing:border-box;width:100%;min-height:900px;background:var(--bg);color:var(--ink);font:400 13px/1.5 Commissioner,system-ui,sans-serif;display:flex;flex-direction:column}
+.top{display:flex;align-items:center;gap:22px;padding:14px 26px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.brand{font:700 16px Commissioner,sans-serif;letter-spacing:-.01em}
+.brand span{color:var(--accent)}
+.top nav{display:flex;gap:4px;flex-wrap:wrap}
+.top nav a{color:var(--ink3);text-decoration:none;padding:6px 10px;border-radius:999px;font-weight:500}
+.top nav a[aria-current="page"]{color:var(--ink);background:var(--raised)}
+.me{margin-left:auto;color:var(--ink3);font-size:12px}
+.wrap{padding:20px 26px;display:flex;flex-direction:column;gap:16px;min-width:0;flex:1}
+.bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.mode{display:inline-flex;background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:3px}
+.mode button{font:600 12.5px Commissioner,sans-serif;background:none;border:0;color:var(--ink3);padding:6px 14px;border-radius:999px;cursor:pointer}
+.mode button[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink)}
+.btn{font:600 12.5px Commissioner,sans-serif;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:10px;padding:8px 12px;cursor:pointer;white-space:nowrap}
+.btn[aria-pressed="true"]{border-color:var(--accent);color:var(--accent)}
+.btn:focus-visible,.mode button:focus-visible,.top nav a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.kpi{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px 16px;display:flex;flex-direction:column;gap:4px;min-width:0}
+.kpi .l{font:600 11px Commissioner,sans-serif;letter-spacing:.07em;text-transform:uppercase;color:var(--ink3)}
+.kpi .v{font:600 26px/1.15 Commissioner,sans-serif;letter-spacing:-.015em;font-variant-numeric:tabular-nums}
+.kpi .d{font:400 12px "IBM Plex Mono",monospace;color:var(--ink2)}
+.kpi .d b{font-weight:500}
+.up{color:var(--err)}.down{color:var(--accent)}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px 16px;display:flex;flex-direction:column;gap:12px;min-width:0}
+.card h2{font:600 13px Commissioner,sans-serif;margin:0;display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.card h2 small{font:400 12px Commissioner,sans-serif;color:var(--ink3)}
+.legend{display:flex;gap:14px;font-size:12px;color:var(--ink2);flex-wrap:wrap}
+.legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:6px}
+.legend .dash{width:16px;height:0;border-top:2px dashed var(--ink2);border-radius:0;vertical-align:3px}
+.vol{position:relative;height:180px;display:flex;align-items:flex-end;gap:8px;border-bottom:1px solid var(--line);background-image:linear-gradient(var(--line) 1px,transparent 1px);background-size:100% 25%}
+.vol .c{flex:1 1 0;display:flex;flex-direction:column-reverse;height:100%;min-width:0;position:relative;z-index:1}
+.vol .c i{display:block;width:100%;border-top:2px solid var(--panel)}
+.vol .c i:last-child{border-radius:3px 3px 0 0}
+.vol svg{position:absolute;inset:0;width:100%;height:100%;z-index:2;pointer-events:none}
+.axis{display:flex;justify-content:space-between;font:400 11px "IBM Plex Mono",monospace;color:var(--ink3)}
+.grid3{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) minmax(0,1.25fr);gap:12px}
+.stack{display:flex;height:14px;border-radius:4px;overflow:hidden;gap:2px}
+.stack i{display:block;height:100%}
+.lv-list{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:6px 12px;font:400 12.5px "IBM Plex Mono",monospace;color:var(--ink2);align-items:center}
+.lv-list i{width:9px;height:9px;border-radius:2px;display:block}
+.lv-list b{font-weight:500;color:var(--ink);text-align:right}
+.hbar{display:grid;grid-template-columns:minmax(0,96px) minmax(0,1fr) 52px;gap:10px;align-items:center;font:400 12px "IBM Plex Mono",monospace;color:var(--ink2)}
+.hbar .tr{height:8px;background:var(--bg);border-radius:4px;overflow:hidden}
+.hbar .tr i{display:block;height:100%;background:var(--err);border-radius:0 4px 4px 0}
+.hbar em{font-style:normal;text-align:right;color:var(--ink)}
+table{width:100%;border-collapse:collapse}
+th{font:600 11px Commissioner,sans-serif;letter-spacing:.07em;text-transform:uppercase;color:var(--ink3);text-align:left;padding:6px 8px;border-bottom:1px solid var(--line)}
+td{padding:8px;border-bottom:1px solid var(--line);font:400 12px "IBM Plex Mono",monospace;color:var(--ink)}
+tr:last-child td{border-bottom:0}
+td.n{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+td.hot{color:var(--err)}
+@media (max-width:1100px){.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.grid3{grid-template-columns:1fr}}
+</style>
+</helmet>
+
+<div class="f">
+  <header class="top">
+    <div class="brand">lognara<span>/</span>dock</div>
+    <nav aria-label="Разделы">
+      <a href="#">Логи</a>
+      <a href="#">Ошибки</a>
+      <a href="#" aria-current="page">Аналитика</a>
+      <a href="#">Алерты</a>
+      <a href="#">Инфраструктура</a>
+    </nav>
+    <span class="me">admin</span>
+  </header>
+
+  <div class="wrap">
+    <div class="bar">
+      <div class="mode" role="group" aria-label="Период">
+        <button type="button" aria-pressed="false">1 час</button>
+        <button type="button" aria-pressed="true">24 часа</button>
+        <button type="button" aria-pressed="false">7 дней</button>
+      </div>
+      <button class="btn" type="button">Все сервисы ▾</button>
+      <button class="btn" type="button" aria-pressed="true">Сравнить с прошлыми 24 ч</button>
+      <span style="color:var(--ink3);margin-left:auto">пример данных</span>
+    </div>
+
+    <section class="kpis" aria-label="Показатели">
+      <div class="kpi"><span class="l">Событий в минуту</span><span class="v">1 240</span><span class="d"><b class="up">+12%</b> к прошлым 24 ч</span></div>
+      <div class="kpi"><span class="l">Доля ERROR</span><span class="v">0,8%</span><span class="d"><b class="down">−0,2 п.п.</b> к прошлым 24 ч</span></div>
+      <div class="kpi"><span class="l">p95 duration_ms</span><span class="v">412 мс</span><span class="d"><b class="up">+38 мс</b> · charge.create</span></div>
+      <div class="kpi"><span class="l">Паттернов</span><span class="v">184</span><span class="d"><b class="up">5 новых</b> за сутки</span></div>
+    </section>
+
+    <section class="card" aria-label="Объём событий">
+      <h2>Объём событий <small>шаг 2 часа</small></h2>
+      <div class="legend">
+        <span><i style="background:#8FB0D8"></i>INFO</span>
+        <span><i style="background:#E8B65A"></i>WARN</span>
+        <span><i style="background:#F2806F"></i>ERROR</span>
+        <span><i class="dash"></i>все события, прошлые 24 ч</span>
+      </div>
+      <div class="vol" role="img" aria-label="Объём по уровням за 24 часа, пик днём, выше прошлого периода с 12 до 16 часов">
+        <div class="c"><i style="height:44%;background:#8FB0D8"></i><i style="height:4%;background:#E8B65A"></i><i style="height:1%;background:#F2806F"></i></div>
+        <div class="c"><i style="height:36%;background:#8FB0D8"></i><i style="height:3%;background:#E8B65A"></i><i style="height:1%;background:#F2806F"></i></div>
+        <div class="c"><i style="height:32%;background:#8FB0D8"></i><i style="height:3%;background:#E8B65A"></i><i style="height:1%;background:#F2806F"></i></div>
+        <div class="c"><i style="height:40%;background:#8FB0D8"></i><i style="height:5%;background:#E8B65A"></i><i style="height:2%;background:#F2806F"></i></div>
+        <div class="c"><i style="height:58%;background:#8FB0D8"></i><i style="height:7%;background:#E8B65A"></i><i style="height:3%;background:#F2806F"></i></div>
+        <div class="c"><i style="height:72%;background:#8FB0D8"></i><i style="height:9%;background:#E8B65A"></i><i style="height:5%;background:#F2806F"></i></div>
+        <div class="c"><i style="height:78%;background:#8FB0D8"></i><i style="height:10%;background:#E8B65A"></i><i style="height:9%;background:#F2806F"></i></div>
+        <div class="c"><i style="height:80%;background:#8FB0D8"></i><i style="height:11%;background:#E8B65A"></i><i style="height:13%;background:#F2806F"></i></div>
+        <div class="c"><i style="height:68%;background:#8FB0D8"></i><i style="height:8%;background:#E8B65A"></i><i style="height:7%;background:#F2806F"></i></div>
+        <div class="c"><i style="height:60%;background:#8FB0D8"></i><i style="height:7%;background:#E8B65A"></i><i style="height:5%;background:#F2806F"></i></div>
+        <div class="c"><i style="height:50%;background:#8FB0D8"></i><i style="height:5%;background:#E8B65A"></i><i style="height:3%;background:#F2806F"></i></div>
+        <div class="c"><i style="height:46%;background:#8FB0D8"></i><i style="height:5%;background:#E8B65A"></i><i style="height:2%;background:#F2806F"></i></div>
+        <svg viewBox="0 0 1200 180" preserveAspectRatio="none" aria-hidden="true"><polyline points="50,95 150,106 250,113 350,103 450,79 550,59 650,56 750,58 850,67 950,79 1050,95 1150,103" fill="none" stroke="#BDB3A6" stroke-width="2" stroke-dasharray="6 6" vector-effect="non-scaling-stroke"></polyline></svg>
+      </div>
+      <div class="axis"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span></div>
+    </section>
+
+    <section class="grid3">
+      <div class="card">
+        <h2>Уровни <small>доля событий</small></h2>
+        <div class="stack" role="img" aria-label="INFO 88,4%, WARN 6,7%, DEBUG 4,1%, ERROR 0,8%">
+          <i style="width:88.4%;background:#8FB0D8"></i><i style="width:6.7%;background:#E8B65A"></i><i style="width:4.1%;background:#6E655B"></i><i style="width:0.8%;background:#F2806F"></i>
+        </div>
+        <div class="lv-list">
+          <i style="background:#8FB0D8"></i><span>INFO</span><b>88,4%</b>
+          <i style="background:#E8B65A"></i><span>WARN</span><b>6,7%</b>
+          <i style="background:#6E655B"></i><span>DEBUG</span><b>4,1%</b>
+          <i style="background:#F2806F"></i><span>ERROR</span><b>0,8%</b>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Сервисы по ERROR <small>24 ч</small></h2>
+        <div class="hbar"><span>billing</span><span class="tr"><i style="width:100%"></i></span><em>9 730</em></div>
+        <div class="hbar"><span>auth</span><span class="tr"><i style="width:12%"></i></span><em>1 209</em></div>
+        <div class="hbar"><span>api-gateway</span><span class="tr"><i style="width:4%"></i></span><em>388</em></div>
+        <div class="hbar"><span>worker-mail</span><span class="tr"><i style="width:1%"></i></span><em>91</em></div>
+        <div class="hbar"><span>search</span><span class="tr"><i style="width:0.5%"></i></span><em>12</em></div>
+      </div>
+
+      <div class="card">
+        <h2>Действия <small>по p95</small></h2>
+        <table>
+          <thead><tr><th scope="col">action</th><th scope="col" style="text-align:right">Вызовов</th><th scope="col" style="text-align:right">p95, мс</th></tr></thead>
+          <tbody>
+            <tr><td>invoice.sync</td><td class="n">9 204</td><td class="n hot">1 980</td></tr>
+            <tr><td>charge.create</td><td class="n">31 870</td><td class="n hot">412</td></tr>
+            <tr><td>token.verify</td><td class="n">7 652</td><td class="n">23</td></tr>
+            <tr><td>route.match</td><td class="n">188 540</td><td class="n">11</td></tr>
+            <tr><td>health.check</td><td class="n">402 110</td><td class="n">4</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+</div>
+</x-dc>
+
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1280,"height":900}}'>
+class Component extends DCLogic {
+renderVals() {
+return {};
+}
+}
+</script>
+</body>
+</html>

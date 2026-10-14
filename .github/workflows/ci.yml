@@ -80,6 +80,12 @@ jobs:
         run: npm ci
       - name: Check TypeScript and build
         run: npm run build
+      - name: Query and export unit tests
+        run: npm test
+      - name: Install Chromium for browser tests
+        run: npx playwright install --with-deps chromium
+      - name: Browser interaction tests
+        run: npm run test:e2e
 
   ci:
     name: CI passed

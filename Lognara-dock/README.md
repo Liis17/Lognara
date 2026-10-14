@@ -1,6 +1,6 @@
 # lognara-dock
 
-Веб-интерфейс Lognara. Отдаёт React-приложение, проверяет вход по htpasswd или passkey и показывает логи core в реальном времени. Работает за nginx, который завершает TLS.
+Веб-интерфейс Lognara. Отдаёт React-приложение, проверяет вход по htpasswd/passkey, показывает историю логов, связанные логи Trace, отдельный Live и базовую аналитику core. Работает за nginx, который завершает TLS.
 
 Самостоятельный crate, Rust 2024, минимальный Rust 1.94. Фронтенд находится в `web/` (React, TypeScript, Vite).
 
@@ -39,11 +39,21 @@ docker run --rm httpd:2.4 htpasswd -Bbn liis 'пароль' >> auth/htpasswd
 
 ## Логи в реальном времени
 
+Страница `/logs` открывает исторический поиск: строка запроса, период, 50 событий на страницу и «Загрузить ещё». Поддерживаются точные поля (`service`, `level`, source/trace/request IDs), AND между условиями, OR внутри значений одного поля и text all/phrase. Пример: `service:billing AND level:(ERROR OR WARN)`. Запрос, from/to и выделенное событие сохраняются в URL. Раскрытие строки показывает поля/JSON, контекст источника ±5 минут, связанные логи Trace и ссылку. Экспорт JSON/CSV выгружает только уже загруженные строки; CSV экранирует формулы, JSON сохраняет значения.
+
+Live включается отдельной кнопкой. История сохраняет порядок core и повторяющиеся id; Live использует прежнюю дедупликацию по id и ограниченный буфер. Trace показывает связанные события по времени ASC, без выдуманных spans/длительностей.
+
 Один общий опрос на процесс работает, пока открыта хотя бы одна страница логов. Раз в `LOGNARA_DOCK_LIVE_POLL_MS` dock запрашивает `POST /v1/logs/search` за окно `[now - LOOKBACK, now + 60s)` с `limit=1000` и отправляет в браузер только новые id через SSE (`GET /api/logs/stream`). Новый подписчик сначала получает до 200 последних событий. Браузер держит последние 2000 строк.
 
 Окно назад нужно, потому что relay по умолчанию отправляет пачки раз в 60 секунд. Событие, которое пришло позже окна, в ленту не попадёт.
 
 **Ограничение.** Core ищет только по времени события. Если за один опрос в окне появилось больше 1000 новых событий, лента покажет самые свежие 1000. Полное решение требует tail-endpoint в core по порядку публикации.
+
+## Базовая аналитика
+
+`/analytics`: периоды 1 час/24 часа/7 дней, сервис, общий count, средняя частота за окно, доля ERROR, все семь уровней и до 5 сервисов по ERROR. Сравнение использует предыдущее окно той же длины. Выбор корзины, уровня или сервиса открывает соответствующие логи. Список сервисов ограничен 100 активными значениями; каждый блок показывает свой `as_of`, снимки независимы.
+
+Текущая аналитика core не принимает текст поиска: `/logs` для text-запроса показывает только загруженные строки и объясняет недоступность общего count/гистограммы. P95, паттерны, проблемы, инфраструктурная телеметрия, алерты Telegram/Discord и spans относятся к следующим этапам [плана](../docs/DockDesignIntegrationPlan.md).
 
 ## Подключения relay и агентов
 
@@ -110,7 +120,13 @@ docker compose up -d
 | `POST /api/account/passkeys/start` | сессия | `{name, password}`, начать регистрацию |
 | `POST /api/account/passkeys/finish` | сессия | завершить регистрацию |
 | `DELETE /api/account/passkeys/{id}` | сессия | `{password}`, удалить ключ |
+| `GET /api/infrastructure` | сессия | core/dock/узлы/storage, freshness и пороги; частичные ошибки явны |
 | `GET /api/logs/stream` | сессия | SSE: `logs`, `core_error`, `core_ok`, `lagged` |
+| `POST /api/logs/search` | сессия + Origin | история: from/to, filters, text, limit, cursor; ответ events/next_cursor/as_of |
+| `GET /api/traces/{trace_id}` | сессия | связанные логи ASC; from/to/limit/cursor в query |
+| `POST /api/stats/histogram` | сессия + Origin | from/to/filters/interval_seconds; buckets count и as_of |
+| `POST /api/stats/group-by` | сессия + Origin | from/to/filters/group_by/limit; groups count и as_of |
+| `POST /api/stats/summary` | сессия + Origin | from/to/filters/text/interval_seconds/search_limit; согласованные total/buckets/levels/error_services/duration/actions/page/as_of |
 | `GET /api/series` | сессия | список метрик core (`GET /v1/series`) |
 | `POST /api/series/query` | сессия | значения серии по корзинам (`POST /v1/series/query`), таймаут 35 с |
 | `GET`, `POST /api/series/definitions` | сессия, admin | список и создание определений |
@@ -122,6 +138,16 @@ docker compose up -d
 
 Ошибки возвращаются как JSON `{"error": "<код>"}`: `unauthorized`, `forbidden`, `too_many_attempts`, `invalid_current_password`, `password_too_short`, `password_too_long`, `invalid_name`, `challenge_expired`, `passkey_rejected`, `passkey_exists`, `not_found`. Для метрик добавлены `core_unavailable` (502: core недоступен, не ответил вовремя или вернул 5xx) и `invalid` (400: ответ содержит `detail` с причиной от core).
 
+Страница событий получает первую страницу, общий подсчёт и stacked-график одним summary, включая текстовые фильтры. Аналитика использует одну сводку на окно, показывает приблизительный p95 `duration_ms`, покрытие измерений и до 20 action-групп по числу событий. Прошлое окно получает отдельную сводку. [Контракт summary](../docs/DockSummaryContract.md).
+
+Query API сохраняет безопасную классификацию ошибок: `invalid_request`/`invalid_query` (400), `cursor_expired` (410), `query_unavailable` (503), `query_timeout` (504); недоступный/неожиданный core — `core_unavailable` (502). Query timeout 35 секунд, Live/admin 10 секунд. Все ответы `/api/*` имеют `Cache-Control: no-store`.
+
+## Инфраструктура
+
+`/infrastructure` показывает цепочку, зарегистрированные relay/агенты, heartbeat/версию/spool/последнее событие, lag публикации и WAL core, SSE/сессии Dock и текущее место на filesystem core. `GET /api/infrastructure` требует сессию, no-store; query/admin секреты остаются в Dock. Опрос через 10 секунд после завершения предыдущего запроса; ошибка сохраняет явно устаревший снимок.
+
+У agent/relay `LOGNARA_HEARTBEAT_INTERVAL_MS` default 10000, диапазон 1..30000 мс. TTL 60 с, idle 300 с, spool degraded от 80%; до первого heartbeat «Нет данных», молчащий relay не доказывает отключение агента. История, per-node dropped, p95 доставки и прогноз диска не реализованы; source-ссылки строят фильтр по конфигурации, не проверяют agent_id событий. [Полный контракт](../docs/DockInfrastructureContract.md).
+
 ## Разработка
 
 ```sh
@@ -130,6 +156,9 @@ cargo fmt    --manifest-path Lognara-dock/Cargo.toml --check
 cargo clippy --manifest-path Lognara-dock/Cargo.toml --all-targets -- -D warnings
 
 cd Lognara-dock/web && npm ci && npm run build
+npm test
+npx playwright install chromium
+npm run test:e2e
 ```
 
 Для сборки на хосте нужен OpenSSL (зависимость webauthn-rs). Тесты поднимают поддельный core и проходят полную церемонию passkey с программным аутентификатором.

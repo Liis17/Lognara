@@ -27,3 +27,5 @@ default.profraw
 # Фронтенд lognara-dock
 node_modules/
 /Lognara-dock/web/dist/
+/Lognara-dock/web/test-results/
+/Lognara-dock/web/playwright-report/

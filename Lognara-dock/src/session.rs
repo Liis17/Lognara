@@ -64,6 +64,22 @@ impl Sessions {
         Ok(URL_SAFE_NO_PAD.encode(token))
     }
 
+    /// Число действующих сессий всех пользователей.
+    pub async fn active(&self) -> Result<u64, StoreError> {
+        let (ttl, idle) = (self.ttl_ms, self.idle_ms);
+        self.store
+            .call(move |conn| {
+                let now = now_ms();
+                conn.query_row(
+                    "SELECT count(*) FROM sessions WHERE created_at > ?1 AND last_seen > ?2",
+                    params![now - ttl, now - idle],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .await
+            .map(|count| count as u64)
+    }
+
     /// Находит действующую сессию и продлевает её активность.
     pub async fn lookup(&self, token: &str) -> Result<Option<(String, TokenHash)>, StoreError> {
         self.lookup_hash(hash_token(token)).await

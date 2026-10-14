@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Lognara Dock — Алерты</title>
+<script src="./vendor/react.js"></script>
+<script src="./vendor/react-dom.js"></script>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Commissioner:wght@400;500;600;700&amp;family=IBM+Plex+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0;background:#151311}
+.f{--bg:#151311;--panel:#1C1916;--raised:#25211D;--line:#2F2A25;--ink:#EEE7DD;--ink2:#BDB3A6;--ink3:#9C9184;--accent:#A9B8FF;--accent-ink:#141A3A;--err:#F2806F;--warn:#E8B65A;--ok:#8CC7A0;
+box-sizing:border-box;width:100%;min-height:900px;background:var(--bg);color:var(--ink);font:400 13px/1.5 Commissioner,system-ui,sans-serif;display:flex;flex-direction:column}
+.top{display:flex;align-items:center;gap:22px;padding:14px 26px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.brand{font:700 16px Commissioner,sans-serif;letter-spacing:-.01em}
+.brand span{color:var(--accent)}
+.top nav{display:flex;gap:4px;flex-wrap:wrap}
+.top nav a{color:var(--ink3);text-decoration:none;padding:6px 10px;border-radius:999px;font-weight:500}
+.top nav a[aria-current="page"]{color:var(--ink);background:var(--raised)}
+.me{margin-left:auto;color:var(--ink3);font-size:12px}
+.wrap{padding:20px 26px;display:grid;grid-template-columns:330px minmax(0,1fr);gap:20px;min-width:0;flex:1;align-items:start}
+.btn{font:600 12.5px Commissioner,sans-serif;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:10px;padding:8px 12px;cursor:pointer;white-space:nowrap}
+.btn.solid{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.btn:focus-visible,.top nav a:focus-visible,.rule:focus-visible,.ctl:focus-visible,.seg button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.rules{display:flex;flex-direction:column;gap:8px;min-width:0}
+.rules-head{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:4px}
+.rules-head h1{font:600 22px Commissioner,sans-serif;margin:0;letter-spacing:-.015em}
+.rule{display:flex;flex-direction:column;gap:6px;text-align:left;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:12px 14px;color:var(--ink);cursor:pointer;font:inherit;min-width:0}
+.rule[aria-pressed="true"]{background:var(--raised);border-color:var(--accent)}
+.rule .r1{display:flex;justify-content:space-between;gap:8px;align-items:center}
+.rule strong{font:600 13.5px Commissioner,sans-serif}
+.rule code{font:400 11.5px/1.45 "IBM Plex Mono",monospace;color:var(--ink3);overflow-wrap:anywhere}
+.st{font:600 11px Commissioner,sans-serif;border:1px solid currentColor;border-radius:999px;padding:2px 9px;white-space:nowrap}
+.st-fire{color:var(--err)}.st-on{color:var(--ok)}.st-off{color:var(--ink3)}
+.ph{font-style:normal;font:500 11.5px "IBM Plex Mono",monospace;color:var(--accent);background:rgba(169,184,255,.12);border-radius:4px;padding:0 5px}
+.editor{display:flex;flex-direction:column;gap:16px;min-width:0}
+.sentence{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 20px;font:500 19px/2 Commissioner,sans-serif;color:var(--ink2)}
+.ctl{display:inline-block;font:600 17px Commissioner,sans-serif;color:var(--accent);background:rgba(169,184,255,.12);border:1px solid rgba(169,184,255,.35);border-radius:8px;padding:0 10px;cursor:pointer;line-height:1.6}
+.ctl.mono{font:500 15px "IBM Plex Mono",monospace}
+.preview{display:flex;gap:12px;align-items:center;flex-wrap:wrap;font-size:12.5px;color:var(--ink3);margin-top:10px;line-height:1.5}
+.preview b{color:var(--ink);font-weight:600}
+.grid2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px 16px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.card h2{font:600 11px Commissioner,sans-serif;letter-spacing:.07em;text-transform:uppercase;color:var(--ink3);margin:0}
+.ch{display:flex;align-items:center;gap:10px;font-size:13px;color:var(--ink)}
+.ch input{accent-color:#A9B8FF;width:16px;height:16px;margin:0}
+.ch small{margin-left:auto;font:400 11.5px "IBM Plex Mono",monospace;color:var(--ink3)}
+.opt{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--line);font-size:13px}
+.opt:last-child{border-bottom:0}
+.opt small{display:block;color:var(--ink3);font-size:12px}
+.seg{display:inline-flex;background:var(--bg);border:1px solid var(--line);border-radius:999px;padding:2px}
+.seg button{font:600 12px Commissioner,sans-serif;background:none;border:0;color:var(--ink3);padding:4px 10px;border-radius:999px;cursor:pointer}
+.seg button[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink)}
+.fires{display:flex;flex-direction:column}
+.fire{display:grid;grid-template-columns:60px minmax(0,1fr) auto;gap:12px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line);font:400 12px "IBM Plex Mono",monospace;color:var(--ink2)}
+.fire:last-child{border-bottom:0}
+.fire b{color:var(--ink);font-weight:500}
+.foot{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap}
+@media (max-width:1000px){.wrap{grid-template-columns:1fr}.grid2{grid-template-columns:1fr}}
+</style>
+</helmet>
+
+<div class="f">
+  <header class="top">
+    <div class="brand">lognara<span>/</span>dock</div>
+    <nav aria-label="Разделы">
+      <a href="#">Логи</a>
+      <a href="#">Ошибки</a>
+      <a href="#">Аналитика</a>
+      <a href="#" aria-current="page">Алерты</a>
+      <a href="#">Инфраструктура</a>
+    </nav>
+    <span class="me">admin</span>
+  </header>
+
+  <div class="wrap">
+    <nav class="rules" aria-label="Правила">
+      <div class="rules-head"><h1>Алерты</h1><button class="btn solid" type="button">Новое правило</button></div>
+      <button class="rule" type="button" aria-pressed="true">
+        <span class="r1"><strong>Всплеск ошибок api</strong><span class="st st-fire">Сработало</span></span>
+        <code>service=api level=ERROR count ≥ 20 / 5m</code>
+      </button>
+      <button class="rule" type="button" aria-pressed="false">
+        <span class="r1"><strong>Новый паттерн ошибки</strong><span class="st st-on">Включено</span></span>
+        <code>level=ERROR pattern не встречался 30 дн</code>
+      </button>
+      <button class="rule" type="button" aria-pressed="false">
+        <span class="r1"><strong>Рост паттерна</strong><span class="st st-on">Включено</span></span>
+        <code>connection refused: host=<var class="ph">ip</var> рост ×3 за 15m</code>
+      </button>
+      <button class="rule" type="button" aria-pressed="false">
+        <span class="r1"><strong>Billing молчит</strong><span class="st st-on">Включено</span></span>
+        <code>service=billing нет событий ≥ 10m</code>
+      </button>
+      <button class="rule" type="button" aria-pressed="false">
+        <span class="r1"><strong>WARN выше нормы</strong><span class="st st-off">Выключено</span></span>
+        <code>level=WARN ≥ 3 × медиана 7 дн</code>
+      </button>
+    </nav>
+
+    <section class="editor" aria-label="Редактор правила">
+      <div class="sentence">
+        Если сервис <button class="ctl mono" type="button">api</button> создаст
+        <button class="ctl" type="button">20 или больше</button> событий уровня
+        <button class="ctl mono" type="button">ERROR</button> за
+        <button class="ctl" type="button">5 минут</button>, отправить уведомление в
+        <button class="ctl" type="button">Telegram и Slack</button>.
+        <div class="preview"><span>На истории за 7 дней сработало бы <b>3 раза</b>, последний раз сегодня в 14:02.</span><button class="btn" type="button">Показать на графике</button></div>
+      </div>
+
+      <div class="grid2">
+        <div class="card">
+          <h2>Куда отправлять</h2>
+          <label class="ch"><input type="checkbox" checked="">Telegram<small>@lognara_ops</small></label>
+          <label class="ch"><input type="checkbox" checked="">Slack<small>#alerts-prod</small></label>
+          <label class="ch"><input type="checkbox">Email</label>
+          <label class="ch"><input type="checkbox">Discord</label>
+          <label class="ch"><input type="checkbox">Webhook</label>
+        </div>
+        <div class="card">
+          <h2>Поведение</h2>
+          <div class="opt"><div>Повторять не чаще<small>не слать одно и то же каждую минуту</small></div>
+            <div class="seg" role="group" aria-label="Cooldown"><button type="button" aria-pressed="false">5 мин</button><button type="button" aria-pressed="true">15 мин</button><button type="button" aria-pressed="false">1 ч</button></div></div>
+          <div class="opt"><div>Тихие часы 23:00–07:00<small>утром придёт одна сводка</small></div>
+            <div class="seg" role="group" aria-label="Тихие часы"><button type="button" aria-pressed="false">Вкл</button><button type="button" aria-pressed="true">Выкл</button></div></div>
+          <div class="opt"><div>Сообщить о восстановлении<small>когда условие перестало выполняться</small></div>
+            <div class="seg" role="group" aria-label="Восстановление"><button type="button" aria-pressed="true">Вкл</button><button type="button" aria-pressed="false">Выкл</button></div></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Срабатывания за 24 ч</h2>
+        <div class="fires">
+          <div class="fire"><b>14:02</b><span>23 события за 5 мин · 4bf92f35…</span><span class="st st-fire">Активно</span></div>
+          <div class="fire"><b>11:37</b><span>31 событие за 5 мин</span><span class="st st-on">Восстановлено 11:44</span></div>
+          <div class="fire"><b>08:15</b><span>20 событий за 5 мин</span><span class="st st-on">Восстановлено 08:19</span></div>
+        </div>
+      </div>
+
+      <div class="foot">
+        <button class="btn" type="button">Скопировать правило</button>
+        <button class="btn" type="button">Удалить</button>
+        <button class="btn solid" type="button">Сохранить</button>
+      </div>
+    </section>
+  </div>
+</div>
+</x-dc>
+
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1280,"height":900}}'>
+class Component extends DCLogic {
+renderVals() {
+return {};
+}
+}
+</script>
+</body>
+</html>

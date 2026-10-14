@@ -153,7 +153,7 @@ export default function Metrics({ onUnauthorized }: { onUnauthorized: () => void
     <section className="metrics">
       <aside className="metrics-list">
         <div className="toolbar">
-          <strong>Метрики</strong>
+          <h1>Метрики</h1>
           <button onClick={newFromLogs}>Новая метрика из текста логов</button>
         </div>
         {error && <p className="error">{error}</p>}
@@ -168,7 +168,7 @@ export default function Metrics({ onUnauthorized }: { onUnauthorized: () => void
                 return (
                   <li key={`${item.origin}:${item.name}`}>
                     <button
-                      className={`metric${item === metric ? " active" : ""}${disabled ? " muted" : ""}`}
+                      className={`metric-option${item === metric ? " active" : ""}${disabled ? " muted" : ""}`}
                       onClick={() => select(item)}
                     >
                       <span className="title">{item.definition?.title || item.name}</span>
@@ -218,7 +218,7 @@ export default function Metrics({ onUnauthorized }: { onUnauthorized: () => void
                   {item.label}
                 </button>
               ))}
-              <select value={split} onChange={(e) => setSplit(e.target.value as Split)}>
+              <select aria-label="Разбиение" value={split} onChange={(e) => setSplit(e.target.value as Split)}>
                 {Object.entries(splitText).map(([value, label]) => (
                   <option key={value} value={value}>
                     {label}

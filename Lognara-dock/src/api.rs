@@ -5,7 +5,9 @@ use std::time::Duration;
 
 use axum::http::HeaderValue;
 use axum::http::StatusCode;
-use axum::http::header::{REFERRER_POLICY, RETRY_AFTER, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS};
+use axum::http::header::{
+    CACHE_CONTROL, REFERRER_POLICY, RETRY_AFTER, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS,
+};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router, middleware};
@@ -20,8 +22,12 @@ use crate::auth::{self, LoginLimiter};
 use crate::config::Config;
 use crate::core_client::{CoreClient, CoreError};
 use crate::htpasswd::Htpasswd;
+use crate::infra;
+use crate::issues;
 use crate::live::{self, Live};
 use crate::passkey::{self, Challenges};
+use crate::patterns;
+use crate::query;
 use crate::series;
 use crate::session::{self, Sessions};
 use crate::store::{Store, StoreError};
@@ -82,6 +88,13 @@ pub enum ApiError {
     Internal,
     /// Core недоступен или ответил неожиданно.
     CoreUnavailable,
+    CursorExpired,
+    QueryUnavailable,
+    QueryTimeout,
+    PatternNotFound,
+    PatternsNotReady,
+    IssueNotFound,
+    IssuesNotReady,
 }
 
 impl From<StoreError> for ApiError {
@@ -162,6 +175,13 @@ impl IntoResponse for ApiError {
             }
             Self::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
             Self::CoreUnavailable => (StatusCode::BAD_GATEWAY, "core_unavailable"),
+            Self::CursorExpired => (StatusCode::GONE, "cursor_expired"),
+            Self::QueryUnavailable => (StatusCode::SERVICE_UNAVAILABLE, "query_unavailable"),
+            Self::QueryTimeout => (StatusCode::GATEWAY_TIMEOUT, "query_timeout"),
+            Self::PatternNotFound => (StatusCode::NOT_FOUND, "pattern_not_found"),
+            Self::PatternsNotReady => (StatusCode::SERVICE_UNAVAILABLE, "patterns_not_ready"),
+            Self::IssueNotFound => (StatusCode::NOT_FOUND, "issue_not_found"),
+            Self::IssuesNotReady => (StatusCode::SERVICE_UNAVAILABLE, "issues_not_ready"),
         };
         (status, Json(json!({ "error": code }))).into_response()
     }
@@ -180,6 +200,22 @@ pub fn router(app: AppState) -> Router {
         .route("/account/passkeys/finish", post(passkey::register_finish))
         .route("/account/passkeys/{id}", delete(passkey::delete))
         .route("/logs/stream", get(live::stream))
+        .route("/logs/search", post(query::search))
+        .route("/traces/{trace_id}", get(query::trace))
+        .route("/stats/histogram", post(query::histogram))
+        .route("/stats/group-by", post(query::group_by))
+        .route("/stats/summary", post(query::summary))
+        .route("/patterns/search", post(patterns::search))
+        .route("/patterns/hidden", get(patterns::hidden))
+        .route("/patterns/{id}/details", post(patterns::details))
+        .route(
+            "/patterns/{id}/hide",
+            post(patterns::hide).delete(patterns::show),
+        )
+        .route("/issues/search", post(issues::search))
+        .route("/issues/{id}/details", post(issues::details))
+        .route("/issues/{id}/resolve", post(issues::resolve))
+        .route("/issues/{id}/reopen", post(issues::reopen))
         .route("/series", get(series::list))
         .route("/series/query", post(series::query))
         .route(
@@ -201,11 +237,16 @@ pub fn router(app: AppState) -> Router {
             get(access::list_agents).post(access::create_agent),
         )
         .route("/agents/{id}", delete(access::delete_agent))
+        .route("/infrastructure", get(infra::overview))
         .layer(middleware::from_fn_with_state(
             app.clone(),
             session::require_origin,
         ))
-        .fallback(|| async { ApiError::NotFound });
+        .fallback(|| async { ApiError::NotFound })
+        .layer(SetResponseHeaderLayer::if_not_present(
+            CACHE_CONTROL,
+            HeaderValue::from_static("no-store"),
+        ));
     // Остальные пути отдаёт SPA: неизвестный путь получает index.html для react-router.
     let web = &app.config.web_dir;
     let spa = ServeDir::new(web).fallback(ServeFile::new(web.join("index.html")));

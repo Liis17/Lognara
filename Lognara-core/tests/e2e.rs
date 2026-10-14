@@ -40,7 +40,7 @@ async fn actual_pipeline_recovers_after_core_outage_and_public_routes_observe_lo
             .await
             .unwrap()
     });
-    let relay_config = RelayConfig::from_lookup(|key| match key {
+    let mut relay_config = RelayConfig::from_lookup(|key| match key {
         "LOGNARA_CORE_URL" => Some(format!("{url}/v1/batches")),
         "LOGNARA_CORE_TOKEN" => Some(registered.token.clone()),
         "LOGNARA_FLUSH_INTERVAL_MS" => Some("20".into()),
@@ -48,6 +48,7 @@ async fn actual_pipeline_recovers_after_core_outage_and_public_routes_observe_lo
         _ => None,
     })
     .unwrap();
+    relay_config.heartbeat_interval = Duration::from_millis(100);
     let spool = Spool::open(&dir.path().join("spool"), 1 << 20)
         .await
         .unwrap();
@@ -197,6 +198,7 @@ async fn actual_pipeline_recovers_after_core_outage_and_public_routes_observe_lo
         _ => None,
     })
     .unwrap();
+    agent_config.heartbeat_interval = Duration::from_millis(100);
     agent_config.spool_dir = dir.path().join("agent-spool");
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let agent_url = format!("http://{}/v1/logs", listener.local_addr().unwrap());
@@ -266,6 +268,24 @@ async fn actual_pipeline_recovers_after_core_outage_and_public_routes_observe_lo
         assert!(
             Instant::now() < deadline,
             "confirmed agent logs missing after core recovery"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // Heartbeat проходит через настоящий relay и привязывается к зарегистрированному агенту.
+    let heartbeat_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let relays = core.journal.access.list_relays().unwrap();
+        let agents = core.journal.access.list_agents().unwrap();
+        if let (Some(relay), Some(agent)) = (&relays[0].heartbeat, &agents[0].heartbeat) {
+            assert_eq!(agent["source"]["service"], "api");
+            assert_eq!(agent["source"]["server"], "srv");
+            assert!(relay["received_at"].is_string());
+            assert!(agent["received_at"].is_string());
+            break;
+        }
+        assert!(
+            Instant::now() < heartbeat_deadline,
+            "authenticated heartbeat missing after recovery"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }

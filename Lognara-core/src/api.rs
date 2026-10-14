@@ -20,10 +20,14 @@ use crate::{
     access::{Access, AccessError},
     analytics::{self, GroupRequest, HistogramRequest, PreviewRequest},
     definitions::{self, DefinitionInput},
+    issues::{self, IssueDetailsRequest, IssueRequest, RecurrenceRequest},
     journal::{IngestError, Journal},
+    patterns::{self, DetailsRequest, PatternRequest},
     query::{self, QueryError, SearchRequest},
     series_query::{self, QueryRequest},
     storage::Core,
+    summary::{self, SummaryRequest},
+    telemetry::{self, RelayHeartbeat},
     wire::DecodeError,
 };
 
@@ -33,6 +37,13 @@ pub fn router(core: Arc<Core>) -> Router {
         .route("/v1/traces/{trace_id}", get(trace))
         .route("/v1/stats/histogram", post(histogram))
         .route("/v1/stats/group-by", post(group_by))
+        .route("/v1/stats/summary", post(summary))
+        .route("/v1/patterns/search", post(pattern_search))
+        .route("/v1/patterns/{pattern_id}/details", post(pattern_details))
+        .route("/v1/issues/search", post(issue_search))
+        .route("/v1/issues/recurrences", post(issue_recurrences))
+        .route("/v1/issues/{fingerprint}/details", post(issue_details))
+        .route("/v1/status", get(status))
         .route("/v1/series", get(list_series))
         .route("/v1/series/query", post(query_series))
         .route_layer(middleware::from_fn_with_state(
@@ -63,6 +74,81 @@ async fn histogram(
     match request {
         Ok(Json(request)) => run_analytics(&core, analytics::histogram(&core, request)).await,
         Err(error) => QueryError::Invalid(error.body_text()).into_response(),
+    }
+}
+
+async fn summary(
+    State(core): State<Arc<Core>>,
+    request: Result<Json<SummaryRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    match request {
+        Ok(Json(request)) => run_query(&core, summary::summary(core.clone(), request)).await,
+        Err(error) => QueryError::Invalid(error.body_text()).into_response(),
+    }
+}
+
+async fn pattern_search(
+    State(core): State<Arc<Core>>,
+    request: Result<Json<PatternRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    match request {
+        Ok(Json(request)) => run_analytics(&core, patterns::search(&core, request)).await,
+        Err(error) => QueryError::Invalid(error.body_text()).into_response(),
+    }
+}
+
+async fn pattern_details(
+    State(core): State<Arc<Core>>,
+    Path(pattern_id): Path<String>,
+    request: Result<Json<DetailsRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    match request {
+        Ok(Json(request)) => {
+            run_analytics(&core, patterns::details(&core, &pattern_id, request)).await
+        }
+        Err(error) => QueryError::Invalid(error.body_text()).into_response(),
+    }
+}
+
+async fn issue_search(
+    State(core): State<Arc<Core>>,
+    request: Result<Json<IssueRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    match request {
+        Ok(Json(request)) => run_analytics(&core, issues::search(&core, request)).await,
+        Err(error) => QueryError::Invalid(error.body_text()).into_response(),
+    }
+}
+
+async fn issue_details(
+    State(core): State<Arc<Core>>,
+    Path(fingerprint): Path<String>,
+    request: Result<Json<IssueDetailsRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    match request {
+        Ok(Json(request)) => {
+            run_analytics(&core, issues::details(&core, &fingerprint, request)).await
+        }
+        Err(error) => QueryError::Invalid(error.body_text()).into_response(),
+    }
+}
+
+async fn issue_recurrences(
+    State(core): State<Arc<Core>>,
+    request: Result<Json<RecurrenceRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    match request {
+        Ok(Json(request)) => run_analytics(&core, issues::recurrences(&core, request)).await,
+        Err(error) => QueryError::Invalid(error.body_text()).into_response(),
+    }
+}
+
+/// Не требует готовности: размеры и lag нужны и при недоступном хранилище.
+async fn status(State(core): State<Arc<Core>>) -> Response {
+    match tokio::task::spawn_blocking(move || crate::status::status(&core)).await {
+        Ok(Ok(status)) => Json(status).into_response(),
+        Ok(Err(error)) => QueryError::Storage(error.into()).into_response(),
+        Err(error) => QueryError::Storage(error.into()).into_response(),
     }
 }
 
@@ -100,6 +186,16 @@ async fn run_analytics<T: serde::Serialize>(
     let Ok(_permit) = core.analytics_slots.clone().try_acquire_owned() else {
         return QueryError::Busy.into_response();
     };
+    run_query(core, future).await
+}
+
+async fn run_query<T: serde::Serialize>(
+    core: &Core,
+    future: impl std::future::Future<Output = Result<T, QueryError>>,
+) -> Response {
+    if !core.journal.ready() {
+        return unavailable();
+    }
     let started = Instant::now();
     core.journal.metrics.queries.fetch_add(1, Ordering::Relaxed);
     let result = tokio::time::timeout(core.journal.config.query_timeout, future)
@@ -213,6 +309,7 @@ pub fn ingest_router(journal: Arc<Journal>) -> Router {
     let ingest = Router::new()
         .route("/v1/batches", post(ingest))
         .route("/v1/agents", get(agent_hashes))
+        .route("/v1/heartbeat", post(heartbeat))
         .route_layer(middleware::from_fn_with_state(
             journal.access.clone(),
             authorize_relay,
@@ -315,7 +412,8 @@ impl IntoResponse for QueryError {
             Self::Invalid(_) => StatusCode::BAD_REQUEST,
             Self::Gone => StatusCode::GONE,
             Self::Timeout => StatusCode::GATEWAY_TIMEOUT,
-            Self::Busy => StatusCode::SERVICE_UNAVAILABLE,
+            Self::Busy | Self::NotReady => StatusCode::SERVICE_UNAVAILABLE,
+            Self::NotFound => StatusCode::NOT_FOUND,
             Self::Storage(error) => {
                 tracing::error!(%error, "query failed");
                 StatusCode::SERVICE_UNAVAILABLE
@@ -506,19 +604,23 @@ async fn access_task<T: serde::Serialize + Send + 'static>(
     }
 }
 
+/// `as_of` — часы core, относительно которых считается свежесть heartbeat.
 async fn list_relays(State(access): State<Arc<Access>>) -> Response {
     access_task(
-        move || Ok(serde_json::json!({"relays":access.list_relays()?})),
+        move || Ok(serde_json::json!({"relays":access.list_relays()?, "as_of":as_of()})),
         StatusCode::OK,
     )
     .await
 }
 async fn list_agents(State(access): State<Arc<Access>>) -> Response {
     access_task(
-        move || Ok(serde_json::json!({"agents":access.list_agents()?})),
+        move || Ok(serde_json::json!({"agents":access.list_agents()?, "as_of":as_of()})),
         StatusCode::OK,
     )
     .await
+}
+fn as_of() -> String {
+    crate::model::format_timestamp(crate::model::now_nanos())
 }
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -585,6 +687,28 @@ async fn agent_hashes(
     access_task(
         move || Ok(serde_json::json!({"agents":journal.access.agent_hashes(relay_id)?})),
         StatusCode::OK,
+    )
+    .await
+}
+
+async fn heartbeat(
+    State(journal): State<Arc<Journal>>,
+    Extension(relay_id): Extension<i64>,
+    request: Request,
+) -> Response {
+    let body = match to_bytes(request.into_body(), telemetry::MAX_BODY).await {
+        Ok(body) => body,
+        Err(_) => {
+            return (StatusCode::PAYLOAD_TOO_LARGE, "heartbeat exceeds limit").into_response();
+        }
+    };
+    let heartbeat = match serde_json::from_slice::<RelayHeartbeat>(&body) {
+        Ok(heartbeat) if heartbeat.valid() => heartbeat,
+        _ => return invalid_request(),
+    };
+    access_task(
+        move || journal.access.record_heartbeat(relay_id, heartbeat),
+        StatusCode::NO_CONTENT,
     )
     .await
 }

@@ -39,11 +39,15 @@ Core запускается с обязательными разными `LOGNAR
 | `GET /v1/admin/agents` | admin | `{"agents":[{"id":1,"name":"app","relay_id":1,"created_at":"RFC3339"}]}` |
 | `POST /v1/admin/agents` | admin | `{"name":"app","relay_id":1}` → `201 {"agent":{…},"token":"lna_…"}` |
 | `DELETE /v1/admin/agents/{id}` | admin | `204`, `404 not_found` |
+| `POST /v1/heartbeat` | relay | JSON отчёт relay и его агентов → 204; hash агента сопоставляется только внутри relay |
+| `GET /v1/status` | query | ready/version/lag/WAL и текущий filesystem storage |
 | `GET /v1/agents` | relay | `{"agents":["sha256 hex",…]}` только для этого relay |
 
 Имя после trim: 1..64 символа, без управляющих. Имя relay уникально глобально, агента — внутри relay. Ошибки JSON `{"error":"code"}`: `400 invalid_name/invalid_request`, `404 relay_not_found/not_found`, `409 name_taken/relay_has_agents`. Неизвестный или удалённый токен relay даёт `401`; admin/query-токены не дают права отправлять пачки. Поля `service/server/backend` не сверяются. Регистрируйте каждый процесс отдельно; потерянный токен требует пересоздания профиля.
 
 Прежний `LOGNARA_INGEST_TOKEN` удалён. Relay получает свой токен через `LOGNARA_CORE_TOKEN`; agent получает свой через `LOGNARA_RELAY_TOKEN`. Примеры регистрации — в [корневом README](../README.md#быстрый-старт).
+
+Admin-списки добавляют `as_of` по часам core и последний `heartbeat` при наличии. Отчёты сохраняются в `access.sqlite3`, старые не заменяют новые. `GET /v1/status` считает размеры Parquet/индексов (включая активный), WAL и место filesystem `data_dir`; lag публикации не является p95 доставки. [Контракт инфраструктуры](../docs/DockInfrastructureContract.md).
 
 ## Поиск
 
@@ -78,6 +82,9 @@ Core запускается с обязательными разными `LOGNAR
 
 Ответ: `groups: [{values: {service: "api", level: "error"}, count}]`, `as_of`. Разрешены 1–2 разных поля: environment, server, backend, service, service_instance, level, action. Отсутствующее значение — JSON null. Сортировка count DESC, затем ключи группы. Limit 1..1000, по умолчанию 100. Фильтры совпадают с поиском; `text`, `attributes` и SQL отклоняются.
 
+`POST /v1/stats/summary` принимает те же `from/to/filters/text`, `interval_seconds` и необязательный `search_limit` 1..1000. Возвращает `total`, stacked `buckets` по семи уровням, `levels`, до 5 `error_services`, `duration`, до 20 `actions`, `page` и общий `as_of`. Все части используют один Snapshot; первая страница и её cursor сохраняют тот же watermark. Догрузка страниц не обновляет сводку.
+
+`duration` содержит приблизительный `p95_ms` (t-digest), `measured`, `coverage` (0..1) и `method: "tdigest"`. Из существующих `attributes.duration_ms` принимаются только конечные неотрицательные JSON-числа; нет измерений — `p95_ms: null`. `actions[].count` означает события, не вызовы. Raw-сегменты не мигрируются. Summary занимает один analytics slot и использует общий memory pool; данные не собираются целиком в память. Полный wire-контракт: [DockSummaryContract](../docs/DockSummaryContract.md).
 ## Определения метрик
 
 Маршруты доступны только с `LOGNARA_ADMIN_TOKEN` (Bearer).

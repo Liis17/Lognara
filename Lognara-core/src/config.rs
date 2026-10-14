@@ -31,6 +31,10 @@ pub struct Config {
     pub query_timeout: Duration,
     pub index_memory_bytes: usize,
     pub index_cache_entries: usize,
+    pub pattern_max_entries: usize,
+    pub pattern_catalog_bytes: usize,
+    pub pattern_query_bytes: usize,
+    pub pattern_variable_values: usize,
 }
 
 impl Config {
@@ -95,6 +99,10 @@ impl Config {
             query_timeout: Duration::from_secs(number("LOGNARA_QUERY_TIMEOUT_SECONDS", 30)?),
             index_memory_bytes: number("LOGNARA_INDEX_MEMORY_BYTES", 64 << 20)? as usize,
             index_cache_entries: number("LOGNARA_INDEX_CACHE_ENTRIES", 32)? as usize,
+            pattern_max_entries: number("LOGNARA_PATTERN_MAX_ENTRIES", 100_000)? as usize,
+            pattern_catalog_bytes: number("LOGNARA_PATTERN_CATALOG_BYTES", 256 << 20)? as usize,
+            pattern_query_bytes: number("LOGNARA_PATTERN_QUERY_BYTES", 64 << 20)? as usize,
+            pattern_variable_values: number("LOGNARA_PATTERN_VARIABLE_VALUES", 100_000)? as usize,
         };
         if config.admin_token == config.query_token {
             bail!("LOGNARA_ADMIN_TOKEN and LOGNARA_QUERY_TOKEN must differ");
@@ -111,6 +119,9 @@ impl Config {
         }
         if config.index_memory_bytes < 15_000_000 {
             bail!("LOGNARA_INDEX_MEMORY_BYTES must be at least 15000000");
+        }
+        if config.pattern_catalog_bytes < (1 << 20) || config.pattern_query_bytes < 4096 {
+            bail!("pattern catalog must be >= 1 MiB and query budget >= 4096 bytes");
         }
         if config.retention.as_secs() > i64::MAX as u64 / 1_000_000_000 {
             bail!("LOGNARA_RETENTION_SECONDS is too large");

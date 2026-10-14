@@ -81,7 +81,7 @@ WAL хранит одну версионированную запись на ф�
 
 ## Аналитика и retention
 
-DataFusion объединяет только выбранные по времени Parquet-файлы и Arrow-батчи одного снимка. Общий GreedyMemoryPool — 1 GiB, два запроса одновременно, timeout 30 секунд. SQL извне не принимается. Histogram — 1..86400 секунд, не больше 10000 корзин, UTC floor, нули заполнены; диапазон [from,to). Group-by — одно/два разных измерения инфраструктуры, action или level, count DESC и стабильные ключи, limit 1..1000. Фильтры общие с поиском, текст и attributes не допускаются.
+DataFusion объединяет только выбранные по времени Parquet-файлы и Arrow-батчи одного снимка. Общий GreedyMemoryPool — 1 GiB, два запроса одновременно, timeout 30 секунд. SQL извне не принимается. Histogram — 1..86400 секунд, не больше 10000 корзин, UTC floor, нули заполнены; диапазон [from,to). Group-by — одно/два разных измерения инфраструктуры, action или level, count DESC и стабильные ключи, limit 1..1000. У старых histogram/group-by фильтры общие с поиском, текст и attributes не допускаются. Новый summary принимает text и читает числовой duration_ms из JSON без миграции сегментов.
 
 Retention смотрит max core_received_at, исключает expired сегменты из новых снимков, повышает поколение курсоров, затем ждёт Arc-ссылки текущих читателей и удаляет файлы через состояние deleting. При старте незавершённое удаление продолжается. Receipts живут минимум 7 суток и пока живут строки.
 
@@ -89,6 +89,55 @@ Retention смотрит max core_received_at, исключает expired сег
 |---|---|
 | `analytics::histogram(core, request): Result<HistogramResponse>` | Считает временные корзины через типизированные выражения DataFusion. |
 | `analytics::group_by(core, request): Result<GroupResponse>` | Считает группы по разрешённым измерениям. |
+| `PreparedText::new(text: &TextQuery): Result<PreparedText>` | Проверяет и токенизирует общее текстовое условие поиска/аналитики. |
+| `PreparedText::matches(message: &str): bool` | Сопоставляет all/phrase с тем же tokenizer, что у Tantivy. |
+| `query::search_snapshot(core, snapshot, request, ascending, deadline): Result<SearchResponse>` | Получает страницу из заданного снимка; обычный search использует тот же метод. |
+| `summary::summary(core: Arc<Core>, request: SummaryRequest): Result<SummaryResponse>` | Считает согласованную сводку и необязательную первую страницу. |
+
+`POST /v1/stats/summary`: общий Snapshot для total, stacked buckets (семь уровней), levels, top-5 ERROR services, p95 duration_ms/coverage, top-20 action groups и первой страницы DESC. Cursor страницы фиксирует тот же watermark; новый запрос создаёт новый снимок. `duration_ms` читается из старых attributes как конечное неотрицательное JSON-число; строки и отсутствие не измерены, null p95 при measured=0. Метод приблизительный t-digest с линейным масштабированием экстремальных чисел против переполнения центроидов; count action означает события. Данные сканируются потоково, агрегаты выполняются последовательно в общем DataFusion memory pool. Summary сам удерживает analytics permit; при отмене HTTP blocking-поиск удерживает свою Arc-копию permit до завершения. Контракт: [DockSummaryContract](../../../docs/DockSummaryContract.md).
+
+## Паттерны сообщений
+
+`pattern_identity` нормализует сообщение консервативно (v1): заменяются только UUID, IPv4/IPv6, hex-ID от 16 символов с цифрой, значения явно обозначенных ID (`id`, `*_id`, `userId`, `pid`...) и длительности с единицей или ключом `duration/elapsed/latency/took/*_ms`. Слова, числа, HTTP-статусы и коды ошибок остаются литералами; регистр, переносы строк и многострочность сохраняются. Идентичность: `p1_` + SHA-256 версии, environment (null отличается от пустой строки), service, level и частей шаблона. Сообщение свыше 16 KiB или с более чем 64 переменными хешируется целиком (`exact`); preview ограничен 4096 байтами, ID считается до усечения.
+
+`pattern_id` добавлен в Tantivy-индекс как точное поле, поэтому `filters.pattern_id` работает в search/cursor; индексы старой схемы восстанавливаются из Parquet при первом чтении. В summary/histogram/group-by фильтр вычисляется UDF `log_pattern_id`. Raw Arrow/Parquet схема не менялась.
+
+Фоновый поток `lognara-patterns` ведёт производный каталог `patterns.sqlite`: checkpoint sequence, as_of, history_from, признак полноты и lifetime first/last каждого паттерна. Он обрабатывает по одному сегменту после checkpoint и фиксирует метаданные и checkpoint одной транзакцией; повторный запуск не учитывает строки дважды. Пропуск sequence (retention до обработки) помечает историю неполной; удаление каталога вызывает rebuild по оставшимся данным без восстановления удалённой истории. Поток не занимает analytics slot пользователей, ошибки ёмкости делают только API паттернов недоступным.
+
+`POST /v1/patterns/search` и `POST /v1/patterns/{pattern_id}/details` считают counts, прошлое окно, корзины и значения переменных по сырым событиям диапазона до обработанного checkpoint; каталог даёт шаблон, first_seen и новизну. Не готов каталог → 503 `pattern index is not ready`, паттерн не найден в диапазоне → 404, превышение бюджета → 503. Контракт: [DockPatternsContract](../../../docs/DockPatternsContract.md).
+
+| Метод | Назначение |
+|---|---|
+| `pattern_identity::identify(environment: Option<&str>, service: &str, level: &str, message: &str): Identity` | Вычисляет pattern_id, шаблон, части и значения переменных. |
+| `pattern_identity::valid_id(id: &str): bool` | Проверяет формат `p1_` + 64 lowercase hex. |
+| `patterns::id_expr(): Expr` | DataFusion-выражение pattern_id для точного фильтра агрегатов. |
+| `patterns::search(core: &Core, request: PatternRequest): Result<PatternResponse, QueryError>` | Список паттернов с долями, ростом, новизной и корзинами. |
+| `patterns::details(core: &Core, pattern_id: &str, request: DetailsRequest): Result<DetailsResponse, QueryError>` | Top-5 значений переменных, до 3 новейших примеров и метрики паттерна. |
+| `PatternCatalog::checkpoint(): Option<u64>` | Обработанный sequence каталога или None до первичного прохода. |
+
+## Проблемы ошибок
+
+`issue_identity` группирует только error и fatal (v1). Fingerprint `f1_` + SHA-256: environment/service/action и `exception.type` с первыми 5 фреймами `exception.stacktrace` без номеров строк, колонок и адресов (`at …`, Python `File "…"` в обратном порядке). Без `exception.type` используется pattern_id сообщения и action. Поле `fingerprint` добавлено в Tantivy как точное, в агрегатах фильтр вычисляет UDF `log_issue_fingerprint`.
+
+Каталог `patterns.sqlite` версии 2 в том же проходе и с тем же checkpoint ведёт таблицу `issues`: scope, тип, фреймы, шаблон первого события и lifetime first/last. Каталог версии 1 пересобирается из оставшихся raw событий. Лимиты `LOGNARA_PATTERN_MAX_ENTRIES`/`_CATALOG_BYTES` общие для паттернов и проблем.
+
+`POST /v1/issues/search` получает от Dock решённые и вернувшиеся fingerprint и отдаёт счётчики вкладок, сумму событий статуса и проблемы с count/distinct servers/корзинами. `POST /v1/issues/{fingerprint}/details` отдаёт top-5 серверов и до 3 примеров. `POST /v1/issues/recurrences` по одному сегменту после `after` ищет случаи с timestamp не раньше `since`, независимо от готовности каталога. Контракт: [DockIssuesContract](../../../docs/DockIssuesContract.md).
+
+| Метод | Назначение |
+|---|---|
+| `issue_identity::fingerprint(environment: Option<&str>, service: &str, action: Option<&str>, level: LogLevel, pattern: &Identity, exception: &Exception): Option<Fingerprint>` | Fingerprint проблемы для error/fatal. |
+| `issue_identity::valid_id(id: &str): bool` | Проверяет формат `f1_` + 64 lowercase hex. |
+| `Exception::parse(attributes: &str): Exception` | Читает exception.type/stacktrace из JSON атрибутов. |
+| `issues::id_expr(): Expr` | DataFusion-выражение fingerprint для точного фильтра агрегатов. |
+| `issues::search(core: &Core, request: IssueRequest): Result<IssueResponse, QueryError>` | Проблемы статуса и счётчики вкладок по сырым событиям. |
+| `issues::details(core: &Core, fingerprint: &str, request: IssueDetailsRequest): Result<IssueDetails, QueryError>` | Серверы, примеры и метрики проблемы. |
+| `issues::recurrences(core: &Core, request: RecurrenceRequest): Result<RecurrenceResponse, QueryError>` | Случаи наблюдаемых проблем после checkpoint Dock. |
+
+## Мониторинг инфраструктуры
+
+Relay с персональным токеном отправляет `POST /v1/heartbeat`; `Access::record_heartbeat(relay_id: i64, heartbeat: RelayHeartbeat): Result<usize>` одной транзакцией сохраняет последний отчёт relay и отчёты агентов с hash, зарегистрированным за ним. `heartbeats` в access.sqlite3 переживает рестарт; более старые отчёты не заменяют новые. Списки admin API добавляют heartbeat и as_of core; до первого отчёта поле может отсутствовать. Относительные возраста ограничены 100*365 днями, перевод в наносекунды выполняется через i128.
+
+`status::status(core: &Core): io::Result<Status>` обслуживает query-защищённый `GET /v1/status`: версия, ready, visible sequence/lag, WAL и лимит, число закрытых сегментов, Parquet, индексы включая активный сегмент, oldest event и настроенный retention, total/available filesystem data_dir. Lag публикации не является p95 доставки; размеры не означают квоту процесса. Snapshot удерживает сегменты от retention во время подсчёта. Полный [контракт инфраструктуры](../../../docs/DockInfrastructureContract.md).
 
 ## Метрики
 
@@ -216,3 +265,5 @@ POST `/v1/batches` и GET `/v1/agents` проверяют SHA-256 персона
 | `api::authorize_relay(access, request, next): Response` | Проверяет токен и добавляет id relay в extensions. |
 
 `tests/access.rs`: CRUD, права, изоляция, отзыв и восстановление реестра. Нагрузочный скрипт задаёт admin-токен, регистрирует relay и передаёт его токен load через `LOGNARA_CORE_TOKEN`.
+
+Каталог паттернов и агрегаты метрик работают отдельными фоновыми потоками. `pattern_catalog::next_chunk` сохраняет ограниченный снимок raw-логов без `series_files`: серии метрик не участвуют в идентичности паттернов и проблем.

@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Lognara Dock — Ошибки</title>
+<script src="./vendor/react.js"></script>
+<script src="./vendor/react-dom.js"></script>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Commissioner:wght@400;500;600;700&amp;family=IBM+Plex+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0;background:#151311}
+.f{--bg:#151311;--panel:#1C1916;--raised:#25211D;--line:#2F2A25;--ink:#EEE7DD;--ink2:#BDB3A6;--ink3:#9C9184;--accent:#A9B8FF;--accent-ink:#141A3A;--err:#F2806F;--warn:#E8B65A;--info:#8FB0D8;--ok:#8CC7A0;
+box-sizing:border-box;width:100%;min-height:900px;background:var(--bg);color:var(--ink);font:400 13px/1.5 Commissioner,system-ui,sans-serif;display:flex;flex-direction:column}
+.top{display:flex;align-items:center;gap:22px;padding:14px 26px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.brand{font:700 16px Commissioner,sans-serif;letter-spacing:-.01em}
+.brand span{color:var(--accent)}
+.top nav{display:flex;gap:4px;flex-wrap:wrap}
+.top nav a{color:var(--ink3);text-decoration:none;padding:6px 10px;border-radius:999px;font-weight:500}
+.top nav a[aria-current="page"]{color:var(--ink);background:var(--raised)}
+.me{margin-left:auto;color:var(--ink3);font-size:12px}
+.wrap{padding:20px 26px;display:flex;flex-direction:column;gap:16px;min-width:0;flex:1}
+.bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.mode{display:inline-flex;background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:3px;flex-wrap:wrap}
+.mode button{font:600 12.5px Commissioner,sans-serif;background:none;border:0;color:var(--ink3);padding:6px 14px;border-radius:999px;cursor:pointer}
+.mode button span{font:400 11.5px "IBM Plex Mono",monospace;margin-left:5px;opacity:.9}
+.mode button[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink)}
+.btn{font:600 12.5px Commissioner,sans-serif;background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:10px;padding:8px 12px;cursor:pointer;white-space:nowrap}
+.btn.solid{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.btn:focus-visible,.mode button:focus-visible,.top nav a:focus-visible,.pat:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.summary{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+.summary h1{font:600 26px/1.15 Commissioner,sans-serif;margin:0;letter-spacing:-.015em}
+.summary h1 em{font-style:normal;color:var(--accent)}
+.summary p{margin:0;color:var(--ink3)}
+.box{background:var(--panel);border:1px solid var(--line);border-radius:14px;overflow-x:auto}
+table{width:100%;border-collapse:collapse}
+th{font:600 11px Commissioner,sans-serif;letter-spacing:.07em;text-transform:uppercase;color:var(--ink3);text-align:left;padding:11px 14px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:12px 14px;border-bottom:1px solid var(--line);vertical-align:middle;color:var(--ink2)}
+tr:last-child td{border-bottom:0}
+.pat{display:flex;flex-direction:column;gap:2px;background:none;border:0;padding:0;font:inherit;color:var(--ink);text-align:left;cursor:pointer;min-width:0}
+.pat code{font:400 12.5px/1.5 "IBM Plex Mono",monospace;color:var(--ink);overflow-wrap:anywhere}
+.pat small{font:400 11.5px "IBM Plex Mono",monospace;color:var(--ink3)}
+.ph{font-style:normal;font:500 11.5px "IBM Plex Mono",monospace;color:var(--accent);background:rgba(169,184,255,.12);border-radius:4px;padding:0 5px}
+.st{font:600 11px Commissioner,sans-serif;border:1px solid currentColor;border-radius:999px;padding:2px 9px;white-space:nowrap}
+.st-new{color:var(--accent)}.st-open{color:var(--warn)}.st-back{color:var(--err)}.st-done{color:var(--ok)}
+.num{font:500 13px "IBM Plex Mono",monospace;color:var(--ink);text-align:right;white-space:nowrap}
+.t{font:400 12px "IBM Plex Mono",monospace;color:var(--ink3);white-space:nowrap}
+.spark{display:block;width:110px;height:26px}
+tr.open td{background:var(--raised)}
+tr.exp td{background:var(--raised);padding:4px 18px 18px}
+.exp-grid{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr) auto;gap:24px;align-items:start}
+.exp-grid h3{font:600 11px Commissioner,sans-serif;letter-spacing:.07em;text-transform:uppercase;color:var(--ink3);margin:0 0 8px}
+.trace{margin:0;font:400 12px/1.7 "IBM Plex Mono",monospace;color:var(--ink2);background:var(--bg);border-radius:8px;padding:10px 12px;white-space:pre;overflow-x:auto}
+.trace .fn{color:var(--ink)}.trace .file{color:var(--accent)}.trace .ln{color:var(--warn)}
+.fold{margin-top:8px;font:400 12px "IBM Plex Mono",monospace;color:var(--ink3);background:none;border:1px dashed var(--line);border-radius:8px;padding:5px 10px;cursor:pointer}
+.wf{display:flex;flex-direction:column;gap:8px}
+.wf-row{display:grid;grid-template-columns:104px minmax(0,1fr) 54px;gap:10px;align-items:center;font:400 11.5px "IBM Plex Mono",monospace;color:var(--ink2)}
+.wf-track{position:relative;height:9px;background:var(--bg);border-radius:3px}
+.wf-bar{position:absolute;top:0;height:9px;border-radius:3px;background:var(--info)}
+.wf-bar.err{background:var(--err)}
+.wf-row em{font-style:normal;color:var(--ink3);text-align:right}
+.hist{margin-top:14px;display:flex;flex-direction:column;gap:5px;font:400 12px "IBM Plex Mono",monospace;color:var(--ink2)}
+.hist span b{color:var(--ink);font-weight:500;margin-right:8px}
+.acts{display:flex;flex-direction:column;gap:8px}
+@media (max-width:1000px){.exp-grid{grid-template-columns:1fr}.spark{width:80px}}
+</style>
+</helmet>
+
+<div class="f">
+  <header class="top">
+    <div class="brand">lognara<span>/</span>dock</div>
+    <nav aria-label="Разделы">
+      <a href="#">Логи</a>
+      <a href="#" aria-current="page">Ошибки</a>
+      <a href="#">Аналитика</a>
+      <a href="#">Алерты</a>
+      <a href="#">Инфраструктура</a>
+    </nav>
+    <span class="me">admin</span>
+  </header>
+
+  <div class="wrap">
+    <div class="bar">
+      <div class="mode" role="group" aria-label="Статус">
+        <button type="button" aria-pressed="true">Открытые<span>14</span></button>
+        <button type="button" aria-pressed="false">Новые<span>3</span></button>
+        <button type="button" aria-pressed="false">Возвращаются<span>2</span></button>
+        <button type="button" aria-pressed="false">Решённые<span>31</span></button>
+      </div>
+      <button class="btn" type="button">Все сервисы ▾</button>
+      <button class="btn" type="button">24 ч ▾</button>
+    </div>
+
+    <div class="summary">
+      <h1>11 940 ошибок → <em>14 проблем</em></h1>
+      <p>одинаковые ошибки сгруппированы по fingerprint · пример данных</p>
+    </div>
+
+    <div class="box">
+      <table>
+        <thead>
+          <tr><th scope="col">Проблема</th><th scope="col">Статус</th><th scope="col" style="text-align:right">Повторов</th><th scope="col">Серверы</th><th scope="col">Последняя</th><th scope="col">24 ч</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><button class="pat" type="button" aria-expanded="false"><code>Database connection refused: host=<var class="ph">ip</var> port=<var class="ph">num</var></code><small>billing · charge.create · fp 3e07b1</small></button></td>
+            <td><span class="st st-new">Новая</span></td>
+            <td class="num">9 412</td>
+            <td class="t">4</td>
+            <td class="t">14:02</td>
+            <td><svg class="spark" viewBox="0 0 110 26" role="img" aria-label="Резкий рост за последний час"><polyline points="0,24 11,24 22,24 33,24 44,23 55,24 66,23 77,22 88,16 99,7 110,3" fill="none" stroke="#F2806F" stroke-width="2" stroke-linejoin="round"></polyline></svg></td>
+          </tr>
+          <tr class="open">
+            <td><button class="pat" type="button" aria-expanded="true"><code>NullReferenceException in InvoiceMapper.Map</code><small>billing · invoice.sync · fp 8a21c3</small></button></td>
+            <td><span class="st st-back">Возвращается</span></td>
+            <td class="num">84</td>
+            <td class="t">2</td>
+            <td class="t">14:00</td>
+            <td><svg class="spark" viewBox="0 0 110 26" role="img" aria-label="Пропала после фикса и вернулась"><polyline points="0,14 11,12 22,15 33,13 44,24 55,24 66,24 77,24 88,18 99,12 110,10" fill="none" stroke="#F2806F" stroke-width="2" stroke-linejoin="round"></polyline></svg></td>
+          </tr>
+          <tr class="exp">
+            <td colspan="6">
+              <div class="exp-grid">
+                <div>
+                  <h3>Stack trace</h3>
+<pre class="trace"><span class="fn">System.NullReferenceException</span>: Object reference not set to an instance of an object.
+   at <span class="fn">InvoiceMapper.Map</span>(Invoice src) in <span class="file">Billing/Invoices/InvoiceMapper.cs</span>:<span class="ln">84</span>
+   at <span class="fn">InvoiceService.Sync</span>(Guid tenantId) in <span class="file">Billing/Invoices/InvoiceService.cs</span>:<span class="ln">41</span></pre>
+                  <button class="fold" type="button" aria-expanded="false">+ 9 фреймов фреймворка</button>
+                </div>
+                <div>
+                  <h3>Trace последнего случая</h3>
+                  <div class="wf">
+                    <div class="wf-row"><span>api-gateway</span><div class="wf-track"><div class="wf-bar" style="left:0;width:100%"></div></div><em>820 мс</em></div>
+                    <div class="wf-row"><span>billing</span><div class="wf-track"><div class="wf-bar" style="left:5%;width:91%"></div></div><em>750 мс</em></div>
+                    <div class="wf-row"><span>ledger</span><div class="wf-track"><div class="wf-bar" style="left:15%;width:63%"></div></div><em>520 мс</em></div>
+                    <div class="wf-row"><span>postgres</span><div class="wf-track"><div class="wf-bar err" style="left:85%;width:2%"></div></div><em>ошибка</em></div>
+                  </div>
+                  <div class="hist">
+                    <span><b>10 окт 09:41</b>впервые, prod-eu-01</span>
+                    <span><b>13 окт 11:20</b>отмечена решённой</span>
+                    <span><b>13 окт 13:12</b>вернулась после деплоя 1.42.0</span>
+                  </div>
+                </div>
+                <div class="acts">
+                  <button class="btn solid" type="button">Все 84 события</button>
+                  <button class="btn" type="button">Поиск первопричины</button>
+                  <button class="btn" type="button">Отметить решённой</button>
+                  <button class="btn" type="button">Алерт на возврат</button>
+                </div>
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td><button class="pat" type="button" aria-expanded="false"><code>Timeout after <var class="ph">num</var> ms: upstream <var class="ph">word</var></code><small>billing · invoice.sync · fp 61d9e0</small></button></td>
+            <td><span class="st st-open">Открыта</span></td>
+            <td class="num">2 318</td>
+            <td class="t">2</td>
+            <td class="t">14:01</td>
+            <td><svg class="spark" viewBox="0 0 110 26" role="img" aria-label="Стабильно"><polyline points="0,14 11,13 22,15 33,12 44,14 55,13 66,12 77,14 88,13 99,11 110,12" fill="none" stroke="#E8B65A" stroke-width="2" stroke-linejoin="round"></polyline></svg></td>
+          </tr>
+          <tr>
+            <td><button class="pat" type="button" aria-expanded="false"><code>JWT signature expired for user <var class="ph">uuid</var></code><small>auth · token.verify · fp f4a0c9</small></button></td>
+            <td><span class="st st-open">Открыта</span></td>
+            <td class="num">1 209</td>
+            <td class="t">3</td>
+            <td class="t">13:58</td>
+            <td><svg class="spark" viewBox="0 0 110 26" role="img" aria-label="Пики по утрам"><polyline points="0,20 11,8 22,18 33,20 44,19 55,7 66,18 77,20 88,19 99,9 110,18" fill="none" stroke="#E8B65A" stroke-width="2" stroke-linejoin="round"></polyline></svg></td>
+          </tr>
+          <tr>
+            <td><button class="pat" type="button" aria-expanded="false"><code>Pool exhausted, waiting <var class="ph">num</var> ms</code><small>billing · pool.acquire · fp 17be52</small></button></td>
+            <td><span class="st st-done">Решена</span></td>
+            <td class="num">402</td>
+            <td class="t">1</td>
+            <td class="t">12 окт</td>
+            <td><svg class="spark" viewBox="0 0 110 26" role="img" aria-label="Нет новых случаев"><polyline points="0,10 11,12 22,16 33,22 44,24 55,24 66,24 77,24 88,24 99,24 110,24" fill="none" stroke="#9C9184" stroke-width="2" stroke-linejoin="round"></polyline></svg></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+</x-dc>
+
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1280,"height":900}}'>
+class Component extends DCLogic {
+renderVals() {
+return {};
+}
+}
+</script>
+</body>
+</html>

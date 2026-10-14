@@ -54,6 +54,40 @@ pub enum TextMode {
     Phrase,
 }
 
+/// Подготовленное текстовое условие общее для индекса и аналитических Arrow-сканов.
+#[derive(Debug, Clone)]
+pub struct PreparedText {
+    pub tokens: Vec<String>,
+    pub mode: TextMode,
+}
+
+impl PreparedText {
+    pub fn new(text: &TextQuery) -> Result<Self, QueryError> {
+        if text.query.len() > 8192 {
+            return Err(QueryError::Invalid("text query exceeds 8192 bytes".into()));
+        }
+        let tokens = index::tokens(&text.query);
+        if tokens.is_empty() || tokens.len() > 64 {
+            return Err(QueryError::Invalid("text requires 1..64 tokens".into()));
+        }
+        Ok(Self {
+            tokens,
+            mode: text.mode,
+        })
+    }
+
+    pub fn matches(&self, message: &str) -> bool {
+        let tokens = index::tokens(message);
+        if matches!(self.mode, TextMode::Phrase) && self.tokens.len() > 1 {
+            tokens
+                .windows(self.tokens.len())
+                .any(|window| window == self.tokens)
+        } else {
+            self.tokens.iter().all(|token| tokens.contains(token))
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct SearchResponse {
     pub events: Vec<LogEvent>,
@@ -71,8 +105,18 @@ pub enum QueryError {
     Timeout,
     #[error("query capacity is exhausted")]
     Busy,
+    #[error("pattern index is not ready")]
+    NotReady,
+    #[error("not found in range")]
+    NotFound,
     #[error("storage query failed")]
     Storage(#[from] anyhow::Error),
+}
+
+impl From<datafusion::common::DataFusionError> for QueryError {
+    fn from(error: datafusion::common::DataFusionError) -> Self {
+        Self::Storage(error.into())
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -117,6 +161,18 @@ impl PreparedFilter {
                     }
                     "trace_id" => normalize_hex(value, 16)?,
                     "span_id" | "parent_span_id" => normalize_hex(value, 8)?,
+                    "pattern_id" => {
+                        value.make_ascii_lowercase();
+                        if !crate::pattern_identity::valid_id(value) {
+                            return Err(QueryError::Invalid("invalid pattern_id".into()));
+                        }
+                    }
+                    "fingerprint" => {
+                        value.make_ascii_lowercase();
+                        if !crate::issue_identity::valid_id(value) {
+                            return Err(QueryError::Invalid("invalid fingerprint".into()));
+                        }
+                    }
                     "level" => {
                         level(value).ok_or_else(|| QueryError::Invalid("unknown level".into()))?;
                     }
@@ -184,28 +240,26 @@ pub fn search(
     ascending: bool,
     deadline: Instant,
 ) -> Result<SearchResponse, QueryError> {
+    search_snapshot(core, &core.snapshot(), request, ascending, deadline)
+}
+
+pub(crate) fn search_snapshot(
+    core: &Core,
+    snapshot: &Snapshot,
+    request: SearchRequest,
+    ascending: bool,
+    deadline: Instant,
+) -> Result<SearchResponse, QueryError> {
     let filter = PreparedFilter::new(&request.from, &request.to, &request.filters)?;
     if !(1..=1000).contains(&request.limit) {
         return Err(QueryError::Invalid("limit must be 1..1000".into()));
     }
-    let tokens = match &request.text {
-        Some(text) => {
-            if text.query.len() > 8192 {
-                return Err(QueryError::Invalid("text query exceeds 8192 bytes".into()));
-            }
-            let tokens = index::tokens(&text.query);
-            if tokens.is_empty() || tokens.len() > 64 {
-                return Err(QueryError::Invalid("text requires 1..64 tokens".into()));
-            }
-            tokens
-        }
-        None => vec![],
-    };
+    let text = request.text.as_ref().map(PreparedText::new).transpose()?;
+    let tokens = text.as_ref().map_or(&[][..], |text| text.tokens.as_slice());
     let fingerprint: [u8; 32] = Sha256::digest(
         serde_json::to_vec(&(&filter, &request.text, ascending)).map_err(anyhow::Error::from)?,
     )
     .into();
-    let snapshot = core.snapshot();
     let cursor = request
         .cursor
         .as_deref()
@@ -230,15 +284,15 @@ pub fn search(
         .map_or(snapshot.watermark, |cursor| cursor.watermark);
     let query = build_query(
         &filter,
-        &tokens,
-        request.text.as_ref().map(|text| text.mode),
+        tokens,
+        text.as_ref().map(|text| text.mode),
         watermark,
         cursor.as_ref(),
         ascending,
     );
     let hits = find_hits(
         core,
-        &snapshot,
+        snapshot,
         &filter,
         &query,
         request.limit + 1,
@@ -248,7 +302,7 @@ pub fn search(
     let has_more = hits.len() > request.limit;
     let hits: Vec<_> = hits.into_iter().take(request.limit).collect();
     let events = hydrate(
-        &snapshot,
+        snapshot,
         &hits,
         deadline,
         core.journal.config.search_memory_bytes,

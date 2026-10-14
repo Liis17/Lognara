@@ -40,6 +40,8 @@ pub struct Config {
     pub listen_addr: SocketAddr,
     pub relay_url: Url,
     pub relay_token: String,
+    /// Как часто отправлять heartbeat в relay; не больше 30 секунд.
+    pub heartbeat_interval: Duration,
 }
 
 impl fmt::Debug for Config {
@@ -60,6 +62,7 @@ impl fmt::Debug for Config {
             .field("spool_max_bytes", &self.spool_max_bytes)
             .field("listen_addr", &self.listen_addr)
             .field("relay_url", &self.relay_url)
+            .field("heartbeat_interval", &self.heartbeat_interval)
             .field("sources", &self.sources)
             .field("relay_token", &"[redacted]")
             .finish()
@@ -163,6 +166,7 @@ impl Config {
             )?,
             relay_url: parse(&get, "LOGNARA_RELAY_URL", DEFAULT_RELAY_URL, "a URL")?,
             relay_token,
+            heartbeat_interval: heartbeat_interval(&get)?,
         };
         config.validate()?;
         Ok(config)
@@ -238,6 +242,19 @@ impl Config {
     }
 }
 
+/// Dock считает узел отключённым через 60 секунд без heartbeat.
+fn heartbeat_interval(get: &impl Fn(&str) -> Option<String>) -> Result<Duration, ConfigError> {
+    let var = "LOGNARA_HEARTBEAT_INTERVAL_MS";
+    match positive(get, var, 10_000u64)? {
+        ms if ms <= 30_000 => Ok(Duration::from_millis(ms)),
+        ms => Err(ConfigError::Invalid {
+            var,
+            value: ms.to_string(),
+            expected: "milliseconds between 1 and 30000",
+        }),
+    }
+}
+
 fn positive<T>(
     get: &impl Fn(&str) -> Option<String>,
     var: &'static str,
@@ -306,6 +323,8 @@ mod tests {
     #[test]
     fn debug_redacts_tokens() {
         let config = with_required(&[("LOGNARA_RELAY_TOKEN", "unique-relay-secret")]).unwrap();
+        assert_eq!(config.heartbeat_interval, Duration::from_secs(10));
+        assert!(with_required(&[("LOGNARA_HEARTBEAT_INTERVAL_MS", "30001")]).is_err());
         let debug = format!("{config:?}");
         assert!(!debug.contains("unique-relay-secret"));
         assert!(debug.contains("[redacted]"));

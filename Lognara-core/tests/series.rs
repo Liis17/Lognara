@@ -205,7 +205,6 @@ fn log_retention_deletes_segment_but_keeps_series_file() {
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = config(dir.path());
     cfg.segment_rows = 1;
-    cfg.retention = Duration::from_millis(500);
     let core = Core::open(cfg.clone()).unwrap();
     core.journal
         .accept(&batch(&[Some(report(json!({"runs": 1}), json!({})))]))
@@ -215,6 +214,12 @@ fn log_retention_deletes_segment_but_keeps_series_file() {
     let log_dir = snapshot.closed[0].path.clone();
     let series = snapshot.series_files[0].path.clone();
     drop(snapshot);
+    core.shutdown().unwrap();
+    drop(core);
+    // Сначала фиксируем обе записи, затем включаем retention: медленная сборка
+    // не должна успеть удалить log_dir до того, как тест получит его путь.
+    cfg.retention = Duration::from_nanos(1);
+    let core = Core::open(cfg.clone()).unwrap();
     wait(|| !log_dir.exists());
     assert!(series.is_file(), "retention must not touch series files");
     assert_eq!(core.snapshot().series_files.len(), 1);

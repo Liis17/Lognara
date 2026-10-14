@@ -4,7 +4,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::Router;
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::header::{AUTHORIZATION, CONTENT_ENCODING, CONTENT_TYPE, HeaderName};
@@ -12,12 +11,15 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
+use axum::{Extension, Router};
 use http_body::Body as _;
+use sha2::{Digest, Sha256};
 
 use crate::agent_wire::{self, DecodeError};
-use crate::agents::Agents;
+use crate::agents::{Agents, Hash};
 use crate::core_wire::Source;
 use crate::core_wire::{BatchEncoder, CoreBatch, Event, Group};
+use crate::heartbeat::{self, AgentReport, Telemetry};
 use crate::memory::{MAX_BODY, MAX_DECODED, Resources};
 use crate::normalize;
 use crate::spool::Spool;
@@ -26,32 +28,71 @@ use crate::spool::Spool;
 struct IngestState {
     spool: Spool,
     resources: Arc<Resources>,
+    telemetry: Arc<Telemetry>,
 }
 
-pub fn router(spool: Spool, agents: Arc<Agents>, resources: Arc<Resources>) -> Router {
+/// SHA-256 токена агента, прошедшего авторизацию.
+#[derive(Clone, Copy)]
+struct AgentHash(Hash);
+
+pub fn router(
+    spool: Spool,
+    agents: Arc<Agents>,
+    resources: Arc<Resources>,
+    telemetry: Arc<Telemetry>,
+) -> Router {
     Router::new()
         .route("/v1/batches", post(ingest))
+        .route("/v1/heartbeat", post(agent_heartbeat))
         .route_layer(middleware::from_fn_with_state(agents, authorize))
-        .with_state(IngestState { spool, resources })
+        .with_state(IngestState {
+            spool,
+            resources,
+            telemetry,
+        })
 }
 
-async fn authorize(State(agents): State<Arc<Agents>>, request: Request, next: Next) -> Response {
+async fn authorize(
+    State(agents): State<Arc<Agents>>,
+    mut request: Request,
+    next: Next,
+) -> Response {
     let mut values = request.headers().get_all(AUTHORIZATION).iter();
     let token = values
         .next()
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.split_once(' '))
         .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("Bearer"))
-        .map(|(_, token)| token);
-    if values.next().is_some() || !token.is_some_and(|token| agents.contains(token)) {
+        .map(|(_, token)| -> Hash { Sha256::digest(token.as_bytes()).into() });
+    let hash = token.filter(|hash| values.next().is_none() && agents.contains_hash(hash));
+    let Some(hash) = hash else {
         return (
             StatusCode::UNAUTHORIZED,
             [("www-authenticate", "Bearer")],
             "unauthorized",
         )
             .into_response();
-    }
+    };
+    request.extensions_mut().insert(AgentHash(hash));
     next.run(request).await
+}
+
+/// Последний heartbeat агента хранится в памяти до отправки в core.
+async fn agent_heartbeat(
+    State(state): State<IngestState>,
+    Extension(AgentHash(hash)): Extension<AgentHash>,
+    request: Request,
+) -> StatusCode {
+    let Ok(body) = axum::body::to_bytes(request.into_body(), heartbeat::MAX_BODY).await else {
+        return StatusCode::PAYLOAD_TOO_LARGE;
+    };
+    match serde_json::from_slice::<AgentReport>(&body) {
+        Ok(report) if report.valid() => {
+            state.telemetry.agent(hash, report);
+            StatusCode::NO_CONTENT
+        }
+        _ => StatusCode::BAD_REQUEST,
+    }
 }
 
 async fn ingest(
@@ -79,14 +120,17 @@ async fn ingest(
     let body = tokio::time::timeout(Duration::from_secs(30), read_body(request.into_body()))
         .await
         .map_err(|_| IngestError::Timeout)??;
-    crate::memory::run_blocking(permit, move || {
+    let telemetry = state.telemetry.clone();
+    let events = crate::memory::run_blocking(permit, move || {
         accept(&state.spool, &body, &state.resources)
     })
     .await
     .map_err(|error| {
         tracing::error!(%error, "ingest worker failed");
         IngestError::Unavailable
-    })?
+    })??;
+    telemetry.ingested(events);
+    Ok(StatusCode::ACCEPTED)
 }
 
 // Не collect(): число DATA frames тоже контролирует клиент. После копирования
@@ -105,7 +149,8 @@ async fn read_body(mut body: Body) -> Result<Vec<u8>, IngestError> {
     Ok(bytes)
 }
 
-fn accept(spool: &Spool, body: &[u8], resources: &Resources) -> Result<StatusCode, IngestError> {
+/// Возвращает число сохранённых событий.
+fn accept(spool: &Spool, body: &[u8], resources: &Resources) -> Result<u64, IngestError> {
     let mut budget = crate::model_budget::ModelBudget::new(resources.model_limit);
     let batch = agent_wire::decode_with_budget(body, MAX_DECODED, &mut budget)?;
     if batch.records.is_empty() {
@@ -136,6 +181,7 @@ fn accept(spool: &Spool, body: &[u8], resources: &Resources) -> Result<StatusCod
                 .ok_or(IngestError::TooLarge)?,
         )
         .map_err(|_| IngestError::TooLarge)?;
+    let accepted = batch.records.len() as u64;
     let mut events = Vec::with_capacity(batch.records.len());
     for record in batch.records {
         events.push(
@@ -180,7 +226,7 @@ fn accept(spool: &Spool, body: &[u8], resources: &Resources) -> Result<StatusCod
             IngestError::Unavailable
         }
     })?;
-    Ok(StatusCode::ACCEPTED)
+    Ok(accepted)
 }
 
 fn header_is(headers: &HeaderMap, name: HeaderName, expected: &str) -> bool {
@@ -344,6 +390,7 @@ mod tests {
             spool.clone(),
             Agents::with_tokens(&["relay-secret"]),
             resources.clone(),
+            Arc::default(),
         );
         for token in [
             "Bearer wrong",
@@ -453,6 +500,7 @@ mod tests {
             spool,
             Agents::with_tokens(&["relay-secret"]),
             resources.clone(),
+            Arc::default(),
         );
         assert_eq!(
             app.oneshot(request(

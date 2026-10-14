@@ -2,6 +2,9 @@ import { useEffect, useState } from "react";
 import { Navigate, NavLink, Route, Routes, useNavigate } from "react-router";
 import { api, type Me } from "./api";
 import Access from "./pages/Access";
+import Analytics from "./pages/Analytics";
+import Errors from "./pages/Errors";
+import Infrastructure from "./pages/Infrastructure";
 import Login from "./pages/Login";
 import Logs from "./pages/Logs";
 import Metrics from "./pages/Metrics";
@@ -21,7 +24,9 @@ export default function App() {
     refresh();
   }, []);
 
-  if (me === undefined) return null;
+  if (me === undefined) {
+    return <div className="session-state" role="status">Проверяем сессию…</div>;
+  }
 
   if (me === null) {
     return (
@@ -40,20 +45,28 @@ export default function App() {
 
   return (
     <div className="app">
-      <header>
-        <strong>Lognara</strong>
-        <nav>
+      <header className="topbar">
+        <NavLink className="brand" to="/logs" aria-label="Lognara Dock, логи">
+          lognara<span>/</span>dock
+        </NavLink>
+        <nav aria-label="Разделы">
           <NavLink to="/logs">Логи</NavLink>
+          <NavLink to="/errors">Ошибки</NavLink>
+          <NavLink to="/analytics">Аналитика</NavLink>
+          <NavLink to="/infrastructure">Инфраструктура</NavLink>
           <NavLink to="/metrics">Метрики</NavLink>
           <NavLink to="/access">Подключения</NavLink>
           <NavLink to="/settings">Настройки</NavLink>
         </nav>
         <span className="user">{me.username}</span>
-        <button onClick={logout}>Выйти</button>
+        <button className="quiet" onClick={logout}>Выйти</button>
       </header>
       <main>
         <Routes>
           <Route path="/logs" element={<Logs onUnauthorized={() => setMe(null)} />} />
+          <Route path="/errors" element={<Errors onUnauthorized={() => setMe(null)} />} />
+          <Route path="/analytics" element={<Analytics onUnauthorized={() => setMe(null)} />} />
+          <Route path="/infrastructure" element={<Infrastructure onUnauthorized={() => setMe(null)} />} />
           <Route
             path="/metrics"
             element={<Metrics onUnauthorized={() => setMe(null)} />}

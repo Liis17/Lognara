@@ -183,6 +183,7 @@ curl -X POST http://127.0.0.1:7402/v1/logs/search \
 | `LOGNARA_ENVIRONMENT` | нет | окружение |
 | `LOGNARA_SERVICE_INSTANCE` | `$HOSTNAME`, если задан | экземпляр сервиса |
 | `LOGNARA_BATCH_SIZE` | `1000` | размер пачки в записях |
+| `LOGNARA_HEARTBEAT_INTERVAL_MS` | `10000` | интервал heartbeat, 1..30000 мс |
 | `LOGNARA_FLUSH_INTERVAL_MS` | `5000` | как часто отправлять накопленное |
 | `LOGNARA_MAX_BUFFER` | `100000` | лимит подтверждённых записей на диске, не меньше `BATCH_SIZE`; сверх него `503` |
 | `LOGNARA_MAX_BUFFER_BYTES` | `67108864` | бюджет моделей, индекса, сериализации, источников и отправляемой пачки |
@@ -201,6 +202,7 @@ curl -X POST http://127.0.0.1:7402/v1/logs/search \
 |---|---|---|
 | `LOGNARA_CORE_URL` | обязательна | адрес core, схема `http` или `https` |
 | `LOGNARA_CORE_TOKEN` | обязательна | персональный токен relay из dock |
+| `LOGNARA_HEARTBEAT_INTERVAL_MS` | `10000` | интервал heartbeat, 1..30000 мс |
 | `LOGNARA_FLUSH_INTERVAL_MS` | `60000` | интервал отправки в core |
 | `LOGNARA_BATCH_SIZE` | `10000` | при таком числе событий пачка уходит раньше интервала |
 | `LOGNARA_MAX_BUFFER` | `100000` | лимит подтверждённых событий на диске; сверх него агенты получают `503` |
@@ -377,6 +379,8 @@ CI входит в GHCR с автоматически выданным `GITHUB_T
 
 | Метод и путь | Токен | Назначение |
 |--------------|-------|------------|
+| `POST /v1/heartbeat` | relay | последний отчёт relay и авторизованных агентов, 204 |
+| `GET /v1/status` | query | ready/version, lag публикации/WAL и filesystem storage |
 | `POST /v1/batches` | relay | приём пачки от relay, `204` после fsync WAL |
 | `GET /v1/agents` | relay | SHA-256-хеши агентов этого relay |
 | `GET/POST /v1/admin/relays`, `DELETE /v1/admin/relays/{id}` | admin | список, создание и удаление relay |
@@ -385,6 +389,7 @@ CI входит в GHCR с автоматически выданным `GITHUB_T
 | `GET /v1/traces/{trace_id}` | query | события trace по возрастанию времени |
 | `POST /v1/stats/histogram` | query | число событий по временным корзинам |
 | `POST /v1/stats/group-by` | query | число событий по 1-2 полям |
+| `POST /v1/stats/summary` | query | total, график по уровням, текстовые условия, p95 duration_ms и первая страница в одном снимке |
 | `GET /v1/series` | query | список метрик с датами первой и последней точки и окружениями (`environments`) |
 | `POST /v1/series/query` | query | значения серии по корзинам времени; необязательные `origin` и `environment` (без него сумма по всем окружениям) |
 | `/v1/admin/series/*` | admin | определения метрик и предпросмотр правила |
@@ -393,6 +398,7 @@ CI входит в GHCR с автоматически выданным `GITHUB_T
 
 Форматы запросов и ответов, лимиты и коды ошибок: [`Lognara-core/README.md`](Lognara-core/README.md).
 
+Мониторинг доступен в Dock на `/infrastructure`: узлы и свежесть heartbeat, spool/версия/ошибки доставки, текущее хранилище core, SSE/сессии Dock. Agent и relay отправляют отдельный JSON heartbeat с прежними токенами; интервал по умолчанию 10 секунд, TTL 60 секунд. Source-фильтр из узла не доказывает принадлежность событий agent_id. История телеметрии узлов, per-node dropped, p95 доставки и прогноз диска не реализованы. [Контракт инфраструктуры](docs/DockInfrastructureContract.md).
 Маршруты метрик dock, все под сессией:
 
 | Метод и путь | Доступ | Назначение |
@@ -466,7 +472,7 @@ LICENSE                   MIT
 
 - Версия 0.1.0, крейты не публикуются (`publish = false`).
 - Dockerfile есть только у dock; для agent, relay и core образов пока нет.
-- Метрики агента и relay не поддерживаются; потери захвата потоков учитываются в диагностике агента.
+- Agent/relay передают текущую heartbeat-телеметрию; история и per-node dropped не реализованы, потери захвата потоков учитываются в диагностике агента.
 - Сбор файлов и потоков универсален; Docker API, journald, syslog, архивы, CSV и внутренние базы приложений не читаются.
 - Core работает на одной ноде: без кластера и репликации, TLS не встроен.
 - 10 000 событий/с на 4 CPU / 8 GiB это проверяемая цель, а не гарантия. Результаты приёмочного прогона ещё не записаны.

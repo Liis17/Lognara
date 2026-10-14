@@ -50,6 +50,20 @@ fn batch_spans_segments_and_remains_deduplicated_after_wal_cleanup_and_restart()
     core.shutdown().unwrap();
     let snapshot = core.snapshot();
     assert_eq!(snapshot.closed.len(), 3);
+    let status = lognara_core::status::status(&core).unwrap();
+    let parquet: u64 = snapshot
+        .closed
+        .iter()
+        .map(|segment| {
+            std::fs::metadata(segment.path.join("logs.parquet"))
+                .unwrap()
+                .len()
+        })
+        .sum();
+    assert_eq!(status.storage.segments, 3);
+    assert_eq!(status.storage.parquet_bytes, parquet);
+    assert!(status.storage.index_bytes > 0);
+    assert!(status.storage.oldest_event_at.is_some());
     let mut rows = vec![];
     for segment in &snapshot.closed {
         for batch in columns::read_all(&segment.path.join("logs.parquet")).unwrap() {
@@ -109,5 +123,21 @@ fn open_segment_is_visible_and_missing_index_is_rebuilt_from_parquet() {
     std::fs::remove_dir_all(path.join("index")).unwrap();
     let core = Core::open(cfg).unwrap();
     assert_eq!(core.indexes.searcher(&path, 1).unwrap().num_docs(), 1);
+    core.shutdown().unwrap();
+}
+
+#[test]
+fn status_counts_index_of_open_segment_before_seal() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = config(dir.path());
+    cfg.segment_rows = 100;
+    let core = Core::open(cfg).unwrap();
+    core.journal.accept(&batch(1)).unwrap();
+    wait_visible(&core, 1);
+    assert!(core.snapshot().closed.is_empty());
+    assert!(core.snapshot().active.is_some());
+    let status = lognara_core::status::status(&core).unwrap();
+    assert_eq!(status.storage.parquet_bytes, 0);
+    assert!(status.storage.index_bytes > 0);
     core.shutdown().unwrap();
 }

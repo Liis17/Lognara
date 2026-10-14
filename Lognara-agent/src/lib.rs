@@ -8,6 +8,7 @@ pub mod wire;
 
 mod buffer;
 mod files;
+mod heartbeat;
 mod ingest;
 mod process;
 mod sender;
@@ -43,6 +44,7 @@ struct Runtime {
     server: Option<JoinHandle<io::Result<()>>>,
     files: JoinHandle<()>,
     sender: JoinHandle<()>,
+    heartbeat: JoinHandle<()>,
     shutdown: CancellationToken,
     stop_sending: CancellationToken,
     _cancel_sources: DropGuard,
@@ -63,6 +65,11 @@ impl Runtime {
         let file_task = tokio::spawn(files.run(buffer.clone(), shutdown.clone()));
         let stop_sending = CancellationToken::new();
         let sender = tokio::spawn(Sender::new(&config, buffer.clone(), stop_sending.clone()).run());
+        let heartbeat = tokio::spawn(heartbeat::run(
+            config.clone(),
+            buffer.clone(),
+            stop_sending.clone(),
+        ));
         let app = ingest::router(buffer.clone());
         let cancellation = shutdown.clone();
         let server = tokio::spawn(async move {
@@ -79,6 +86,7 @@ impl Runtime {
             server: Some(server),
             files: file_task,
             sender,
+            heartbeat,
             _cancel_sources: shutdown.clone().drop_guard(),
             _cancel_sender: stop_sending.clone().drop_guard(),
             shutdown,
@@ -102,6 +110,9 @@ impl Runtime {
         self.stop_sending.cancel();
         if let Err(error) = self.sender.await {
             error!(error = %error, "sender task failed");
+        }
+        if let Err(error) = self.heartbeat.await {
+            error!(error = %error, "heartbeat task failed");
         }
         self.buffer.drain().await;
         served

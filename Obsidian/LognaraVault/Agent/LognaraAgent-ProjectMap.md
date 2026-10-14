@@ -15,6 +15,7 @@ Parent: [[Agent/LognaraAgent]]
 | `src/ingest.rs` | `router`, `parse_body_limited` | Совместимый HTTP приём. |
 | `src/buffer.rs` | `Buffer`, `SourceAdmission` | Единая durable очередь и memory admission всех источников. |
 | `src/wire.rs` | `Batch`, `Record`, `Origin` | Совместимый MessagePack и provenance. |
+| `src/heartbeat.rs` | `Telemetry`, `run` | Отдельный JSON heartbeat в relay, возраст отметок, версия и spool. |
 | `src/sender.rs` | `Sender`, `Relay` | Подготовка и повтор сохранённых тел. |
 | `tests/e2e.rs`, `sources.rs`, `framing.rs`, `files.rs`, `process.rs` | интеграционные тесты | HTTP ACK, форматы, crash/restart, ротация, лимиты, жизненный цикл. |
 | `tests/memory_profile.rs`, `check-memory-profile.py` | `bounded_agent_memory_profile`, `bounded_source_memory_profile` | RSS при конкурентном HTTP, outage и восстановлении; source case включает files/stdout/stderr. |

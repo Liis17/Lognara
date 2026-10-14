@@ -11,6 +11,7 @@ use serde::Serialize;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
 use crate::config::{Config, INDEX_BYTES, INDEX_ENTRIES};
+use crate::heartbeat::Telemetry;
 use crate::wire::{self, Batch, Record};
 
 pub struct Buffer {
@@ -27,6 +28,7 @@ pub struct Buffer {
     jobs: Arc<Semaphore>,
     _metadata: OwnedSemaphorePermit,
     pub(crate) source_memory: Arc<OwnedSemaphorePermit>,
+    pub(crate) telemetry: Telemetry,
 }
 
 pub struct Pending {
@@ -90,6 +92,7 @@ impl Buffer {
             changed: Notify::new(),
             input: Arc::new(Semaphore::new(1)),
             jobs: Arc::new(Semaphore::new(1)),
+            telemetry: Telemetry::default(),
         });
         buffer.refresh(&buffer.queue.lock().unwrap());
         Ok(buffer)
@@ -111,6 +114,9 @@ impl Buffer {
     }
     pub fn len(&self) -> u64 {
         self.events.load(Ordering::Acquire)
+    }
+    pub fn bytes(&self) -> u64 {
+        self.bytes.load(Ordering::Acquire)
     }
     pub fn budget(&self) -> u32 {
         self.config.pipeline_bytes() as u32
@@ -236,6 +242,9 @@ impl Buffer {
         }));
         self.refresh(&queue);
         self.changed.notify_one();
+        if result.is_ok() {
+            self.telemetry.recorded();
+        }
         result
     }
 

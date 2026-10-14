@@ -9,6 +9,7 @@ use crate::{
     journal::Journal,
     metrics::Metrics,
     model::{StoredEvent, now_nanos},
+    pattern_catalog::PatternCatalog,
     rollup::{self, RollupFile},
     series::{self, SeriesFile, SeriesFileMeta},
     wal::{Position, failpoint, sync_dir},
@@ -65,9 +66,11 @@ pub struct Core {
     pub search_slots: Arc<Semaphore>,
     pub analytics_slots: Arc<Semaphore>,
     pub query_runtime: Arc<datafusion::execution::runtime_env::RuntimeEnv>,
+    pub patterns: PatternCatalog,
+    worker: Mutex<Option<JoinHandle<Result<()>>>>,
+    pattern_worker: Mutex<Option<JoinHandle<()>>>,
     /// Готовые суточные агрегаты; публикует поток lognara-rollups.
     pub rollups: RwLock<Arc<Vec<Arc<RollupFile>>>>,
-    worker: Mutex<Option<JoinHandle<Result<()>>>>,
     rollup_worker: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -102,8 +105,10 @@ impl Core {
             search_slots: Arc::new(Semaphore::new(4)),
             analytics_slots: Arc::new(Semaphore::new(2)),
             query_runtime,
-            rollups: RwLock::new(Arc::new(vec![])),
+            patterns: PatternCatalog::new(),
             worker: Mutex::new(None),
+            pattern_worker: Mutex::new(None),
+            rollups: RwLock::new(Arc::new(vec![])),
             rollup_worker: Mutex::new(None),
         });
         let mut worker = Materializer::recover(core.clone())?;
@@ -118,6 +123,7 @@ impl Core {
             result
         })?;
         *core.worker.lock().unwrap() = Some(handle);
+        *core.pattern_worker.lock().unwrap() = Some(PatternCatalog::start(core.clone())?);
         let rollups = rollup::spawn(core.clone())?;
         *core.rollup_worker.lock().unwrap() = Some(rollups);
         Ok(core)
@@ -129,6 +135,12 @@ impl Core {
 
     pub fn shutdown(&self) -> Result<()> {
         self.journal.stopping.store(true, Ordering::Release);
+        if let Some(handle) = self.pattern_worker.lock().unwrap().take() {
+            handle.thread().unpark();
+            handle
+                .join()
+                .map_err(|_| anyhow::anyhow!("pattern worker panicked"))?;
+        }
         let rollups = self.rollup_worker.lock().unwrap().take();
         if let Some(handle) = rollups {
             handle.thread().unpark();
