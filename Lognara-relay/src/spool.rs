@@ -20,6 +20,7 @@ struct State {
     dir: PathBuf,
     queue: Mutex<Queue>,
     events: AtomicU64,
+    bytes: AtomicU64,
     len: AtomicUsize,
     available: AtomicBool,
     max_size: AtomicU64,
@@ -30,6 +31,10 @@ struct State {
 impl State {
     fn refresh(&self, queue: &Queue) {
         self.events.store(queue.events(), Ordering::Release);
+        self.bytes.store(
+            queue.entries().iter().map(|e| e.size).sum(),
+            Ordering::Release,
+        );
         self.len.store(queue.entries().len(), Ordering::Release);
         self.available.store(queue.available(), Ordering::Release);
         self.max_size.store(
@@ -50,6 +55,7 @@ impl Spool {
             dir: queue.dir().to_owned(),
             queue: Mutex::new(queue),
             events: AtomicU64::new(0),
+            bytes: AtomicU64::new(0),
             len: AtomicUsize::new(0),
             available: AtomicBool::new(false),
             max_size: AtomicU64::new(0),
@@ -81,6 +87,9 @@ impl Spool {
     }
     pub fn events(&self) -> u64 {
         self.state.events.load(Ordering::Acquire)
+    }
+    pub fn bytes(&self) -> u64 {
+        self.state.bytes.load(Ordering::Acquire)
     }
     pub fn available(&self) -> bool {
         self.state.available.load(Ordering::Acquire)

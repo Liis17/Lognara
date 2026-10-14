@@ -63,6 +63,7 @@ struct FakeCore {
     delay_ms: Arc<AtomicUsize>,
     agents: Arc<Mutex<(StatusCode, Vec<String>)>>,
     agent_requests: Arc<AtomicUsize>,
+    heartbeats: Arc<Mutex<Vec<serde_json::Value>>>,
 }
 
 #[derive(Clone)]
@@ -74,6 +75,7 @@ struct CoreState {
     delay_ms: Arc<AtomicUsize>,
     agents: Arc<Mutex<(StatusCode, Vec<String>)>>,
     agent_requests: Arc<AtomicUsize>,
+    heartbeats: Arc<Mutex<Vec<serde_json::Value>>>,
 }
 
 fn token_hash(token: &str) -> String {
@@ -119,6 +121,7 @@ async fn fake_core() -> FakeCore {
         delay_ms: Arc::default(),
         agents: Arc::new(Mutex::new((StatusCode::OK, vec![token_hash(AGENT_TOKEN)]))),
         agent_requests: Arc::default(),
+        heartbeats: Arc::default(),
     };
     let requests = state.requests.clone();
     let status = state.status.clone();
@@ -126,9 +129,11 @@ async fn fake_core() -> FakeCore {
     let delay_ms = state.delay_ms.clone();
     let agents = state.agents.clone();
     let agent_requests = state.agent_requests.clone();
+    let heartbeats = state.heartbeats.clone();
     let app = Router::new()
         .route("/v1/batches", post(receive))
         .route("/v1/agents", get(list_agents))
+        .route("/v1/heartbeat", post(heartbeat))
         .with_state(state);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -144,7 +149,18 @@ async fn fake_core() -> FakeCore {
         delay_ms,
         agents,
         agent_requests,
+        heartbeats,
     }
+}
+
+async fn heartbeat(
+    State(state): State<CoreState>,
+    headers: HeaderMap,
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> StatusCode {
+    assert_eq!(headers["authorization"], format!("Bearer {TOKEN}"));
+    state.heartbeats.lock().unwrap().push(body);
+    StatusCode::NO_CONTENT
 }
 
 async fn list_agents(
@@ -216,6 +232,7 @@ fn config(core: &FakeCore, spool_dir: &Path) -> Config {
         max_model_bytes: 256 << 20,
         max_buffer_bytes: 256 << 20,
         max_ingest_concurrency: 1,
+        heartbeat_interval: Duration::from_millis(100),
     }
 }
 
@@ -965,5 +982,102 @@ async fn provenance_survives_durable_relay_restart_and_reaches_core_attributes()
     assert_eq!(events[0].attributes["log.fragment.continued"], true);
     assert_eq!(events[1].attributes["log.stream"], "stderr");
     eventually(|| spooled(spool.path()) == 0).await;
+    relay.stop().await;
+}
+
+fn agent_report() -> serde_json::Value {
+    serde_json::json!({
+        "version": "9.9.9",
+        "source": {"environment": "production", "server": "eu-prod-01", "backend": "barkcloud", "service": "api", "service_instance": null},
+        "spool": {"used_bytes": 5, "limit_bytes": 100, "records": 1},
+        "last_record_ms_ago": 1500, "last_delivery_ms_ago": 200, "last_failure_ms_ago": null,
+        "delivery_failures": 0,
+        "added_by_newer_agent": true
+    })
+}
+
+async fn post_heartbeat(relay: &Relay, token: &str, body: String) -> StatusCode {
+    reqwest::Client::new()
+        .post(format!("http://{}/v1/heartbeat", relay.addr))
+        .header("authorization", format!("Bearer {token}"))
+        .body(body)
+        .send()
+        .await
+        .unwrap()
+        .status()
+}
+
+#[tokio::test]
+async fn forwards_agent_heartbeats_and_own_telemetry_to_core() {
+    let core = fake_core().await;
+    core.respond(StatusCode::SERVICE_UNAVAILABLE);
+    let directory = tempfile::tempdir().unwrap();
+    let relay = start_relay(config(&core, directory.path())).await;
+    let report = agent_report().to_string();
+    assert_eq!(
+        post_heartbeat(&relay, "unknown", report.clone()).await,
+        StatusCode::UNAUTHORIZED
+    );
+    let mut unnamed = agent_report();
+    unnamed["version"] = "".into();
+    for bad in [
+        "not json".to_owned(),
+        unnamed.to_string(),
+        "x".repeat(65 << 10),
+    ] {
+        assert_ne!(
+            post_heartbeat(&relay, AGENT_TOKEN, bad).await,
+            StatusCode::NO_CONTENT
+        );
+    }
+    assert_eq!(
+        post_heartbeat(&relay, AGENT_TOKEN, report).await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        send(&relay, &agent_batch("api", &["one", "two"])).await,
+        StatusCode::ACCEPTED
+    );
+    eventually(|| core.requests() > 0).await;
+    let hash = token_hash(AGENT_TOKEN);
+    let forwarded = || {
+        core.heartbeats
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|body| {
+                body["agents"]
+                    .as_array()
+                    .is_some_and(|agents| !agents.is_empty())
+                    && body["relay"]["delivery_failures"].as_u64() > Some(0)
+            })
+            .cloned()
+    };
+    eventually(|| forwarded().is_some()).await;
+    let body = forwarded().unwrap();
+    let agent = &body["agents"][0];
+    assert_eq!(agent["token_sha256"], hash);
+    assert!(agent["heartbeat_ms_ago"].as_u64().unwrap() < 5000);
+    assert_eq!(agent["telemetry"]["version"], "9.9.9");
+    assert_eq!(agent["telemetry"]["source"]["server"], "eu-prod-01");
+    assert!(agent["telemetry"].get("added_by_newer_agent").is_none());
+    let own = &body["relay"];
+    assert_eq!(own["version"], env!("CARGO_PKG_VERSION"));
+    assert!(own["spool"]["used_bytes"].as_u64().unwrap() > 0);
+    assert_eq!(own["spool"]["records"], 2);
+    assert!(own["last_ingest_ms_ago"].as_u64().is_some());
+    assert!(own["last_delivery_ms_ago"].is_null());
+    assert!(own["last_failure_ms_ago"].as_u64().is_some());
+    let rates: f64 = core
+        .heartbeats
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|body| body["relay"]["events_per_second"].as_f64().unwrap())
+        .sum();
+    assert!(rates > 0.0);
+
+    core.respond(StatusCode::OK);
     relay.stop().await;
 }

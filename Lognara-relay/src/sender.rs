@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
 
 use crate::config::Config;
+use crate::heartbeat::Telemetry;
 use crate::memory::{CODEC_WORKSPACE, Resources};
 use crate::spool::Spool;
 
@@ -30,6 +31,7 @@ impl Sender {
         spool: Spool,
         shutdown: CancellationToken,
         resources: Arc<Resources>,
+        telemetry: Arc<Telemetry>,
     ) -> Self {
         Self {
             spool,
@@ -40,6 +42,7 @@ impl Sender {
                     .expect("HTTP client builds"),
                 url: config.core_url.clone(),
                 token: config.core_token.clone(),
+                telemetry,
             },
             resources,
             shutdown,
@@ -105,9 +108,20 @@ struct Core {
     client: Client,
     url: Url,
     token: String,
+    telemetry: Arc<Telemetry>,
 }
 impl Core {
     async fn deliver(&self, body: Bytes) -> bool {
+        let delivered = self.send(body).await;
+        if delivered {
+            self.telemetry.delivered();
+        } else {
+            self.telemetry.failed();
+        }
+        delivered
+    }
+
+    async fn send(&self, body: Bytes) -> bool {
         match self
             .client
             .post(self.url.clone())

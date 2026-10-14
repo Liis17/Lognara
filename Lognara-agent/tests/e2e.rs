@@ -30,6 +30,7 @@ struct FakeRelay {
     requests: Arc<AtomicUsize>,
     bodies: Arc<Mutex<Vec<Bytes>>>,
     failures: Arc<Mutex<VecDeque<StatusCode>>>,
+    heartbeats: Arc<Mutex<Vec<serde_json::Value>>>,
 }
 
 #[derive(Clone)]
@@ -38,6 +39,7 @@ struct RelayState {
     failures: Arc<Mutex<VecDeque<StatusCode>>>,
     requests: Arc<AtomicUsize>,
     bodies: Arc<Mutex<Vec<Bytes>>>,
+    heartbeats: Arc<Mutex<Vec<serde_json::Value>>>,
 }
 
 async fn fake_relay(failures: &[StatusCode]) -> FakeRelay {
@@ -47,12 +49,15 @@ async fn fake_relay(failures: &[StatusCode]) -> FakeRelay {
         failures: Arc::new(Mutex::new(failures.iter().copied().collect())),
         requests: Arc::default(),
         bodies: Arc::default(),
+        heartbeats: Arc::default(),
     };
     let requests = state.requests.clone();
     let bodies = state.bodies.clone();
     let failures = state.failures.clone();
+    let heartbeats = state.heartbeats.clone();
     let app = Router::new()
         .route("/v1/batches", post(receive))
+        .route("/v1/heartbeat", post(heartbeat))
         .with_state(state);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -65,7 +70,18 @@ async fn fake_relay(failures: &[StatusCode]) -> FakeRelay {
         requests,
         bodies,
         failures,
+        heartbeats,
     }
+}
+
+async fn heartbeat(
+    State(state): State<RelayState>,
+    headers: HeaderMap,
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> StatusCode {
+    assert_eq!(headers["authorization"], "Bearer relay-secret");
+    state.heartbeats.lock().unwrap().push(body);
+    StatusCode::NO_CONTENT
 }
 
 async fn receive(State(state): State<RelayState>, headers: HeaderMap, body: Bytes) -> StatusCode {
@@ -113,6 +129,7 @@ async fn start_agent(relay_url: Url, batch_size: usize, flush_interval: Duration
         listen_addr: "127.0.0.1:0".parse().unwrap(),
         relay_url,
         relay_token: "relay-secret".into(),
+        heartbeat_interval: Duration::from_millis(100),
     };
     let listener = TcpListener::bind(config.listen_addr).await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -366,4 +383,41 @@ async fn sigkill_after_202_restores_every_accepted_record_and_exact_pending_byte
     );
     let bodies = relay.bodies.lock().unwrap();
     assert!(bodies.iter().skip(1).any(|body| *body == original));
+}
+
+#[tokio::test]
+async fn heartbeat_reports_source_spool_and_delivery() {
+    let mut relay = fake_relay(&[StatusCode::SERVICE_UNAVAILABLE]).await;
+    let agent = start_agent(relay.url.clone(), 1, Duration::from_secs(60)).await;
+    let latest = |relay: &FakeRelay| relay.heartbeats.lock().unwrap().last().cloned();
+    timeout(WAIT, async {
+        while latest(&relay).is_none() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let idle = latest(&relay).unwrap();
+    assert_eq!(idle["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(idle["source"]["server"], "eu-prod-01");
+    assert_eq!(idle["source"]["service_instance"], "api-2");
+    assert_eq!(idle["spool"]["limit_bytes"], 1u64 << 30);
+    assert!(idle["last_record_ms_ago"].is_null() && idle["last_delivery_ms_ago"].is_null());
+
+    send_log(&agent, "text/plain", "counted").await;
+    next_batch(&mut relay).await;
+    timeout(WAIT, async {
+        while latest(&relay).is_none_or(|body| body["last_delivery_ms_ago"].is_null()) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let busy = latest(&relay).unwrap();
+    assert!(busy["last_record_ms_ago"].as_u64().unwrap() < 5000);
+    assert_eq!(busy["delivery_failures"], 1);
+    assert!(busy["last_failure_ms_ago"].as_u64().is_some());
+    assert_eq!(busy["spool"]["records"], 0);
+    agent.shutdown.cancel();
+    timeout(WAIT, agent.task).await.unwrap().unwrap().unwrap();
 }

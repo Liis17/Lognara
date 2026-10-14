@@ -9,6 +9,7 @@ pub mod normalize;
 pub mod spool;
 
 mod agents;
+mod heartbeat;
 mod ingest;
 mod memory;
 mod sender;
@@ -23,6 +24,7 @@ use tracing::error;
 
 use crate::agents::{AgentSync, Agents, SYNC_INTERVAL};
 use crate::config::Config;
+use crate::heartbeat::Telemetry;
 use crate::sender::Sender;
 use crate::spool::Spool;
 
@@ -44,12 +46,14 @@ pub async fn run(
     spool.set_max_events(config.max_buffer);
     // Отправка останавливается только после приёма, чтобы последние события не потерялись.
     let stop_sending = CancellationToken::new();
+    let telemetry = Arc::new(Telemetry::default());
     let sender = tokio::spawn(
         Sender::new(
             &config,
             spool.clone(),
             stop_sending.clone(),
             resources.clone(),
+            telemetry.clone(),
         )
         .run(),
     );
@@ -69,14 +73,28 @@ pub async fn run(
     }
     let stop_agents = shutdown.child_token();
     let agent_task = tokio::spawn(agent_sync.run(SYNC_INTERVAL, stop_agents.clone()));
+    let heartbeat_task = tokio::spawn({
+        let (telemetry, agents, spool, config) = (
+            telemetry.clone(),
+            agents.clone(),
+            spool.clone(),
+            config.clone(),
+        );
+        let stop = stop_agents.clone();
+        async move { heartbeat::run(telemetry, agents, spool, &config, stop).await }
+    });
 
-    let served = axum::serve(listener, ingest::router(spool, agents, resources.clone()))
+    let router = ingest::router(spool, agents, resources.clone(), telemetry);
+    let served = axum::serve(listener, router)
         .with_graceful_shutdown(shutdown.cancelled_owned())
         .await;
 
     stop_agents.cancel();
     if let Err(err) = agent_task.await {
         error!(error = %err, "agent sync task failed");
+    }
+    if let Err(err) = heartbeat_task.await {
+        error!(error = %err, "heartbeat task failed");
     }
     resources.drain().await;
     stop_sending.cancel();

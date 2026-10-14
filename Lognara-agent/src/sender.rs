@@ -91,6 +91,7 @@ impl Sender {
             };
             match response {
                 Ok(response) if response.status().is_success() => {
+                    self.buffer.telemetry.delivered();
                     let pending = self.pending.take().unwrap();
                     if let Err(e) = self.buffer.ack_async(pending).await {
                         self.buffer.set_ready(false);
@@ -102,12 +103,16 @@ impl Sender {
                     continue;
                 }
                 Ok(response) => {
+                    self.buffer.telemetry.failed();
                     if response.status().is_client_error() {
                         self.buffer.set_ready(false);
                     }
                     warn!(status = %response.status(), "relay rejected batch; exact bytes retained");
                 }
-                Err(e) => warn!(error = %e, "relay unavailable; exact bytes retained"),
+                Err(e) => {
+                    self.buffer.telemetry.failed();
+                    warn!(error = %e, "relay unavailable; exact bytes retained");
+                }
             }
             tokio::select! {
                 _ = time::sleep(backoff) => {},

@@ -9,6 +9,7 @@ use std::time::Duration;
 use reqwest::redirect::Policy;
 use reqwest::{Client, StatusCode, Url};
 use serde::Deserialize;
+#[cfg(test)]
 use sha2::{Digest, Sha256};
 use tokio::time::{self, Instant, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
@@ -19,7 +20,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_LIST_BYTES: usize = 8 << 20;
 const CACHE_FILE: &str = ".agents";
 
-type Hash = [u8; 32];
+pub(crate) type Hash = [u8; 32];
 
 /// Токены агентов хранятся только хешами; неизвестный токен не принимается.
 #[derive(Default)]
@@ -28,9 +29,13 @@ pub struct Agents {
 }
 
 impl Agents {
+    #[cfg(test)]
     pub fn contains(&self, token: &str) -> bool {
-        let hash: Hash = Sha256::digest(token.as_bytes()).into();
-        self.hashes.read().unwrap().contains(&hash)
+        self.contains_hash(&Sha256::digest(token.as_bytes()).into())
+    }
+
+    pub fn contains_hash(&self, hash: &Hash) -> bool {
+        self.hashes.read().unwrap().contains(hash)
     }
 
     fn replace(&self, hashes: HashSet<Hash>) {

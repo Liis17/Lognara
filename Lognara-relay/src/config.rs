@@ -39,6 +39,8 @@ pub struct Config {
     pub max_model_bytes: usize,
     pub max_buffer_bytes: usize,
     pub max_ingest_concurrency: usize,
+    /// Как часто отправлять heartbeat в core; не больше 30 секунд.
+    pub heartbeat_interval: Duration,
 }
 
 impl fmt::Debug for Config {
@@ -59,6 +61,7 @@ impl fmt::Debug for Config {
             .field("max_model_bytes", &self.max_model_bytes)
             .field("max_buffer_bytes", &self.max_buffer_bytes)
             .field("max_ingest_concurrency", &self.max_ingest_concurrency)
+            .field("heartbeat_interval", &self.heartbeat_interval)
             .finish()
     }
 }
@@ -168,6 +171,7 @@ impl Config {
                 crate::memory::DEFAULT_BUFFER,
             )?,
             max_ingest_concurrency: positive(&get, "LOGNARA_RELAY_MAX_INGEST_CONCURRENCY", 1usize)?,
+            heartbeat_interval: heartbeat_interval(&get)?,
         };
         config.validate_memory()?;
         Ok(config)
@@ -244,6 +248,19 @@ impl Config {
     }
 }
 
+/// Dock считает узел отключённым через 60 секунд без heartbeat.
+fn heartbeat_interval(get: &impl Fn(&str) -> Option<String>) -> Result<Duration, ConfigError> {
+    let var = "LOGNARA_HEARTBEAT_INTERVAL_MS";
+    match positive(get, var, 10_000u64)? {
+        ms if ms <= 30_000 => Ok(Duration::from_millis(ms)),
+        ms => Err(ConfigError::Invalid {
+            var,
+            value: ms.to_string(),
+            expected: "milliseconds between 1 and 30000",
+        }),
+    }
+}
+
 fn positive<T>(
     get: &impl Fn(&str) -> Option<String>,
     var: &'static str,
@@ -286,6 +303,11 @@ mod tests {
     #[test]
     fn rejects_memory_below_partition_requirements() {
         assert!(with_required(&[("LOGNARA_RELAY_MEMORY_MB", "1280")]).is_err());
+        assert!(with_required(&[("LOGNARA_HEARTBEAT_INTERVAL_MS", "30001")]).is_err());
+        assert_eq!(
+            with_required(&[]).unwrap().heartbeat_interval,
+            Duration::from_secs(10)
+        );
         assert!(with_required(&[("LOGNARA_RELAY_MAX_INGEST_CONCURRENCY", "2")]).is_err());
     }
 
