@@ -4,7 +4,7 @@ Parent: [[Index]]
 
 ## Назначение
 
-Rust-процесс, который живёт в контейнере рядом с основным приложением. Принимает логи по localhost (от библиотеки lognara или напрямую от приложения), читает настроенные файлы и захватывает stdout/stderr дочерней программы, сохраняет запросы на постоянный диск до ответа `202` и сжатыми пачками отправляет в lognara-relay на той же машине. Поля `LogEvent` (level, message, trace_id, id и т. д.) агент не разбирает: он только добавляет идентификацию источника и время приёма, а структурирует данные relay. Метрики пока не поддерживаются.
+Rust-процесс, который живёт в контейнере рядом с основным приложением. Принимает логи по localhost (от библиотеки lognara или напрямую от приложения), читает настроенные файлы и захватывает stdout/stderr дочерней программы, сохраняет запросы на постоянный диск до ответа `202` и сжатыми пачками отправляет в lognara-relay на той же машине. Поля `LogEvent` (level, message, trace_id, id и т. д.) агент не разбирает: он только добавляет идентификацию источника и время приёма, а структурирует данные relay. Текущая heartbeat-телеметрия передаётся через relay в core; отдельного Prometheus endpoint нет.
 
 Источники и lifecycle описаны в [[Agent/LogSources]], карта модулей в [[Agent/LognaraAgent-ProjectMap]].
 
@@ -23,10 +23,15 @@ Agent собирается вместе с контейнером приложе
 | `Lognara-agent/src/ingest.rs` | HTTP-приём `POST /v1/logs`. |
 | `Lognara-agent/src/buffer.rs` | Дисковая очередь, резерв моделей и подготовка пачек. |
 | `Lognara-agent/src/wire.rs` | Формат пачки, контракт с relay. |
+| `Lognara-agent/src/heartbeat.rs` | Отчёт состояния в relay с авторизованной идентичностью. |
 | `Lognara-agent/src/sender.rs` | Отправка пачек в relay, ретраи. |
 | `Lognara-agent/src/sources.rs`, `framing.rs`, `files.rs` | Настройки, общий разбор, durable checkpoint и ротация. |
 | `Lognara-agent/src/process.rs`, `output.rs` | Запуск foreground-процесса, потоки, echo, сигналы и потери. |
 | `Lognara-agent/tests/e2e.rs` | Сквозные тесты с фейковым relay. |
+
+## Heartbeat
+
+`LOGNARA_HEARTBEAT_INTERVAL_MS` по умолчанию 10000, допустимо 1..30000 миллисекунд; первый тик сразу, HTTP timeout 5 секунд. Версия, настроенный source, spool и отметки приёма/доставки/ошибок идут отдельным JSON на `/v1/heartbeat` с персональным Bearer-токеном. Возраст отметок измеряется монотонно; core переводит его в собственные часы. Локальные счётчики и отметки сбрасываются после рестарта, durable spool сохраняется. Heartbeat не блокирует доставку логов. Подробности и границы: [контракт инфраструктуры](../../../docs/DockInfrastructureContract.md).
 
 ## Параметры запуска
 
@@ -42,6 +47,7 @@ Agent собирается вместе с контейнером приложе
 | `LOGNARA_ENVIRONMENT` | нет | нет | `environment` |
 | `LOGNARA_SERVICE_INSTANCE` | нет | `$HOSTNAME`, если задан | `service_instance` |
 | `LOGNARA_BATCH_SIZE` | нет | `1000` | размер пачки в записях |
+| `LOGNARA_HEARTBEAT_INTERVAL_MS` | нет | `10000` | интервал heartbeat, 1..30000 мс |
 | `LOGNARA_FLUSH_INTERVAL_MS` | нет | `5000` | как часто отправлять накопленное |
 | `LOGNARA_MAX_BUFFER` | нет | `100000` | лимит подтверждённых записей на диске, не меньше `BATCH_SIZE`; сверх него `503` |
 | `LOGNARA_MAX_BUFFER_BYTES` | нет | `67108864` | общий бюджет моделей, индекса и сериализации |
@@ -53,6 +59,8 @@ Agent собирается вместе с контейнером приложе
 | `LOGNARA_LISTEN_ADDR` | нет | `127.0.0.1:7400` | адрес приёма |
 | `LOGNARA_RELAY_URL` | нет | `http://lognara-relay:7401/v1/batches` | адрес relay |
 | `LOGNARA_RELAY_TOKEN` | да | - | персональный токен агента для его relay |
+
+`heartbeat::run(config: Config, buffer: Arc<Buffer>, stop: CancellationToken)` — отправляет последний отчёт в relay до отмены. `Telemetry::recorded/delivered/failed()` — отмечают durable добавление, успешный ACK и неудачную попытку доставки; failures не означает dropped.
 
 ## Приём: `POST /v1/logs`
 

@@ -120,6 +120,7 @@ docker compose up -d
 | `POST /api/account/passkeys/start` | сессия | `{name, password}`, начать регистрацию |
 | `POST /api/account/passkeys/finish` | сессия | завершить регистрацию |
 | `DELETE /api/account/passkeys/{id}` | сессия | `{password}`, удалить ключ |
+| `GET /api/infrastructure` | сессия | core/dock/узлы/storage, freshness и пороги; частичные ошибки явны |
 | `GET /api/logs/stream` | сессия | SSE: `logs`, `core_error`, `core_ok`, `lagged` |
 | `POST /api/logs/search` | сессия + Origin | история: from/to, filters, text, limit, cursor; ответ events/next_cursor/as_of |
 | `GET /api/traces/{trace_id}` | сессия | связанные логи ASC; from/to/limit/cursor в query |
@@ -133,6 +134,12 @@ docker compose up -d
 Страница событий получает первую страницу, общий подсчёт и stacked-график одним summary, включая текстовые фильтры. Аналитика использует одну сводку на окно, показывает приблизительный p95 `duration_ms`, покрытие измерений и до 20 action-групп по числу событий. Прошлое окно получает отдельную сводку. [Контракт summary](../docs/DockSummaryContract.md).
 
 Query API сохраняет безопасную классификацию ошибок: `invalid_request`/`invalid_query` (400), `cursor_expired` (410), `query_unavailable` (503), `query_timeout` (504); недоступный/неожиданный core — `core_unavailable` (502). Query timeout 35 секунд, Live/admin 10 секунд. Все ответы `/api/*` имеют `Cache-Control: no-store`.
+
+## Инфраструктура
+
+`/infrastructure` показывает цепочку, зарегистрированные relay/агенты, heartbeat/версию/spool/последнее событие, lag публикации и WAL core, SSE/сессии Dock и текущее место на filesystem core. `GET /api/infrastructure` требует сессию, no-store; query/admin секреты остаются в Dock. Опрос через 10 секунд после завершения предыдущего запроса; ошибка сохраняет явно устаревший снимок.
+
+У agent/relay `LOGNARA_HEARTBEAT_INTERVAL_MS` default 10000, диапазон 1..30000 мс. TTL 60 с, idle 300 с, spool degraded от 80%; до первого heartbeat «Нет данных», молчащий relay не доказывает отключение агента. История, per-node dropped, p95 доставки и прогноз диска не реализованы; source-ссылки строят фильтр по конфигурации, не проверяют agent_id событий. [Полный контракт](../docs/DockInfrastructureContract.md).
 
 ## Разработка
 

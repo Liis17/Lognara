@@ -1,0 +1,76 @@
+# Инфраструктура Dock (этап 6)
+
+Реализован мониторинг цепочки Agent → Relay → Core → Dock, зарегистрированных узлов и текущего места на файловой системе core. Управление профилями и одноразовыми токенами остаётся в `/access`. Бинарный контракт пачек и raw-схема событий не меняются.
+
+## Heartbeat и идентичность
+
+Agent отправляет JSON на `POST /v1/heartbeat` relay с прежним персональным `LOGNARA_RELAY_TOKEN`. Авторизация SHA-256 по кешу зарегистрированных агентов выполняется до чтения тела; принятый hash становится внутренним контекстом запроса. Heartbeat не принимает произвольный agent_id. Relay хранит последний отчёт на hash в памяти, удаляет отозванные записи после обновления кеша и перестаёт пересылать отчёты старше 300 секунд.
+
+Relay отправляет JSON на `POST /v1/heartbeat` core с персональным `LOGNARA_CORE_TOKEN`. Core определяет relay_id по Bearer-токену и сопоставляет каждый `token_sha256` с агентом именно этого relay в `access.sqlite3`. Чужие, отозванные и неразбираемые хеши пропускаются. Последние отчёты relay и принятых агентов сохраняются одной транзакцией в `heartbeats(kind,node_id,received_at,telemetry)`; более старое received_at не заменяет новое. Удаление профиля удаляет и его heartbeat.
+
+У обоих процессов `LOGNARA_HEARTBEAT_INTERVAL_MS`: по умолчанию **10000**, допустимо **1..30000 миллисекунд**. Первый тик сразу, HTTP timeout 5 секунд; ошибки heartbeat не блокируют приём и доставку логов. Адрес строится заменой последней части `LOGNARA_RELAY_URL` / `LOGNARA_CORE_URL` через `join("heartbeat")`: обычный `/v1/batches` становится `/v1/heartbeat`.
+
+Все отметки передаются относительным возрастом `*_ms_ago`, измеренным монотонными часами процесса. Relay добавляет возраст полученного heartbeat агента (`heartbeat_ms_ago`); core вычитает его из собственного времени, затем переводит возраста отметок агента относительно этого момента. Так часы agent/relay не задают свежесть. Это приближение по времени получения, без компенсации сетевого transit time. Допустимый возраст не больше `100 * 365` дней; вычитание выполняется в i128 с ограничением снизу i64. `null` означает, что отметки в текущем процессе ещё не было.
+
+Agent: версия сборки, настроенные `environment/server/backend/service/service_instance`, spool used/limit/records, последнее durable добавление записи, успешная доставка, ошибка доставки и число неудачных попыток с запуска. Relay: версия, spool used/limit/events, последний приём событий, успех/ошибка доставки, число неудачных попыток с запуска, среднее принятых событий/с за последний интервал heartbeat. Счётчики и локальные отметки обнуляются после рестарта; spool сохраняется. Это не счётчик потерянных событий.
+
+Лимиты JSON: relay принимает до 64 KiB от одного агента; core — до 4 MiB и 10000 отчётов агентов. Версия непустая, строки до 256 байт без управляющих символов, rate конечный и неотрицательный. Успех 204, неверное тело 400, превышение тела 413, неверный токен 401. Новый heartbeat не превращает source-поля в доказанную принадлежность событий узлу.
+
+## Core API
+
+`GET /v1/admin/relays` и `/v1/admin/agents` (admin Bearer) сохраняют прежние профили и добавляют `heartbeat` при наличии и общий `as_of` в часах core. Отсутствующий heartbeat до первого отчёта допустим. Hash/токен в списках не возвращается. Миграция добавляет таблицу в существующий access-реестр без изменения идентификаторов и токенов.
+
+`GET /v1/status` (query Bearer):
+
+```ts
+interface CoreStatus {
+  version: string; as_of: string; ready: boolean;
+  visible_sequence: number; visibility_lag_ms: number;
+  wal_bytes: number; wal_limit_bytes: number;
+  storage: {
+    segments: number; // только закрытые сегменты
+    parquet_bytes: number; // logs.parquet закрытых сегментов
+    index_bytes: number; // файлы индексов закрытых И активного сегмента
+    oldest_event_at: string | null; // min timestamp событий закрытых и активного сегмента
+    retention_seconds: number; // фактическая конфигурация
+    disk_total_bytes: number; disk_free_bytes: number; // filesystem data_dir
+  };
+}
+```
+
+Snapshot удерживает сегменты от удаления retention во время подсчёта; размеры могут меняться при работе активного индекса/перестроении. Исчезнувшие файлы пропускаются. Метрики диска относятся ко всей файловой системе `data_dir`, а не к квоте Lognara. WAL берётся из текущей метрики core. UI показывает Parquet, индексы, WAL, свободное и остаток занятого как «Прочее». Oldest event — время события, а retention применяется по времени поступления; это разные величины. `visibility_lag_ms` — lag публикации WAL → поиск, **не p95 доставки event → core**.
+
+## Dock API и статусы
+
+`GET /api/infrastructure` требует сессию `AuthUser`, отдаёт `Cache-Control: no-store`. Dock параллельно получает status (query token), оба списка (admin token) и число действующих сессий по TTL/idle. Запросы к core используют обычный клиент с timeout 10 секунд; upstream-секреты и тексты ошибок не выдаются. Ошибка одного источника не обнуляет остальные: core `unavailable`, storage null; при ошибке списка `registry:false`, nodes пусты; ошибка счётчика сессий даёт `sessions:null`.
+
+Ответ: `as_of`, `thresholds`, `core`, `storage`, `dock`, `registry`, `nodes`. `core.status`: `online` при ready, `not_ready` при false, `unavailable` при ошибке. Dock сообщает свою версию, число открытых SSE receivers и число действующих записей сессий текущего экземпляра. Сессии — не уникальные люди. `as_of` при доступном реестре берётся из списка relay core; fallback при ошибке — часы dock. Status и два списка запрашиваются независимо и не образуют атомарный снимок.
+
+| Статус узла | Правило, в порядке приоритета |
+|---|---|
+| `unknown`, `no_heartbeat` | Heartbeat ещё не приходил. |
+| `offline` | Последний heartbeat старше 60 секунд. |
+| `unknown`, `relay_silent` | Heartbeat агента устарел, его relay offline/unknown или отсутствует: отключение самого агента не доказано. |
+| `degraded`, `spool` | При свежем heartbeat spool >=80% положительного лимита. |
+| `degraded`, `delivery` | Ошибка доставки не старше 60 секунд и новее последнего успеха, либо успеха ещё не было. |
+| `idle` | Heartbeat свежий, но последнее событие отсутствует или старше 300 секунд. |
+| `online` | Остальные узлы со свежим heartbeat. |
+
+Пороги возвращаются явно (`heartbeat_ttl_seconds:60`, `idle_seconds:300`, `spool_warn_percent:80`). Offline предшествует degraded; spool предшествует delivery. В таблице сначала offline, degraded, unknown, idle, online, затем kind/name. Старые показатели остаются последним наблюдением, а не текущим измерением. Rate/spool цепочки агрегируются только по узлам со свежим heartbeat.
+
+## Страница `/infrastructure`
+
+Показывает состояния цепочки, таблицу узлов, heartbeat/последнее событие/версию/spool, lag публикации и WAL core, SSE/сессии Dock, хранилище и настроенный retention. Ручное обновление и автоматический опрос: следующий запрос через **10 секунд после завершения предыдущего**, без перекрытия. При сетевой ошибке последний успешный снимок сохраняется с явным предупреждением и визуальной отметкой устаревших данных; статусы не выдаются за подтверждённые. Частичная недоступность core/реестра и отсутствие heartbeat имеют отдельные состояния.
+
+Ссылка агента ведёт в `/logs` за час с точными фильтрами его source-конфигурации. Это фильтр по полям, **не проверенная связь событий с agent_id/relay_id**. `/access` сохраняет создание/удаление и выдачу токена один раз.
+
+## Границы этапа
+
+Не реализованы: история телеметрии и графики по узлам, per-node dropped, доказанная provenance событий по agent_id/relay_id, p95 сквозной доставки, прогноз заполнения диска. Существующие dropped в бинарных пачках не стали узловой телеметрией. Нет произвольного изменения retention из UI. Алерты Telegram/Discord (этап 7) и полноценные spans (этап 8) остаются дальнейшими этапами.
+
+## Источники
+
+- [Agent heartbeat](../Lognara-agent/src/heartbeat.rs), [config](../Lognara-agent/src/config.rs), [buffer](../Lognara-agent/src/buffer.rs), [sender](../Lognara-agent/src/sender.rs).
+- [Relay heartbeat](../Lognara-relay/src/heartbeat.rs), [ingest/auth](../Lognara-relay/src/ingest.rs), [config](../Lognara-relay/src/config.rs).
+- [Core DTO/время](../Lognara-core/src/telemetry.rs), [реестр](../Lognara-core/src/access.rs), [status/storage](../Lognara-core/src/status.rs), [API](../Lognara-core/src/api.rs).
+- [Dock адаптер](../Lognara-dock/src/infra.rs), [CoreClient](../Lognara-dock/src/core_client.rs), [Sessions](../Lognara-dock/src/session.rs), [Live](../Lognara-dock/src/live.rs), [страница](../Lognara-dock/web/src/pages/Infrastructure.tsx).

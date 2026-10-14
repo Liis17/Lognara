@@ -25,6 +25,7 @@ Lognara-dock/
     account.rs                /api/me, смена пароля, check_current_password
     passkey.rs                Webauthn, Challenges, вход и регистрация, список, удаление
     core_client.rs            query история/Trace/аналитика и admin CRUD relay/агентов
+    infra.rs                  авторизованная сводка core/dock/узлов, свежесть и пороги
     query.rs                  typed DTO и авторизованные proxy search/trace/histogram/group-by/summary
     live.rs                   Live (poller + broadcast), SSE stream
   tests/
@@ -37,6 +38,7 @@ Lognara-dock/
     query.rs                  query Bearer, DTO/cursor, Origin/сессия, no-store, ошибки, timeout
     patterns.rs               скрытие по пользователю, лимит 1000, exclude_patterns, ошибки паттернов
     issues.rs                 общий статус, история, Origin, проверка ответов core, наблюдатель
+    infra.rs                  session/no-store, частичные ошибки, TTL/idle/spool и relay_silent
     static.rs                 SPA fallback и 404 для /api
   web/
     public/fonts/             локальные Commissioner / IBM Plex Mono, OFL, provenance
@@ -48,14 +50,16 @@ Lognara-dock/
     src/components/Histogram.tsx count SVG, сравнение, доступные числа и drilldown
     src/components/Patterns.tsx  режим паттернов: таблица, sparkline, детали, скрытие, переход к событиям
     src/webauthn.ts           base64url ↔ ArrayBuffer для navigator.credentials
-    src/App.tsx               проверка /api/me, маршруты /login, /logs, /errors, /analytics, /access, /settings
+    src/App.tsx               проверка /api/me, маршруты /login, /logs, /errors, /analytics, /infrastructure, /access, /settings
     src/pages/Login.tsx       пароль и кнопка passkey
     src/pages/Logs.tsx        история/cursor/Trace, URL, отдельный Live, детали, экспорт
     src/pages/Errors.tsx      проблемы: вкладки статусов, stack trace, история, решение и переходы
     src/pages/Analytics.tsx   единая сводка, stacked levels, p95/coverage/actions, сравнение и переход в логи
+    src/pages/Infrastructure.tsx цепочка, узлы и диск, последовательный polling и stale-снимок
     src/pages/Access.tsx      профили relay/агентов, создание, одноразовый токен, удаление
     src/pages/Settings.tsx    смена пароля, список и добавление passkey
     playwright.config.ts     Chromium, Vite webServer и сценарии tests/dock.spec.ts и tests/errors.spec.ts
+    tests/infrastructure.spec.ts состояния/переходы, polling/error recovery, mobile и overflow
     tests/dock.spec.ts        вход, аккаунт, поиск, cursor, Trace/ссылка, аналитика, Live, mobile
 ```
 

@@ -43,6 +43,9 @@ pub fn status(core: &Core) -> io::Result<Status> {
         parquet_bytes += size(&segment.path.join("logs.parquet"))?;
         index_bytes += size(&segment.path.join("index"))?;
     }
+    if let Some(active) = &snapshot.active {
+        index_bytes += size(&config.data_dir.join(&active.meta.path).join("index"))?;
+    }
     let oldest = snapshot
         .closed
         .iter()

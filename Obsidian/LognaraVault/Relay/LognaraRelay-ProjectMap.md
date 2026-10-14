@@ -18,7 +18,8 @@ Lognara-relay/
 │   ├── wire_budget.rs      общая no-alloc оценка MessagePack из lognara-spool, идентичная core
 │   ├── normalize.rs        разбор Record в Event
 │   ├── agents.rs           список SHA-256 из core, атомарный кеш .agents, sync 10s
-│   ├── ingest.rs           Bearer-аутентификация до чтения тела, POST /v1/batches
+│   ├── heartbeat.rs        версия/spool/rate relay, последние отчёты агентов → core
+│   ├── ingest.rs           Bearer-аутентификация до чтения тела, POST /v1/batches и /v1/heartbeat
 │   ├── memory.rs           резервы, admission и ожидание blocking-работников
 │   ├── model_budget.rs     общий бюджет Batch и нормализации JSON/base64
 │   ├── spool.rs            дисковая очередь пачек

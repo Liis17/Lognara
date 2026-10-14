@@ -22,6 +22,7 @@ use crate::auth::{self, LoginLimiter};
 use crate::config::Config;
 use crate::core_client::CoreClient;
 use crate::htpasswd::Htpasswd;
+use crate::infra;
 use crate::issues;
 use crate::live::{self, Live};
 use crate::passkey::{self, Challenges};
@@ -165,6 +166,7 @@ pub fn router(app: AppState) -> Router {
             get(access::list_agents).post(access::create_agent),
         )
         .route("/agents/{id}", delete(access::delete_agent))
+        .route("/infrastructure", get(infra::overview))
         .layer(middleware::from_fn_with_state(
             app.clone(),
             session::require_origin,

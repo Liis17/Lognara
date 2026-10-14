@@ -203,10 +203,10 @@ export function prependLive(current: LogEvent[], batch: LogEvent[], limit = MAX_
   return { rows: combined.slice(0, limit), trimmed: combined.length > limit };
 }
 
-export function sourceQuery(event: LogEvent): string {
+export function sourceQuery(event: Pick<LogEvent, "environment" | "server" | "backend" | "service" | "service_instance">): string {
   return ["environment", "server", "backend", "service", "service_instance"]
     .flatMap((field) => {
-      const value = event[field as keyof LogEvent];
+      const value = event[field as keyof typeof event];
       return typeof value === "string" ? [`${field}:${JSON.stringify(value)}`] : [];
     }).join(" AND ");
 }

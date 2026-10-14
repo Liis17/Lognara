@@ -94,6 +94,11 @@ impl Live {
         )
     }
 
+    /// Открытые SSE-потоки.
+    pub fn clients(&self) -> usize {
+        self.tx.receiver_count()
+    }
+
     pub fn is_running(&self) -> bool {
         self.state.lock().unwrap().running
     }

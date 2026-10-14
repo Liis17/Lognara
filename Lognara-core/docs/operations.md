@@ -42,6 +42,12 @@ Ingest budget должен вмещать `body_limit + 2 * (decoded_limit + 1) 
 
 Токены задавайте в закрытом environment-файле сервиса. Admin-токен нужен core и dock; relay хранит только свой персональный токен, агенты — свои. Реестр `access.sqlite3` с хешами входит в резервную копию всего каталога данных. Relay и агенты регистрируются через dock/admin API; их токены выдаются один раз. При пересоздании профиля обновите токен соответствующего процесса: 401/403 сохраняют пачки в spool. Все три лимита relay `LOGNARA_CORE_MAX_BODY_BYTES`, `LOGNARA_CORE_MAX_DECODED_BYTES`, `LOGNARA_CORE_MAX_MODEL_BYTES` должны соответствовать core. Не уменьшайте их, пока старые крупные пачки ожидают в spool: core возвращает окончательный 413. Одиночное событие, превышающее лимиты, relay диагностирует и учитывает как потерю; разделить его без изменения контракта невозможно.
 
+## Мониторинг инфраструктуры
+
+Query-защищённый `GET /v1/status` возвращает version/ready, visible sequence и lag публикации, WAL used/limit, текущие Parquet/index bytes (индекс включает активный сегмент), число закрытых сегментов, oldest event, настроенный retention и total/available filesystem data_dir. Это не квота Lognara и не p95 доставки. Размеры могут меняться при работе активного индекса.
+
+`POST /v1/heartbeat` с персональным relay-токеном сохраняет последний отчёт relay/его агентов в access.sqlite3. Agent/relay используют `LOGNARA_HEARTBEAT_INTERVAL_MS` default 10000 (1..30000 мс); admin-списки включают heartbeat/as_of. Dock `/infrastructure` использует TTL 60 с, idle 300 с, spool 80%, явно отличает unknown и устаревшие данные. История измерений/прогноз не ведутся. [Полный контракт](../../docs/DockInfrastructureContract.md).
+
 ## Запуск за HTTPS
 
 Из корня репозитория:

@@ -69,6 +69,14 @@ API: `POST /api/issues/search`, `POST /api/issues/{fingerprint}/details`, `POST 
 | `eventsToCsv(events: LogEvent[]): string` | Формирует CSV загруженных событий с BOM, multiline и защитой формул. |
 | `Histogram(props: HistogramProps): ReactElement` | Отображает count, сравнение, доступную таблицу и выбор временной корзины. |
 
+## Инфраструктура
+
+`/infrastructure` использует `GET /api/infrastructure` с сессией и no-store. `infra::overview(State<AppState>, AuthUser): Json<Infrastructure>` параллельно объединяет query status core, admin-реестр и активные сессии Dock. `CoreClient::status(&self): Result<CoreStatus, CoreError>` получает типизированный status; `Live::clients(): usize` считает открытые SSE receivers, `Sessions::active(): Result<u64, StoreError>` — записи сессий в пределах TTL/idle (ошибка → null).
+
+Свежесть относительно as_of core: TTL 60 секунд, idle 300 секунд, spool degraded от 80%; недавняя ошибка после последнего успеха тоже degraded. До первого heartbeat unknown; устаревший агент при молчащем relay unknown/relay_silent. Узлы сортируются по приоритету offline/degraded/unknown/idle/online. Опрос UI через 10 секунд после завершения предыдущего запроса, ручное обновление; при ошибке последний снимок помечается устаревшим. Core ready=false и недоступность/частичный отказ реестра показываются отдельно.
+
+Хранилище: filesystem total/free, Parquet/индексы (включая активный)/WAL, oldest event и retention. Source-ссылки агента строят фильтры по конфигурации за час, не подтверждают agent_id события. История телеметрии, per-node dropped, p95 доставки и прогноз диска отсутствуют. Полный [контракт инфраструктуры](../../../docs/DockInfrastructureContract.md).
+
 ## Параметры запуска
 
 | Переменная | Обяз. | По умолчанию | Назначение |

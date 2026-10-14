@@ -8,8 +8,8 @@ use crate::{model::format_timestamp, wire::Source};
 pub const MAX_BODY: usize = 4 << 20;
 const MAX_AGENTS: usize = 10_000;
 const MAX_TEXT: usize = 256;
-/// Возраст больше суток считается ошибкой узла.
-const MAX_AGE_MS: u64 = 86_400_000;
+/// Исторические отметки остаются допустимыми и у давно работающих узлов.
+const MAX_AGE_MS: u64 = 100 * 365 * 24 * 60 * 60 * 1_000;
 
 #[derive(Deserialize)]
 pub struct RelayHeartbeat {
@@ -160,7 +160,7 @@ impl AgentReport {
 
 /// Момент `ago` миллисекунд до `now` (наносекунды core).
 pub fn before(now: i64, ago: u64) -> i64 {
-    now - ago as i64 * 1_000_000
+    (i128::from(now) - i128::from(ago) * 1_000_000).max(i128::from(i64::MIN)) as i64
 }
 
 fn at(now: i64, ago: Option<u64>) -> Option<String> {
@@ -177,4 +177,61 @@ fn version(value: &str) -> bool {
 
 fn text(value: &str) -> bool {
     value.len() <= MAX_TEXT && !value.chars().any(char::is_control)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn heartbeat(ago: u64) -> RelayHeartbeat {
+        serde_json::from_value(json!({
+            "relay": {
+                "version": "1", "spool": {"used_bytes": 0, "limit_bytes": 1, "records": 0},
+                "last_ingest_ms_ago": ago, "last_delivery_ms_ago": ago,
+                "last_failure_ms_ago": ago, "delivery_failures": 1, "events_per_second": 0.0
+            },
+            "agents": [{
+                "token_sha256": "00".repeat(32), "heartbeat_ms_ago": 300_000,
+                "telemetry": {
+                    "version": "1", "source": {"server": "s", "backend": "b", "service": "api"},
+                    "spool": {"used_bytes": 0, "limit_bytes": 1, "records": 0},
+                    "last_record_ms_ago": ago, "last_delivery_ms_ago": ago,
+                    "last_failure_ms_ago": ago, "delivery_failures": 1
+                }
+            }]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn historical_marks_remain_valid_and_keep_their_time() {
+        let ago = 86_400_001;
+        let heartbeat = heartbeat(ago);
+        assert!(heartbeat.valid());
+        let now = 1_800_000_000_000_000_000;
+        let expected = Some(format_timestamp(now - ago as i64 * 1_000_000));
+        let relay = heartbeat.relay.state(now);
+        assert_eq!(relay.last_ingest_at, expected);
+        assert_eq!(relay.last_delivery_at, expected);
+        assert_eq!(relay.last_failure_at, expected);
+        let agent = heartbeat.agents.into_iter().next().unwrap();
+        let received_at = before(now, agent.heartbeat_ms_ago);
+        let state = agent.telemetry.state(received_at);
+        let expected = Some(format_timestamp(received_at - ago as i64 * 1_000_000));
+        assert_eq!(state.last_record_at, expected);
+        assert_eq!(state.last_delivery_at, expected);
+        assert_eq!(state.last_failure_at, expected);
+    }
+
+    #[test]
+    fn historical_age_bound_rejects_extremes_without_overflow() {
+        assert!(heartbeat(MAX_AGE_MS).valid());
+        for ago in [MAX_AGE_MS + 1, u64::MAX] {
+            assert!(!heartbeat(ago).valid());
+        }
+        assert_eq!(before(i64::MIN, 1), i64::MIN);
+        assert_eq!(before(i64::MAX, u64::MAX), i64::MIN);
+        assert_eq!(before(0, MAX_AGE_MS), -(MAX_AGE_MS as i64) * 1_000_000);
+    }
 }

@@ -11,6 +11,7 @@ use time::format_description::well_known::Rfc3339;
 use url::Url;
 
 use crate::config::Config;
+use crate::infra::CoreStatus;
 use crate::issues::{
     CoreSearchRequest, DetailsRequest as IssueDetailsRequest, IssueDetails, IssueResponse,
     RecurrenceRequest, RecurrenceResponse,
@@ -325,6 +326,17 @@ impl CoreClient {
             return Err(CoreQueryError::Unexpected);
         }
         Ok(reply)
+    }
+
+    /// Версия, lag публикации и хранилище core; доступно и до готовности хранилища.
+    pub async fn status(&self) -> Result<CoreStatus, CoreQueryError> {
+        let url = self.query_url.join("status").expect("core url joins path");
+        let request = self.http.get(url).timeout(REQUEST_TIMEOUT);
+        let response = request.bearer_auth(&self.token).send().await?;
+        if response.status() != StatusCode::OK {
+            return Err(CoreQueryError::Unavailable);
+        }
+        Ok(response.json().await?)
     }
 
     /// Передаёт только типизированный успешный ответ и статическую классификацию ошибок.

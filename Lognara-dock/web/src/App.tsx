@@ -4,6 +4,7 @@ import { api, type Me } from "./api";
 import Access from "./pages/Access";
 import Analytics from "./pages/Analytics";
 import Errors from "./pages/Errors";
+import Infrastructure from "./pages/Infrastructure";
 import Login from "./pages/Login";
 import Logs from "./pages/Logs";
 import Settings from "./pages/Settings";
@@ -51,6 +52,7 @@ export default function App() {
           <NavLink to="/logs">Логи</NavLink>
           <NavLink to="/errors">Ошибки</NavLink>
           <NavLink to="/analytics">Аналитика</NavLink>
+          <NavLink to="/infrastructure">Инфраструктура</NavLink>
           <NavLink to="/access">Подключения</NavLink>
           <NavLink to="/settings">Настройки</NavLink>
         </nav>
@@ -62,6 +64,7 @@ export default function App() {
           <Route path="/logs" element={<Logs onUnauthorized={() => setMe(null)} />} />
           <Route path="/errors" element={<Errors onUnauthorized={() => setMe(null)} />} />
           <Route path="/analytics" element={<Analytics onUnauthorized={() => setMe(null)} />} />
+          <Route path="/infrastructure" element={<Infrastructure onUnauthorized={() => setMe(null)} />} />
           <Route path="/access" element={<Access onUnauthorized={() => setMe(null)} />} />
           <Route path="/settings" element={<Settings onChange={refresh} />} />
           <Route path="*" element={<Navigate to="/logs" replace />} />

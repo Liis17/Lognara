@@ -22,7 +22,8 @@ use crate::spool::Spool;
 /// Heartbeat агента повторяется в core, пока не устарел; core хранит самый свежий.
 const KEEP_AGENT: Duration = Duration::from_secs(300);
 const MAX_TEXT: usize = 256;
-const MAX_AGE_MS: u64 = 86_400_000;
+/// Та же граница исторических отметок (100 лет), что у core.
+const MAX_AGE_MS: u64 = 100 * 365 * 24 * 60 * 60 * 1_000;
 pub const MAX_BODY: usize = 64 << 10;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -247,6 +248,29 @@ pub async fn run(
 mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
+
+    #[test]
+    fn historical_agent_marks_remain_valid_with_a_bounded_age() {
+        let mut report: AgentReport = serde_json::from_value(json!({
+            "version": "1", "source": {"environment": null, "server": "s", "backend": "b", "service": "api", "service_instance": null},
+            "spool": {"used_bytes": 0, "limit_bytes": 1, "records": 0},
+            "last_record_ms_ago": null, "last_delivery_ms_ago": null, "last_failure_ms_ago": null, "delivery_failures": 1
+        })).unwrap();
+        for ago in [86_400_001, MAX_AGE_MS] {
+            report.last_record_ms_ago = Some(ago);
+            report.last_delivery_ms_ago = Some(ago);
+            report.last_failure_ms_ago = Some(ago);
+            assert!(report.valid());
+        }
+        for ago in [MAX_AGE_MS + 1, u64::MAX] {
+            for mark in 0..3 {
+                report.last_record_ms_ago = (mark == 0).then_some(ago);
+                report.last_delivery_ms_ago = (mark == 1).then_some(ago);
+                report.last_failure_ms_ago = (mark == 2).then_some(ago);
+                assert!(!report.valid());
+            }
+        }
+    }
 
     #[tokio::test]
     async fn revoked_agents_are_not_forwarded() {

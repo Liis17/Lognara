@@ -8,6 +8,7 @@ pub mod auth;
 pub mod config;
 pub mod core_client;
 pub mod htpasswd;
+pub mod infra;
 pub mod issues;
 pub mod live;
 pub mod passkey;

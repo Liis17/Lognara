@@ -132,6 +132,12 @@ Retention смотрит max core_received_at, исключает expired сег
 | `issues::details(core: &Core, fingerprint: &str, request: IssueDetailsRequest): Result<IssueDetails, QueryError>` | Серверы, примеры и метрики проблемы. |
 | `issues::recurrences(core: &Core, request: RecurrenceRequest): Result<RecurrenceResponse, QueryError>` | Случаи наблюдаемых проблем после checkpoint Dock. |
 
+## Мониторинг инфраструктуры
+
+Relay с персональным токеном отправляет `POST /v1/heartbeat`; `Access::record_heartbeat(relay_id: i64, heartbeat: RelayHeartbeat): Result<usize>` одной транзакцией сохраняет последний отчёт relay и отчёты агентов с hash, зарегистрированным за ним. `heartbeats` в access.sqlite3 переживает рестарт; более старые отчёты не заменяют новые. Списки admin API добавляют heartbeat и as_of core; до первого отчёта поле может отсутствовать. Относительные возраста ограничены 100*365 днями, перевод в наносекунды выполняется через i128.
+
+`status::status(core: &Core): io::Result<Status>` обслуживает query-защищённый `GET /v1/status`: версия, ready, visible sequence/lag, WAL и лимит, число закрытых сегментов, Parquet, индексы включая активный сегмент, oldest event и настроенный retention, total/available filesystem data_dir. Lag публикации не является p95 доставки; размеры не означают квоту процесса. Snapshot удерживает сегменты от retention во время подсчёта. Полный [контракт инфраструктуры](../../../docs/DockInfrastructureContract.md).
+
 ## Эксплуатация и проверки
 
 `Lognara-core/docs/operations.md` описывает все переменные, запуск за TLS-прокси, остановку, резервную копию всего каталога и восстановление. SIGTERM/SIGINT прекращает HTTP, дорабатывает WAL и закрывает открытый сегмент. Метрики Prometheus защищены query-токеном; health доступен без токена. В примере Compose корневого README каталог `LOGNARA_DATA_DIR` монтируется из `LOGNARA_CORE_DATA` (папка на хосте) или volume `lognara-core-data`.

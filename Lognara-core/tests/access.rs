@@ -392,7 +392,7 @@ async fn heartbeats_follow_authenticated_relay_and_core_clock() {
     let mut negative = relay_report();
     negative["events_per_second"] = json!(-1.0);
     let mut old = relay_report();
-    old["last_ingest_ms_ago"] = json!(86_400_001);
+    old["last_ingest_ms_ago"] = json!(u64::MAX);
     let mut unnamed = agent_report("srv-1");
     unnamed["version"] = json!("");
     for bad in [

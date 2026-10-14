@@ -23,6 +23,8 @@ Parent: [[Core/LognaraCore]]
 | patterns | API паттернов и деталей по сырым событиям, UDF `log_pattern_id`, общие окно и сканирование |
 | issue_identity | Fingerprint проблемы v1: exception.type и фреймы без позиций, fallback к pattern_id |
 | issues | API проблем, деталей и возвратов, UDF `log_issue_fingerprint` |
+| telemetry | Heartbeat DTO, проверка возрастов и перевод в часы core |
+| status | Версия/ready/WAL, размеры Parquet/индексов и filesystem data_dir |
 | metrics | Счётчики и gauges Prometheus |
 | tests | issues.rs: группировка, статусы вкладок, fingerprint в search/summary, рестарт, возвраты после checkpoint; patterns.rs: counts, прошлое окно, скрытие, pattern_id в search/summary, рестарт, поздние события и неполная история; access.rs: CRUD, изоляция и отзыв токенов; контракт, HTTP, WAL, Parquet, поиск, аналитика, retention, аварийные subprocess и настоящие agent/relay и восстановление всей цепочки после недоступности core |
 | examples/relay_fixture | Fixture через настоящий encoder relay; запись без происхождения (`origin: None`) сохраняет прежний контракт |
