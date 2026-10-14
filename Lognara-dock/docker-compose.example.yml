@@ -3,18 +3,17 @@
 #   mkdir -p auth data && sudo chown 1000:1000 auth data
 #   htpasswd -B -C 12 -c auth/htpasswd liis
 #   в .env: LOGNARA_QUERY_TOKEN=<query-токен core>
-#   необязательно в .env: LOGNARA_ADMIN_TOKEN=<admin-токен core>, пусто отключает определения метрик
+#           LOGNARA_CORE_ADMIN_TOKEN=<admin-токен core>
 services:
   lognara-dock:
-    build: .
+    image: ghcr.io/liis17/lognara-dock:${LOGNARA_IMAGE_TAG:-master}
     user: "1000:1000"                       # владелец ./auth и ./data на хосте
     environment:
       LOGNARA_DOCK_PUBLIC_URL: https://dock.liis17.com
       LOGNARA_DOCK_LISTEN_ADDR: "0.0.0.0:7403"
       LOGNARA_DOCK_CORE_URL: http://lognara-core:7402
       LOGNARA_DOCK_CORE_TOKEN: ${LOGNARA_QUERY_TOKEN:?Задайте LOGNARA_QUERY_TOKEN}
-      # Необязательно: admin-токен core для определений метрик, пусто = отключено (тот же секрет, что LOGNARA_ADMIN_TOKEN в core).
-      LOGNARA_DOCK_CORE_ADMIN_TOKEN: ${LOGNARA_ADMIN_TOKEN:-}
+      LOGNARA_DOCK_CORE_ADMIN_TOKEN: ${LOGNARA_CORE_ADMIN_TOKEN:?Задайте LOGNARA_CORE_ADMIN_TOKEN}
       # Необязательные, указаны значения по умолчанию:
       # LOGNARA_DOCK_RP_ID: dock.liis17.com
       # LOGNARA_DOCK_HTPASSWD_FILE: /etc/lognara-dock/auth/htpasswd

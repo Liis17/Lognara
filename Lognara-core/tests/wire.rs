@@ -11,7 +11,7 @@ fn decodes_real_relay_encoder_and_preserves_nanoseconds_and_attributes() {
         core_wire::{self, CoreBatch, Group, Source},
         normalize,
     };
-    let event = normalize::event(Record { received_at: 1_790_678_511_894_000_001,
+    let event = normalize::event(Record { origin: None, received_at: 1_790_678_511_894_000_001,
         payload: Payload::Json(r#"{"id":"019d3f8e-7c2a-7b3e-9f1d-2a4b6c8d0e1f","timestamp":"2026-09-29T10:41:51.871000001Z","level":"error","message":"oops","attributes":{"large":18446744073709551615,"nested":[true,null,{"x":0.5}]}}"#.into()) });
     let body = core_wire::encode(&CoreBatch {
         dropped: 2,
@@ -94,7 +94,7 @@ fn relay_splits_amplifying_attributes_to_the_same_model_budget_as_core() {
 fn configuration_requires_separate_tokens_and_valid_limits() {
     assert!(Config::from_lookup(|_| None).is_err());
     let lookup = |key: &str| match key {
-        "LOGNARA_INGEST_TOKEN" => Some("ingest".into()),
+        "LOGNARA_ADMIN_TOKEN" => Some("ingest".into()),
         "LOGNARA_QUERY_TOKEN" => Some("query".into()),
         _ => None,
     };
@@ -117,21 +117,4 @@ fn configuration_requires_separate_tokens_and_valid_limits() {
         })
         .is_err()
     );
-    assert!(config.admin_token.is_none());
-    let with_admin = |token: &'static str| {
-        Config::from_lookup(|key| {
-            if key == "LOGNARA_ADMIN_TOKEN" {
-                Some(token.into())
-            } else {
-                lookup(key)
-            }
-        })
-    };
-    assert_eq!(
-        with_admin("admin").unwrap().admin_token.as_deref(),
-        Some("admin")
-    );
-    assert!(with_admin("").unwrap().admin_token.is_none());
-    assert!(with_admin("ingest").is_err());
-    assert!(with_admin("query").is_err());
 }

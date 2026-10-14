@@ -33,7 +33,6 @@ const WEEK: i64 = 604_800;
 
 fn config(path: &Path, segment_rows: usize) -> Config {
     let mut cfg = Config::from_lookup(|key| match key {
-        "LOGNARA_INGEST_TOKEN" => Some("ingest".into()),
         "LOGNARA_QUERY_TOKEN" => Some("query".into()),
         "LOGNARA_ADMIN_TOKEN" => Some("admin".into()),
         _ => None,

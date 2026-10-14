@@ -48,7 +48,7 @@ interface Editor {
   start: EditorStart;
 }
 
-export default function Metrics({ seriesAdmin, onUnauthorized }: { seriesAdmin: boolean; onUnauthorized: () => void }) {
+export default function Metrics({ onUnauthorized }: { onUnauthorized: () => void }) {
   const [metrics, setMetrics] = useState<SeriesMetric[]>([]);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState("");
@@ -154,7 +154,7 @@ export default function Metrics({ seriesAdmin, onUnauthorized }: { seriesAdmin: 
       <aside className="metrics-list">
         <div className="toolbar">
           <strong>Метрики</strong>
-          {seriesAdmin && <button onClick={newFromLogs}>Новая метрика из текста логов</button>}
+          <button onClick={newFromLogs}>Новая метрика из текста логов</button>
         </div>
         {error && <p className="error">{error}</p>}
         {!ready && <p className="muted">Загрузка…</p>}
@@ -197,7 +197,7 @@ export default function Metrics({ seriesAdmin, onUnauthorized }: { seriesAdmin: 
           <section className="chart-panel">
             <div className="toolbar">
               <h2>{metric.definition?.title || metric.name}</h2>
-              {seriesAdmin && <button onClick={() => configure(metric)}>Настроить</button>}
+              <button onClick={() => configure(metric)}>Настроить</button>
             </div>
             <p className="muted">
               {metric.service} / {metric.name}

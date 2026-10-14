@@ -19,7 +19,6 @@ pub async fn me(State(app): State<AppState>, user: AuthUser) -> Result<Json<Valu
     Ok(Json(json!({
         "username": user.username,
         "passkeys": passkeys,
-        "series_admin": app.core.admin_enabled(),
     })))
 }
 

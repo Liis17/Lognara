@@ -10,7 +10,7 @@
                                        └─ /var/lib/lognara-dock/dock.sqlite3 (папка с хоста)
 ```
 
-Query-токен и admin-токен core хранятся только в dock и не передаются в браузер.
+Query- и admin-токены core хранятся только в dock и не передаются в браузер.
 
 ## Вход
 
@@ -45,6 +45,14 @@ docker run --rm httpd:2.4 htpasswd -Bbn liis 'пароль' >> auth/htpasswd
 
 **Ограничение.** Core ищет только по времени события. Если за один опрос в окне появилось больше 1000 новых событий, лента покажет самые свежие 1000. Полное решение требует tail-endpoint в core по порядку публикации.
 
+## Подключения relay и агентов
+
+После запуска core и dock войдите и откройте `/access` («Подключения»). Создайте relay по имени, затем агента по имени с выбором relay. Dock показывает токен только после создания и готовую строку `.env`: `LOGNARA_RELAY_CORE_TOKEN=lnr_…` либо `LOGNARA_AGENT_TOKEN=lna_…`. Сохраните её сразу; повторно показать секрет нельзя. Токены передаются процессам как `LOGNARA_CORE_TOKEN` relay и `LOGNARA_RELAY_TOKEN` агента.
+
+Реестр и SHA-256-хеши хранятся в core. Списки не содержат токенов. Перед удалением relay удалите его агентов. Core сразу отзывает relay-токен; relay применяет изменение списка агентов при следующем успешном обновлении (каждые 10 секунд). При недоступном core продолжает работать по кешу. Имя агента уникально внутри relay; метаданные источника не проверяются.
+
+API dock: GET/POST `/api/relays`, `/api/agents`, DELETE `/api/relays/{id}`, `/api/agents/{id}`. Требуется сессия, изменения требуют корректный Origin. Конфликты core возвращаются как 409, недоступность core — 502. Admin-токен core в браузер не попадает.
+
 ## Параметры
 
 Все параметры задаются переменными окружения и проверяются при старте. При ошибке процесс завершается с кодом 1 и называет переменную.
@@ -54,7 +62,7 @@ docker run --rm httpd:2.4 htpasswd -Bbn liis 'пароль' >> auth/htpasswd
 | `LOGNARA_DOCK_PUBLIC_URL` | обязательна | внешний адрес, например `https://dock.liis17.com`. Используется как origin для passkey и проверки `Origin`. `http` допускается только для `localhost` |
 | `LOGNARA_DOCK_CORE_URL` | обязательна | базовый адрес core, например `http://lognara-core:7402` |
 | `LOGNARA_DOCK_CORE_TOKEN` | обязательна | равен `LOGNARA_QUERY_TOKEN` core, ASCII без пробелов |
-| `LOGNARA_DOCK_CORE_ADMIN_TOKEN` | не задан | равен `LOGNARA_ADMIN_TOKEN` core, ASCII без пробелов; нужен для определений метрик. Пустое значение отключает их: маршруты отвечают `404 admin_disabled`, в `/api/me` `series_admin` равен `false` |
+| `LOGNARA_DOCK_CORE_ADMIN_TOKEN` | обязательна | равен `LOGNARA_ADMIN_TOKEN` core, ASCII без пробелов, отличается от query; нужен для relay, агентов и определений метрик |
 | `LOGNARA_DOCK_LISTEN_ADDR` | `127.0.0.1:7403` | в контейнере `0.0.0.0:7403` (задано в образе) |
 | `LOGNARA_DOCK_HTPASSWD_FILE` | `/etc/lognara-dock/auth/htpasswd` | файл пользователей внутри смонтированной папки |
 | `LOGNARA_DOCK_DATA_DIR` | `/var/lib/lognara-dock` | SQLite с сессиями и passkey, lock-файл |
@@ -73,7 +81,7 @@ docker run --rm httpd:2.4 htpasswd -Bbn liis 'пароль' >> auth/htpasswd
 ## Docker и nginx
 
 - [`Dockerfile`](Dockerfile) собирает фронтенд и бинарник. В образе процесс работает от `1000:1000`.
-- [`docker-compose.example.yml`](docker-compose.example.yml) содержит все переменные, тома `./auth` и `./data`, публикует порт только на `127.0.0.1`.
+- [`docker-compose.example.yml`](docker-compose.example.yml) использует `ghcr.io/liis17/lognara-dock:${LOGNARA_IMAGE_TAG:-master}`, содержит все переменные, тома `./auth` и `./data`, публикует порт только на `127.0.0.1`.
 - [`nginx.example.conf`](nginx.example.conf) показывает TLS и отдельный `location` для SSE без буферизации.
 
 nginx должен передавать заголовок `Origin` без изменений.
@@ -82,9 +90,11 @@ nginx должен передавать заголовок `Origin` без из�
 cd Lognara-dock
 cp docker-compose.example.yml docker-compose.yml   # поправьте домен и адрес core
 echo "LOGNARA_QUERY_TOKEN=<query-токен core>" > .env
-# необязательно, для определений метрик: echo "LOGNARA_ADMIN_TOKEN=<admin-токен core>" >> .env
-docker compose up -d --build
+docker compose pull
+docker compose up -d
 ```
+
+Образ публикуется после успешного CI в `master` для `linux/amd64`. Для фиксации сборки задайте в `.env` `LOGNARA_IMAGE_TAG=sha-<полный SHA коммита>`; используйте тот же тег для core и relay. До первой публикации или для локальной сборки замените `image` на `build: .` и запускайте `docker compose up -d --build`. Приватный пакет GHCR требует авторизации; для публичного скачивания владелец должен включить Public в настройках пакета. Общая схема описана в [корневом README](../README.md#обновление).
 
 ## HTTP API
 
@@ -94,7 +104,7 @@ docker compose up -d --build
 | `POST /api/auth/login` | открыт | `{username, password}`, ставит cookie сессии |
 | `POST /api/auth/passkey/start`, `/finish` | открыт | вход по passkey |
 | `POST /api/auth/logout` | сессия | завершить сессию |
-| `GET /api/me` | сессия | `{username, passkeys, series_admin}`; `series_admin` - задан ли admin-токен |
+| `GET /api/me` | сессия | `{username, passkeys}` |
 | `POST /api/account/password` | сессия | `{current, new}` |
 | `GET /api/account/passkeys` | сессия | список ключей |
 | `POST /api/account/passkeys/start` | сессия | `{name, password}`, начать регистрацию |
@@ -108,9 +118,9 @@ docker compose up -d --build
 | `POST /api/series/preview` | сессия, admin | предпросмотр правила на логах core |
 | `GET /*` | открыт | SPA, неизвестный путь отдаёт `index.html` |
 
-Маршруты с пометкой admin работают только при заданном `LOGNARA_DOCK_CORE_ADMIN_TOKEN`; иначе они отвечают `404` с кодом `admin_disabled`. Тело запроса к core передаётся как есть, проверяет его core.
+Маршруты с пометкой admin dock вызывает в core с `LOGNARA_DOCK_CORE_ADMIN_TOKEN`. Тело запроса к core передаётся как есть, проверяет его core.
 
-Ошибки возвращаются как JSON `{"error": "<код>"}`: `unauthorized`, `forbidden`, `too_many_attempts`, `invalid_current_password`, `password_too_short`, `password_too_long`, `invalid_name`, `challenge_expired`, `passkey_rejected`, `passkey_exists`, `not_found`. Для метрик добавлены `core_unavailable` (503: core недоступен, не ответил вовремя или вернул 5xx), `invalid` (400: ответ содержит `detail` с причиной от core) и `admin_disabled` (404).
+Ошибки возвращаются как JSON `{"error": "<код>"}`: `unauthorized`, `forbidden`, `too_many_attempts`, `invalid_current_password`, `password_too_short`, `password_too_long`, `invalid_name`, `challenge_expired`, `passkey_rejected`, `passkey_exists`, `not_found`. Для метрик добавлены `core_unavailable` (502: core недоступен, не ответил вовремя или вернул 5xx) и `invalid` (400: ответ содержит `detail` с причиной от core).
 
 ## Разработка
 

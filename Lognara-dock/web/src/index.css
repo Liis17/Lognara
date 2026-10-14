@@ -28,7 +28,8 @@ label {
   gap: 4px;
   margin-bottom: 8px;
 }
-input {
+input,
+select {
   padding: 4px 6px;
   font: inherit;
 }
@@ -56,6 +57,31 @@ input {
   gap: 8px;
   align-items: center;
   margin-bottom: 4px;
+}
+.access form {
+  max-width: 420px;
+  margin-bottom: 32px;
+}
+.access ul {
+  padding: 0;
+  list-style: none;
+}
+.access li {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 4px;
+}
+.token {
+  max-width: 720px;
+  margin-bottom: 24px;
+  padding: 8px 12px;
+  border: 1px solid #a15c00;
+}
+.token pre {
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: all;
 }
 .toolbar {
   display: flex;

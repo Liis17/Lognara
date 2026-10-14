@@ -27,7 +27,7 @@ const HALF_DAY: u32 = 43_200;
 
 fn config(path: &Path, segment_rows: usize) -> Config {
     let mut cfg = Config::from_lookup(|key| match key {
-        "LOGNARA_INGEST_TOKEN" => Some("ingest".into()),
+        "LOGNARA_ADMIN_TOKEN" => Some("admin".into()),
         "LOGNARA_QUERY_TOKEN" => Some("query".into()),
         _ => None,
     })

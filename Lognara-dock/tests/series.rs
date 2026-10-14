@@ -11,12 +11,11 @@ use serde_json::{Value, json};
 const ID: &str = "00000000-0000-0000-0000-000000000001";
 
 /// Dock против поддельного core; админский токен задан, если `admin` равно true.
-fn dock(core_url: &str, admin: bool) -> TestApp {
-    let mut extra = vec![("LOGNARA_DOCK_CORE_URL", core_url)];
-    if admin {
-        extra.push(("LOGNARA_DOCK_CORE_ADMIN_TOKEN", "admin-secret"));
-    }
-    start(&[("liis", "password")], &extra)
+fn dock(core_url: &str) -> TestApp {
+    start(
+        &[("liis", "password")],
+        &[("LOGNARA_DOCK_CORE_URL", core_url)],
+    )
 }
 
 /// Запрос к dock от имени вошедшего пользователя.
@@ -83,7 +82,7 @@ fn admin_routes() -> Vec<(Method, String, Option<Value>)> {
 #[tokio::test]
 async fn lists_and_queries_series_with_query_token() {
     let (core, url) = fake_core().await;
-    let t = dock(&url, false);
+    let t = dock(&url);
     let session = login(&t, "liis", "password").await.session();
 
     let list = call(&t, Method::GET, "/api/series", &session, None).await;
@@ -118,7 +117,7 @@ async fn lists_and_queries_series_with_query_token() {
 #[tokio::test]
 async fn proxies_definition_crud_with_admin_token() {
     let (core, url) = fake_core().await;
-    let t = dock(&url, true);
+    let t = dock(&url);
     let session = login(&t, "liis", "password").await.session();
 
     let created = call(
@@ -193,35 +192,9 @@ async fn proxies_definition_crud_with_admin_token() {
 }
 
 #[tokio::test]
-async fn admin_routes_are_disabled_without_admin_token() {
-    let (core, url) = fake_core().await;
-    let t = dock(&url, false);
-    let session = login(&t, "liis", "password").await.session();
-
-    for (method, path, body) in admin_routes() {
-        let reply = call(&t, method, &path, &session, body).await;
-        assert_eq!(reply.status, StatusCode::NOT_FOUND, "{path}");
-        assert_eq!(reply.body, json!({ "error": "admin_disabled" }), "{path}");
-    }
-    assert_eq!(core.requests.load(Ordering::SeqCst), 0, "core was called");
-
-    // Без admin-токена серии всё равно доступны по query-токену.
-    let list = call(&t, Method::GET, "/api/series", &session, None).await;
-    assert_eq!(list.status, StatusCode::OK);
-
-    let profile = me(&t, &session).await;
-    assert_eq!(profile.body["series_admin"], false);
-
-    let with_admin = dock(&url, true);
-    let session = login(&with_admin, "liis", "password").await.session();
-    let profile = me(&with_admin, &session).await;
-    assert_eq!(profile.body["series_admin"], true);
-}
-
-#[tokio::test]
 async fn core_errors_reach_the_user_as_invalid_or_internal() {
     let (core, url) = fake_core().await;
-    let t = dock(&url, true);
+    let t = dock(&url);
     let session = login(&t, "liis", "password").await.session();
 
     *core.reply.lock().unwrap() = Some((StatusCode::BAD_REQUEST, json!({ "error": "bad regex" })));
@@ -274,15 +247,15 @@ async fn core_errors_reach_the_user_as_invalid_or_internal() {
 }
 
 #[tokio::test]
-async fn core_outage_is_503_core_unavailable() {
+async fn core_outage_is_502_core_unavailable() {
     let (core, url) = fake_core().await;
-    let t = dock(&url, true);
+    let t = dock(&url);
     let session = login(&t, "liis", "password").await.session();
 
     for status in [StatusCode::SERVICE_UNAVAILABLE, StatusCode::GATEWAY_TIMEOUT] {
         *core.reply.lock().unwrap() = Some((status, json!({ "error": "store down" })));
         let reply = call(&t, Method::GET, "/api/series", &session, None).await;
-        assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE, "{status}");
+        assert_eq!(reply.status, StatusCode::BAD_GATEWAY, "{status}");
         assert_eq!(reply.body, json!({ "error": "core_unavailable" }));
     }
 
@@ -291,10 +264,10 @@ async fn core_outage_is_503_core_unavailable() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         format!("http://{}", listener.local_addr().unwrap())
     };
-    let t = dock(&closed, true);
+    let t = dock(&closed);
     let session = login(&t, "liis", "password").await.session();
     let list = call(&t, Method::GET, "/api/series", &session, None).await;
-    assert_eq!(list.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(list.status, StatusCode::BAD_GATEWAY);
     assert_eq!(list.body, json!({ "error": "core_unavailable" }));
     let create = call(
         &t,
@@ -304,14 +277,14 @@ async fn core_outage_is_503_core_unavailable() {
         Some(definition()),
     )
     .await;
-    assert_eq!(create.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(create.status, StatusCode::BAD_GATEWAY);
     assert_eq!(create.body, json!({ "error": "core_unavailable" }));
 }
 
 #[tokio::test]
 async fn series_routes_require_session_and_own_origin() {
     let (core, url) = fake_core().await;
-    let t = dock(&url, true);
+    let t = dock(&url);
     let session = login(&t, "liis", "password").await.session();
 
     for (method, path, body) in query_routes().into_iter().chain(admin_routes()) {
@@ -358,7 +331,7 @@ async fn series_routes_require_session_and_own_origin() {
 #[tokio::test]
 async fn responses_never_expose_tokens() {
     let (core, url) = fake_core().await;
-    let t = dock(&url, true);
+    let t = dock(&url);
     let session = login(&t, "liis", "password").await.session();
 
     let mut replies = vec![
@@ -422,18 +395,6 @@ async fn responses_never_expose_tokens() {
         .await;
         replies.push((name, reply));
     }
-
-    let without_admin = dock(&url, false);
-    let session = login(&without_admin, "liis", "password").await.session();
-    let disabled = call(
-        &without_admin,
-        Method::GET,
-        "/api/series/definitions",
-        &session,
-        None,
-    )
-    .await;
-    replies.push(("admin disabled", disabled));
 
     for (name, reply) in replies {
         let text = format!("{} {:?}", reply.body, reply.headers);

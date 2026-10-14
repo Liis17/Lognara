@@ -11,13 +11,14 @@ use axum::Router;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
-use axum::routing::post;
+use axum::routing::{get, post};
 use lognara_relay::agent_wire::{Batch, Payload, Record};
 use lognara_relay::config::Config;
 use lognara_relay::core_wire::{self, CoreBatch, Group, LogLevel, Source};
 use lognara_relay::normalize;
 use lognara_relay::spool::Spool;
 use reqwest::Url;
+use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -45,6 +46,7 @@ async fn accepted_batch_is_on_disk_before_first_flush() {
     relay.stop().await;
 }
 const TOKEN: &str = "secret";
+const AGENT_TOKEN: &str = "relay-secret";
 const BATCH_HEADERS: [(&str, &str); 3] = [
     ("authorization", "Bearer relay-secret"),
     ("content-type", "application/msgpack"),
@@ -59,6 +61,8 @@ struct FakeCore {
     status: Arc<Mutex<StatusCode>>,
     bodies: Arc<Mutex<Vec<Bytes>>>,
     delay_ms: Arc<AtomicUsize>,
+    agents: Arc<Mutex<(StatusCode, Vec<String>)>>,
+    agent_requests: Arc<AtomicUsize>,
 }
 
 #[derive(Clone)]
@@ -68,6 +72,15 @@ struct CoreState {
     status: Arc<Mutex<StatusCode>>,
     bodies: Arc<Mutex<Vec<Bytes>>>,
     delay_ms: Arc<AtomicUsize>,
+    agents: Arc<Mutex<(StatusCode, Vec<String>)>>,
+    agent_requests: Arc<AtomicUsize>,
+}
+
+fn token_hash(token: &str) -> String {
+    Sha256::digest(token.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 impl FakeCore {
@@ -77,6 +90,15 @@ impl FakeCore {
 
     fn requests(&self) -> usize {
         self.requests.load(Ordering::SeqCst)
+    }
+
+    /// Токены агентов, которые core отдаёт в `GET /v1/agents`.
+    fn set_agents(&self, tokens: &[&str]) {
+        self.agents.lock().unwrap().1 = tokens.iter().map(|token| token_hash(token)).collect();
+    }
+
+    fn respond_agents(&self, status: StatusCode) {
+        self.agents.lock().unwrap().0 = status;
     }
 
     async fn next_batch(&mut self) -> CoreBatch {
@@ -95,13 +117,18 @@ async fn fake_core() -> FakeCore {
         status: Arc::new(Mutex::new(StatusCode::OK)),
         bodies: Arc::default(),
         delay_ms: Arc::default(),
+        agents: Arc::new(Mutex::new((StatusCode::OK, vec![token_hash(AGENT_TOKEN)]))),
+        agent_requests: Arc::default(),
     };
     let requests = state.requests.clone();
     let status = state.status.clone();
     let bodies = state.bodies.clone();
     let delay_ms = state.delay_ms.clone();
+    let agents = state.agents.clone();
+    let agent_requests = state.agent_requests.clone();
     let app = Router::new()
         .route("/v1/batches", post(receive))
+        .route("/v1/agents", get(list_agents))
         .with_state(state);
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -115,7 +142,19 @@ async fn fake_core() -> FakeCore {
         status,
         bodies,
         delay_ms,
+        agents,
+        agent_requests,
     }
+}
+
+async fn list_agents(
+    State(state): State<CoreState>,
+    headers: HeaderMap,
+) -> (StatusCode, axum::Json<serde_json::Value>) {
+    state.agent_requests.fetch_add(1, Ordering::SeqCst);
+    assert_eq!(headers["authorization"], format!("Bearer {TOKEN}"));
+    let (status, hashes) = state.agents.lock().unwrap().clone();
+    (status, axum::Json(serde_json::json!({ "agents": hashes })))
 }
 
 async fn receive(State(state): State<CoreState>, headers: HeaderMap, body: Bytes) -> StatusCode {
@@ -164,7 +203,6 @@ fn config(core: &FakeCore, spool_dir: &Path) -> Config {
     Config {
         core_url: core.url.clone(),
         core_token: TOKEN.into(),
-        relay_token: "relay-secret".into(),
         flush_interval: Duration::from_millis(100),
         batch_size: 1000,
         max_buffer: 10_000,
@@ -174,7 +212,7 @@ fn config(core: &FakeCore, spool_dir: &Path) -> Config {
         core_max_body_bytes: 64 << 20,
         core_max_decoded_bytes: 256 << 20,
         core_max_model_bytes: 256 << 20,
-        memory_bytes: 1792 << 20,
+        memory_mb: 2048,
         max_model_bytes: 256 << 20,
         max_buffer_bytes: 256 << 20,
         max_ingest_concurrency: 1,
@@ -215,6 +253,7 @@ fn source(service: &str) -> Source {
 fn record(message: &str) -> Record {
     Record {
         received_at: 1,
+        origin: None,
         payload: Payload::Text(message.into()),
     }
 }
@@ -326,12 +365,13 @@ async fn sends_early_when_batch_size_is_reached() {
     config.batch_size = 3;
     let relay = start_relay(config).await;
 
-    send(&relay, &agent_batch("api", &["1", "2"])).await;
-    send(&relay, &agent_batch("api", &["3"])).await;
+    assert_eq!(
+        send(&relay, &agent_batch("api", &["1", "2", "3"])).await,
+        StatusCode::ACCEPTED
+    );
 
     let batch = core.next_batch().await;
-    assert_eq!(messages(&batch.groups[0]), ["1", "2"]);
-    assert_eq!(messages(&core.next_batch().await.groups[0]), ["3"]);
+    assert_eq!(messages(&batch.groups[0]), ["1", "2", "3"]);
 }
 
 #[tokio::test]
@@ -383,21 +423,41 @@ async fn delivers_spool_left_from_previous_run_first() {
 
 #[tokio::test]
 async fn keeps_events_in_spool_on_shutdown_when_core_is_down() {
-    let core = fake_core().await;
-    core.respond(StatusCode::SERVICE_UNAVAILABLE);
-    let spool = tempfile::tempdir().unwrap();
-    let mut config = config(&core, spool.path());
-    config.flush_interval = Duration::from_secs(60);
-    let relay = start_relay(config).await;
+    for started_delivery in [false, true] {
+        let core = fake_core().await;
+        core.respond(StatusCode::SERVICE_UNAVAILABLE);
+        let spool = tempfile::tempdir().unwrap();
+        let mut config = config(&core, spool.path());
+        config.flush_interval = Duration::from_secs(60);
+        if started_delivery {
+            config.batch_size = 1;
+        }
+        let relay = start_relay(config).await;
 
-    send(&relay, &agent_batch("api", &["late"])).await;
-    relay.stop().await;
+        assert_eq!(
+            send(&relay, &agent_batch("api", &["late"])).await,
+            StatusCode::ACCEPTED
+        );
+        if started_delivery {
+            eventually(|| core.requests() >= 1).await;
+        }
+        relay.stop().await;
 
-    assert_eq!(core.requests(), 1);
-    let saved = Spool::open(spool.path(), u64::MAX).await.unwrap();
-    assert_eq!(saved.len(), 1);
-    let batch = decode(&saved.oldest().await.unwrap().unwrap());
-    assert_eq!(messages(&batch.groups[0]), ["late"]);
+        // Первый тик sender и финальная отправка при shutdown могут оба обратиться к core.
+        assert!(core.requests() >= if started_delivery { 2 } else { 1 });
+        let saved = Spool::open(spool.path(), u64::MAX).await.unwrap();
+        assert_eq!(saved.len(), 1);
+        let body = saved.oldest().await.unwrap().unwrap();
+        assert!(
+            core.bodies
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|request| request.as_ref() == body.as_slice())
+        );
+        let batch = decode(&body);
+        assert_eq!(messages(&batch.groups[0]), ["late"]);
+    }
 }
 
 #[tokio::test]
@@ -460,7 +520,8 @@ async fn retains_batch_rejected_by_core() {
     let relay = start_relay(config(&core, spool.path())).await;
 
     send(&relay, &agent_batch("api", &["rejected"])).await;
-    eventually(|| core.requests() == 1).await;
+    eventually(|| core.requests() >= 2).await;
+    assert_eq!(spooled(spool.path()), 1);
     core.respond(StatusCode::OK);
     send(&relay, &agent_batch("api", &["accepted"])).await;
 
@@ -520,6 +581,120 @@ async fn rejects_unauthenticated_batches_without_delivering_or_spooling() {
     relay.stop().await;
     assert_eq!(core.requests(), accepted_requests);
     eventually(|| spooled(spool.path()) == 0).await;
+}
+
+async fn send_as(relay: &Relay, token: &str, batch: &Batch) -> StatusCode {
+    let body = zstd::encode_all(&rmp_serde::to_vec_named(batch).unwrap()[..], 3).unwrap();
+    let bearer = format!("Bearer {token}");
+    let headers = [
+        ("authorization", bearer.as_str()),
+        BATCH_HEADERS[1],
+        BATCH_HEADERS[2],
+    ];
+    post_body(relay, &headers, body).await
+}
+
+#[tokio::test]
+async fn unknown_agent_token_is_rejected_without_spooling_or_delivery() {
+    let core = fake_core().await;
+    let spool = tempfile::tempdir().unwrap();
+    let relay = start_relay(config(&core, spool.path())).await;
+    let batch = agent_batch("api", &["rejected"]);
+    // Токен для core и произвольный токен не дают доступа к приёму.
+    for token in [TOKEN, "lna_unknown", "RELAY-SECRET"] {
+        assert_eq!(
+            send_as(&relay, token, &batch).await,
+            StatusCode::UNAUTHORIZED,
+            "{token}"
+        );
+    }
+    assert_eq!(send(&relay, &batch).await, StatusCode::ACCEPTED);
+    relay.stop().await;
+}
+
+#[tokio::test]
+async fn agent_list_is_cached_in_spool_dir_and_used_while_core_is_down() {
+    let core = fake_core().await;
+    let spool = tempfile::tempdir().unwrap();
+    let relay = start_relay(config(&core, spool.path())).await;
+    eventually(|| spool.path().join(".agents").is_file()).await;
+    relay.stop().await;
+
+    // Кеш не мешает очереди и не считается пачкой.
+    core.respond_agents(StatusCode::SERVICE_UNAVAILABLE);
+    core.respond(StatusCode::SERVICE_UNAVAILABLE);
+    let relay = start_relay(config(&core, spool.path())).await;
+    assert_eq!(
+        send(&relay, &agent_batch("api", &["from cache"])).await,
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(
+        send_as(&relay, "other", &agent_batch("api", &["no"])).await,
+        StatusCode::UNAUTHORIZED
+    );
+    relay.stop().await;
+    assert!(spooled(spool.path()) > 0);
+
+    // Без кеша и без core список пуст, поэтому агенты не принимаются.
+    let empty = tempfile::tempdir().unwrap();
+    let relay = start_relay(config(&core, empty.path())).await;
+    assert_eq!(
+        send(&relay, &agent_batch("api", &["no cache"])).await,
+        StatusCode::UNAUTHORIZED
+    );
+    relay.stop().await;
+    assert_eq!(spooled(empty.path()), 0);
+}
+
+#[tokio::test]
+async fn startup_sync_replaces_cached_list_before_serving() {
+    let core = fake_core().await;
+    let spool = tempfile::tempdir().unwrap();
+    start_relay(config(&core, spool.path())).await.stop().await;
+
+    core.set_agents(&["new-agent"]);
+    let relay = start_relay(config(&core, spool.path())).await;
+    assert_eq!(
+        send(&relay, &agent_batch("api", &["revoked"])).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        send_as(&relay, "new-agent", &agent_batch("api", &["added"])).await,
+        StatusCode::ACCEPTED
+    );
+    relay.stop().await;
+}
+
+#[tokio::test]
+async fn background_sync_adds_and_revokes_agents_without_restart() {
+    let core = fake_core().await;
+    let spool = tempfile::tempdir().unwrap();
+    let relay = start_relay(config(&core, spool.path())).await;
+    let batch = agent_batch("api", &["x"]);
+    assert_eq!(
+        send_as(&relay, "late-agent", &batch).await,
+        StatusCode::UNAUTHORIZED
+    );
+
+    core.set_agents(&[AGENT_TOKEN, "late-agent"]);
+    timeout(Duration::from_secs(25), async {
+        while send_as(&relay, "late-agent", &batch).await != StatusCode::ACCEPTED {
+            sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("added agent was not accepted after background sync");
+
+    core.set_agents(&["late-agent"]);
+    timeout(Duration::from_secs(25), async {
+        while send(&relay, &batch).await != StatusCode::UNAUTHORIZED {
+            sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("revoked agent was still accepted after background sync");
+    assert!(core.agent_requests.load(Ordering::SeqCst) >= 3);
+    relay.stop().await;
 }
 
 #[tokio::test]
@@ -674,7 +849,6 @@ async fn process_relay(dir: &Path, core: &Url, addr: SocketAddr) -> ProcessRelay
         std::process::Command::new(env!("CARGO_BIN_EXE_lognara-relay"))
             .env("LOGNARA_CORE_URL", core.as_str())
             .env("LOGNARA_CORE_TOKEN", TOKEN)
-            .env("LOGNARA_RELAY_TOKEN", "relay-secret")
             .env("LOGNARA_SPOOL_DIR", dir)
             .env("LOGNARA_LISTEN_ADDR", addr.to_string())
             .env("LOGNARA_BATCH_SIZE", "1")
@@ -736,4 +910,60 @@ async fn sigkill_after_202_restores_confirmed_relay_parts_with_identical_bytes()
             .skip(1)
             .any(|body| *body == original)
     );
+}
+
+#[tokio::test]
+async fn provenance_survives_durable_relay_restart_and_reaches_core_attributes() {
+    use lognara_relay::agent_wire::Origin;
+    let mut core = fake_core().await;
+    let spool = tempfile::tempdir().unwrap();
+    let mut cfg = config(&core, spool.path());
+    cfg.flush_interval = Duration::from_secs(60);
+    let relay = start_relay(cfg.clone()).await;
+    let mut batch = agent_batch("api", &["file payload", "stream payload"]);
+    batch.records[0].origin = Some(Origin {
+        source: "access".into(),
+        path: Some("/var/log/app/access.log".into()),
+        stream: None,
+        offset: 10,
+        end: 24,
+        fragment: 1,
+        continued: true,
+    });
+    batch.records[1].origin = Some(Origin {
+        source: "errors".into(),
+        path: None,
+        stream: Some("stderr".into()),
+        offset: 0,
+        end: 15,
+        fragment: 0,
+        continued: false,
+    });
+    assert_eq!(send(&relay, &batch).await, StatusCode::ACCEPTED);
+    // Отмена handler не подтверждает downstream; сохранённая группа должна пережить restart.
+    core.respond(StatusCode::SERVICE_UNAVAILABLE);
+    relay.stop().await;
+    assert!(spooled(spool.path()) > 0);
+    while core.batches.try_recv().is_ok() {}
+    core.respond(StatusCode::OK);
+    cfg.flush_interval = Duration::from_millis(20);
+    let relay = start_relay(cfg).await;
+    let received = core.next_batch().await;
+    let events = &received.groups[0].events;
+    assert_eq!(
+        messages(&received.groups[0]),
+        ["file payload", "stream payload"]
+    );
+    assert_eq!(events[0].attributes["lognara.source"], "access");
+    assert_eq!(
+        events[0].attributes["log.file.path"],
+        "/var/log/app/access.log"
+    );
+    assert_eq!(events[0].attributes["log.origin.offset"], 10);
+    assert_eq!(events[0].attributes["log.origin.end"], 24);
+    assert_eq!(events[0].attributes["log.fragment.index"], 1);
+    assert_eq!(events[0].attributes["log.fragment.continued"], true);
+    assert_eq!(events[1].attributes["log.stream"], "stderr");
+    eventually(|| spooled(spool.path()) == 0).await;
+    relay.stop().await;
 }

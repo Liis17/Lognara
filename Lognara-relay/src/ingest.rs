@@ -13,10 +13,9 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use http_body::Body as _;
-use sha2::{Digest, Sha256};
-use subtle::ConstantTimeEq;
 
 use crate::agent_wire::{self, DecodeError};
+use crate::agents::Agents;
 use crate::core_wire::Source;
 use crate::core_wire::{BatchEncoder, CoreBatch, Event, Group};
 use crate::memory::{MAX_BODY, MAX_DECODED, Resources};
@@ -29,18 +28,14 @@ struct IngestState {
     resources: Arc<Resources>,
 }
 
-pub fn router(spool: Spool, token: &str, resources: Arc<Resources>) -> Router {
+pub fn router(spool: Spool, agents: Arc<Agents>, resources: Arc<Resources>) -> Router {
     Router::new()
         .route("/v1/batches", post(ingest))
-        .route_layer(middleware::from_fn_with_state(token_hash(token), authorize))
+        .route_layer(middleware::from_fn_with_state(agents, authorize))
         .with_state(IngestState { spool, resources })
 }
 
-fn token_hash(token: &str) -> [u8; 32] {
-    Sha256::digest(token.as_bytes()).into()
-}
-
-async fn authorize(State(expected): State<[u8; 32]>, request: Request, next: Next) -> Response {
+async fn authorize(State(agents): State<Arc<Agents>>, request: Request, next: Next) -> Response {
     let mut values = request.headers().get_all(AUTHORIZATION).iter();
     let token = values
         .next()
@@ -48,9 +43,7 @@ async fn authorize(State(expected): State<[u8; 32]>, request: Request, next: Nex
         .and_then(|value| value.split_once(' '))
         .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("Bearer"))
         .map(|(_, token)| token);
-    if values.next().is_some()
-        || !token.is_some_and(|token| bool::from(token_hash(token).ct_eq(&expected)))
-    {
+    if values.next().is_some() || !token.is_some_and(|token| agents.contains(token)) {
         return (
             StatusCode::UNAUTHORIZED,
             [("www-authenticate", "Bearer")],
@@ -310,7 +303,7 @@ mod tests {
         let spool = Spool::open(dir.path(), 1 << 20).await.unwrap();
         let config = crate::config::Config::from_lookup(|name| match name {
             "LOGNARA_CORE_URL" => Some("http://localhost/v1/batches".into()),
-            "LOGNARA_CORE_TOKEN" | "LOGNARA_RELAY_TOKEN" => Some("secret".into()),
+            "LOGNARA_CORE_TOKEN" => Some("secret".into()),
             _ => None,
         })
         .unwrap();
@@ -347,7 +340,11 @@ mod tests {
     #[tokio::test]
     async fn auth_and_busy_admission_reject_before_reading_body() {
         let (_dir, spool, resources) = setup().await;
-        let app = router(spool.clone(), "relay-secret", resources.clone());
+        let app = router(
+            spool.clone(),
+            Agents::with_tokens(&["relay-secret"]),
+            resources.clone(),
+        );
         for token in [
             "Bearer wrong",
             "Basic relay-secret",
@@ -410,10 +407,12 @@ mod tests {
         batch.records = vec![
             agent_wire::Record {
                 received_at: 1,
+                origin: None,
                 payload: agent_wire::Payload::Text("small".into()),
             },
             agent_wire::Record {
                 received_at: 2,
+                origin: None,
                 payload: agent_wire::Payload::Text("x".repeat(1024)),
             },
         ];
@@ -430,6 +429,7 @@ mod tests {
         let mut batch = fixture();
         batch.records = vec![agent_wire::Record {
             received_at: 1,
+            origin: None,
             payload: agent_wire::Payload::Text("x".repeat((2 << 20) + 1)),
         }];
         assert!(matches!(
@@ -449,7 +449,11 @@ mod tests {
     #[tokio::test]
     async fn compressed_body_limit_releases_slot() {
         let (_dir, spool, resources) = setup().await;
-        let app = router(spool, "relay-secret", resources.clone());
+        let app = router(
+            spool,
+            Agents::with_tokens(&["relay-secret"]),
+            resources.clone(),
+        );
         assert_eq!(
             app.oneshot(request(
                 Body::from(vec![0; MAX_BODY + 1]),

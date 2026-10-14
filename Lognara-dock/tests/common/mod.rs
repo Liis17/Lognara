@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use axum::body::{Body, to_bytes};
 use axum::extract::{self, State};
-use axum::http::{HeaderMap, Method, Request, StatusCode, header};
+use axum::http::{HeaderMap, Method, Request, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
@@ -16,6 +16,7 @@ use lognara_dock::api::{self, App, AppState};
 use lognara_dock::config::Config;
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use tokio::net::TcpListener;
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -41,6 +42,7 @@ pub fn config(dir: &Path, extra: &[(&str, &str)]) -> Config {
         ("LOGNARA_DOCK_PUBLIC_URL", ORIGIN),
         ("LOGNARA_DOCK_CORE_URL", "http://127.0.0.1:9"),
         ("LOGNARA_DOCK_CORE_TOKEN", "query-secret"),
+        ("LOGNARA_DOCK_CORE_ADMIN_TOKEN", "admin-secret"),
         ("LOGNARA_DOCK_HTPASSWD_FILE", &auth),
         ("LOGNARA_DOCK_DATA_DIR", &data),
         ("LOGNARA_DOCK_WEB_DIR", &web),
@@ -342,6 +344,66 @@ pub async fn fake_core() -> (Arc<FakeCore>, String) {
         .layer(middleware::from_fn_with_state(core.clone(), observe))
         .with_state(core.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    (core, url)
+}
+
+/// Запрос, принятый поддельным admin API core.
+#[derive(Clone, Debug)]
+pub struct CoreRequest {
+    pub method: Method,
+    pub path: String,
+    pub authorization: Option<String>,
+    pub body: Value,
+}
+
+/// Поддельный admin API core: записывает запросы и отвечает заданным `reply`.
+pub struct FakeAdminCore {
+    pub requests: Mutex<Vec<CoreRequest>>,
+    pub reply: Mutex<(StatusCode, String)>,
+}
+
+impl FakeAdminCore {
+    pub fn reply_json(&self, status: StatusCode, body: Value) {
+        *self.reply.lock().unwrap() = (status, body.to_string());
+    }
+
+    pub fn reply_raw(&self, status: StatusCode, body: &str) {
+        *self.reply.lock().unwrap() = (status, body.to_owned());
+    }
+
+    pub fn taken(&self) -> Vec<CoreRequest> {
+        std::mem::take(&mut *self.requests.lock().unwrap())
+    }
+}
+
+async fn record(
+    State(core): State<Arc<FakeAdminCore>>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> (StatusCode, String) {
+    core.requests.lock().unwrap().push(CoreRequest {
+        method,
+        path: uri.path().to_owned(),
+        authorization: headers
+            .get(header::AUTHORIZATION)
+            .map(|v| v.to_str().unwrap().to_owned()),
+        body: serde_json::from_slice(&body).unwrap_or(Value::Null),
+    });
+    core.reply.lock().unwrap().clone()
+}
+
+/// Запускает поддельный core и возвращает его адрес для `LOGNARA_DOCK_CORE_URL`.
+pub async fn fake_admin_core() -> (Arc<FakeAdminCore>, String) {
+    let core = Arc::new(FakeAdminCore {
+        requests: Mutex::default(),
+        reply: Mutex::new((StatusCode::OK, "{}".to_owned())),
+    });
+    let router = Router::new().fallback(record).with_state(core.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     (core, url)

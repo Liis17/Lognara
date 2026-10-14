@@ -28,7 +28,6 @@ const PREVIEW: &str = "/v1/admin/series/preview";
 
 fn config(path: &Path, segment_rows: usize) -> Config {
     let mut cfg = Config::from_lookup(|key| match key {
-        "LOGNARA_INGEST_TOKEN" => Some("ingest".into()),
         "LOGNARA_QUERY_TOKEN" => Some("query".into()),
         "LOGNARA_ADMIN_TOKEN" => Some("admin".into()),
         _ => None,
@@ -258,7 +257,7 @@ async fn definitions_round_trip_with_admin_token() {
 }
 
 #[tokio::test]
-async fn admin_routes_need_the_admin_token_and_vanish_without_one() {
+async fn admin_routes_need_the_admin_token() {
     let dir = tempfile::tempdir().unwrap();
     let core = Core::open(config(dir.path(), 1000)).unwrap();
     let router = api::router(core.clone());
@@ -275,24 +274,6 @@ async fn admin_routes_need_the_admin_token_and_vanish_without_one() {
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-    core.shutdown().unwrap();
-
-    let dir = tempfile::tempdir().unwrap();
-    let mut cfg = config(dir.path(), 1000);
-    cfg.admin_token = None;
-    let core = Core::open(cfg).unwrap();
-    let router = api::router(core.clone());
-    let cases = [
-        ("GET", DEFINITIONS.to_owned()),
-        ("POST", DEFINITIONS.to_owned()),
-        ("PUT", format!("{DEFINITIONS}/{}", Uuid::new_v4())),
-        ("DELETE", format!("{DEFINITIONS}/{}", Uuid::new_v4())),
-        ("POST", PREVIEW.to_owned()),
-    ];
-    for (method, uri) in cases {
-        let (status, _) = send(&router, method, &uri, Some("admin"), None).await;
-        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {uri}");
-    }
     core.shutdown().unwrap();
 }
 

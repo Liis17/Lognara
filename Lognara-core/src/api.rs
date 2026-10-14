@@ -5,7 +5,7 @@ use std::{
 };
 
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     body::to_bytes,
     extract::{Path, Query, Request, State},
     http::{HeaderMap, StatusCode},
@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use crate::{
+    access::{Access, AccessError},
     analytics::{self, GroupRequest, HistogramRequest, PreviewRequest},
     definitions::{self, DefinitionInput},
     journal::{IngestError, Journal},
@@ -39,12 +40,20 @@ pub fn router(core: Arc<Core>) -> Router {
             authorize,
         ))
         .with_state(core.clone());
-    let router = ingest_router(core.journal.clone()).merge(queries);
-    match &core.journal.config.admin_token {
-        Some(token) => router.merge(admin_router(core.clone(), token)),
-        // Без токена администратора маршрутов нет, и они отвечают 404.
-        None => router,
-    }
+    let admin = Router::new()
+        .route("/v1/admin/relays", get(list_relays).post(create_relay))
+        .route("/v1/admin/relays/{id}", axum::routing::delete(delete_relay))
+        .route("/v1/admin/agents", get(list_agents).post(create_agent))
+        .route("/v1/admin/agents/{id}", axum::routing::delete(delete_agent))
+        .route_layer(middleware::from_fn_with_state(
+            token_hash(&core.journal.config.admin_token),
+            authorize,
+        ))
+        .with_state(core.journal.access.clone());
+    ingest_router(core.journal.clone())
+        .merge(queries)
+        .merge(admin)
+        .merge(admin_router(core.clone(), &core.journal.config.admin_token))
 }
 
 async fn histogram(
@@ -203,9 +212,10 @@ fn definition_not_found() -> Response {
 pub fn ingest_router(journal: Arc<Journal>) -> Router {
     let ingest = Router::new()
         .route("/v1/batches", post(ingest))
+        .route("/v1/agents", get(agent_hashes))
         .route_layer(middleware::from_fn_with_state(
-            token_hash(&journal.config.ingest_token),
-            authorize,
+            journal.access.clone(),
+            authorize_relay,
         ));
     let queries =
         Router::new()
@@ -320,20 +330,8 @@ fn token_hash(token: &str) -> [u8; 32] {
 }
 
 async fn authorize(State(expected): State<[u8; 32]>, request: Request, next: Next) -> Response {
-    let token = request
-        .headers()
-        .get("authorization")
-        .and_then(|header| header.to_str().ok())
-        .and_then(|value| value.split_once(' '))
-        .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("Bearer"))
-        .map(|(_, token)| token);
-    if !token.is_some_and(|token| bool::from(token_hash(token).ct_eq(&expected))) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            [("www-authenticate", "Bearer")],
-            "unauthorized",
-        )
-            .into_response();
+    if !bearer(&request).is_some_and(|token| bool::from(token_hash(token).ct_eq(&expected))) {
+        return unauthorized();
     }
     next.run(request).await
 }
@@ -445,4 +443,148 @@ async fn metrics(State(journal): State<Arc<Journal>>) -> Response {
         journal.metrics.render(),
     )
         .into_response()
+}
+
+fn bearer(request: &Request) -> Option<&str> {
+    let mut headers = request.headers().get_all("authorization").iter();
+    let header = headers.next()?;
+    if headers.next().is_some() {
+        return None;
+    }
+    let (scheme, token) = header.to_str().ok()?.split_once(' ')?;
+    (scheme.eq_ignore_ascii_case("Bearer") && !token.is_empty()).then_some(token)
+}
+
+fn unauthorized() -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        [("www-authenticate", "Bearer")],
+        Json(serde_json::json!({"error":"unauthorized"})),
+    )
+        .into_response()
+}
+
+async fn authorize_relay(
+    State(access): State<Arc<Access>>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let relay_id = bearer(&request).and_then(|token| access.relay_for_token(&token_hash(token)));
+    let Some(relay_id) = relay_id else {
+        return unauthorized();
+    };
+    request.extensions_mut().insert(relay_id);
+    next.run(request).await
+}
+
+impl IntoResponse for AccessError {
+    fn into_response(self) -> Response {
+        let (status, code) = match self {
+            Self::InvalidName => (StatusCode::BAD_REQUEST, "invalid_name"),
+            Self::NameTaken => (StatusCode::CONFLICT, "name_taken"),
+            Self::RelayNotFound => (StatusCode::NOT_FOUND, "relay_not_found"),
+            Self::NotFound => (StatusCode::NOT_FOUND, "not_found"),
+            Self::RelayHasAgents => (StatusCode::CONFLICT, "relay_has_agents"),
+            Self::Storage(error) => {
+                tracing::error!(%error, "access operation failed");
+                (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable")
+            }
+        };
+        (status, Json(serde_json::json!({"error":code}))).into_response()
+    }
+}
+
+async fn access_task<T: serde::Serialize + Send + 'static>(
+    task: impl FnOnce() -> Result<T, AccessError> + Send + 'static,
+    status: StatusCode,
+) -> Response {
+    match tokio::task::spawn_blocking(task).await {
+        Ok(Ok(_)) if status == StatusCode::NO_CONTENT => status.into_response(),
+        Ok(Ok(value)) => (status, Json(value)).into_response(),
+        Ok(Err(error)) => error.into_response(),
+        Err(error) => AccessError::Storage(error.into()).into_response(),
+    }
+}
+
+async fn list_relays(State(access): State<Arc<Access>>) -> Response {
+    access_task(
+        move || Ok(serde_json::json!({"relays":access.list_relays()?})),
+        StatusCode::OK,
+    )
+    .await
+}
+async fn list_agents(State(access): State<Arc<Access>>) -> Response {
+    access_task(
+        move || Ok(serde_json::json!({"agents":access.list_agents()?})),
+        StatusCode::OK,
+    )
+    .await
+}
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RelayName {
+    name: String,
+}
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentName {
+    name: String,
+    relay_id: i64,
+}
+fn invalid_request() -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({"error":"invalid_request"})),
+    )
+        .into_response()
+}
+async fn create_relay(
+    State(access): State<Arc<Access>>,
+    body: Result<Json<RelayName>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Ok(Json(body)) = body else {
+        return invalid_request();
+    };
+    access_task(move || access.create_relay(&body.name), StatusCode::CREATED).await
+}
+async fn create_agent(
+    State(access): State<Arc<Access>>,
+    body: Result<Json<AgentName>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Ok(Json(body)) = body else {
+        return invalid_request();
+    };
+    access_task(
+        move || access.create_agent(&body.name, body.relay_id),
+        StatusCode::CREATED,
+    )
+    .await
+}
+async fn delete_relay(
+    State(access): State<Arc<Access>>,
+    id: Result<Path<i64>, axum::extract::rejection::PathRejection>,
+) -> Response {
+    let Ok(Path(id)) = id else {
+        return invalid_request();
+    };
+    access_task(move || access.delete_relay(id), StatusCode::NO_CONTENT).await
+}
+async fn delete_agent(
+    State(access): State<Arc<Access>>,
+    id: Result<Path<i64>, axum::extract::rejection::PathRejection>,
+) -> Response {
+    let Ok(Path(id)) = id else {
+        return invalid_request();
+    };
+    access_task(move || access.delete_agent(id), StatusCode::NO_CONTENT).await
+}
+async fn agent_hashes(
+    State(journal): State<Arc<Journal>>,
+    Extension(relay_id): Extension<i64>,
+) -> Response {
+    access_task(
+        move || Ok(serde_json::json!({"agents":journal.access.agent_hashes(relay_id)?})),
+        StatusCode::OK,
+    )
+    .await
 }

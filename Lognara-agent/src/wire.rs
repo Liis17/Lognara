@@ -28,7 +28,22 @@ pub struct Batch {
 pub struct Record {
     /// Момент приёма агентом, Unix-время в наносекундах.
     pub received_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<Origin>,
     pub payload: Payload,
+}
+
+/// Происхождение записи, без изменения исходного payload.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Origin {
+    pub source: String,
+    pub path: Option<String>,
+    pub stream: Option<String>,
+    pub offset: u64,
+    pub end: u64,
+    pub fragment: u64,
+    pub continued: bool,
 }
 
 /// Лог в том виде, в каком его прислало приложение. Разбирает его relay.
@@ -59,6 +74,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn http_records_keep_the_previous_wire_shape_and_old_spool_records_decode() {
+        #[derive(Serialize)]
+        struct OldRecord {
+            received_at: i64,
+            payload: Payload,
+        }
+        let old = rmp_serde::to_vec_named(&OldRecord {
+            received_at: 7,
+            payload: Payload::Text("hello".into()),
+        })
+        .unwrap();
+        let record: Record = rmp_serde::from_slice(&old).unwrap();
+        assert_eq!(record.origin, None);
+        assert_eq!(rmp_serde::to_vec_named(&record).unwrap(), old);
+    }
+
+    #[test]
     fn encoded_batch_decodes_back() {
         let batch = Batch {
             service: "api".into(),
@@ -71,14 +103,17 @@ mod tests {
             records: vec![
                 Record {
                     received_at: 1,
+                    origin: None,
                     payload: Payload::Text("hello".into()),
                 },
                 Record {
                     received_at: 2,
+                    origin: None,
                     payload: Payload::Json(r#"{"level":"error"}"#.into()),
                 },
                 Record {
                     received_at: 3,
+                    origin: None,
                     payload: Payload::Binary(vec![0, 159, 146, 150]),
                 },
             ],

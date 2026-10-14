@@ -8,6 +8,7 @@ Parent: [[Relay/LognaraRelay]]
 Lognara-relay/
 ├── Cargo.toml              crate lognara-relay, edition 2024, MIT
 ├── Cargo.lock
+├── Dockerfile              release из корневого контекста, Debian slim от 1000:1000
 ├── src/
 │   ├── main.rs             точка входа: логирование, конфиг, spool, bind, SIGTERM/SIGINT
 │   ├── lib.rs              сборка компонентов и run()
@@ -16,6 +17,7 @@ Lognara-relay/
 │   ├── core_wire.rs        контракт с core: CoreBatch, Group, Source, Event, encode()
 │   ├── wire_budget.rs      общая no-alloc оценка MessagePack из lognara-spool, идентичная core
 │   ├── normalize.rs        разбор Record в Event
+│   ├── agents.rs           список SHA-256 из core, атомарный кеш .agents, sync 10s
 │   ├── ingest.rs           Bearer-аутентификация до чтения тела, POST /v1/batches
 │   ├── memory.rs           резервы, admission и ожидание blocking-работников
 │   ├── model_budget.rs     общий бюджет Batch и нормализации JSON/base64
@@ -33,7 +35,7 @@ Lognara-relay/
 
 | Стадия | Модуль | Вход | Выход |
 |---|---|---|---|
-| Приём | `ingest` | HTTP-запрос агента с общим Bearer-токеном | отказ до тела или `Batch` через `agent_wire::decode_with_budget` |
+| Приём | `ingest` | HTTP-запрос агента с персональным токеном | отказ до тела или `Batch` через `agent_wire::decode_with_budget` |
 | Разбор | `normalize` | `Record` + `ModelBudget` | `Event` либо ресурсная ошибка |
 | Сохранение | `spool` | все закодированные части запроса | fsync и атомарная публикация до `202` |
 | Кодирование | `core_wire` | `CoreBatch` | одна часть через `BatchEncoder::next()` |
@@ -43,8 +45,8 @@ Lognara-relay/
 ## Связи модулей
 
 - `main` → `config`, `spool`, `lib::run`.
-- `lib::run` подключает общий `Spool`, запускает `Sender` в отдельной задаче и `ingest::router` через `axum::serve`. Отправка останавливается отдельным токеном только после приёма.
-- `ingest` → `agent_wire`, `normalize`, `core_wire`, `spool`.
+- `lib::run` загружает кеш Agents, выполняет стартовый GET core и запускает sync; подключает общий `Spool`, запускает `Sender` в отдельной задаче и `ingest::router` через `axum::serve`. Отправка останавливается отдельным токеном только после приёма.
+- `ingest` → `agents` (проверка токена), `agent_wire`, `normalize`, `core_wire`, `spool`.
 - `ingest` → `memory`: slot до чтения тела; blocking-задача владеет permit. Подробности в [[Relay/Memory]].
 - `sender` → `spool`; очередь делится с ingest, синхронные дисковые операции выполняются в blocking-работниках. Общая реализация в [[Delivery/Spool]].
 - Публичные модули (`agent_wire`, `config`, `core_wire`, `model_budget`, `normalize`, `spool`) используют сквозные тесты; `ingest`, `memory`, `sender` скрыты.
@@ -53,7 +55,8 @@ Lognara-relay/
 
 | Где | Что проверяет |
 |---|---|
-| `config.rs` | loopback по умолчанию, обязательные переменные и ключ, валидация ключа и скрытие секретов, проверки чисел, URL и адреса |
+| `config.rs` | loopback, обязательные core-параметры, скрытие секретов, RAM в MiB, checked reserve и concurrency, URL и адрес |
+| `agents.rs` | sync, кеш, ошибки/отзыв, неизменный список, ошибка записи, restart и shutdown |
 | `ingest.rs` | отказ до чтения непрочитываемого тела, неверная/дублированная авторизация, приоритет `401` над лимитом тела, сохранение проверок типа и тела при верном ключе, атомарный отказ группы, квоту и границы одной записи |
 | `agent_wire.rs` | разбор фикстуры агента, лимит распаковки, невалидное тело |
 | `core_wire.rs` | кодирование `CoreBatch`, оба лимита, обратный разбор, порядок/ID/dropped при разделении |
@@ -64,3 +67,11 @@ Lognara-relay/
 | `tests/check-memory-profile.py` | запускает отдельный процесс теста; останавливает при RSS выше 2 GiB, проверяет kernel high-water mark после завершения |
 
 Разделённые пачки дополнительно проходят рестарт relay со spool и проверку идентичности байтов повторной отправки; SIGKILL после `202` восстанавливает подтверждённые части. Shutdown с зависшей доставкой удерживает все сохранённые части; oversized replay закрывает admission до исправления файла. Настоящий core проверяется в `Lognara-core/tests/e2e.rs`.
+
+`keeps_events_in_spool_on_shutdown_when_core_is_down(): ()` проверяет немедленную остановку после `202` и остановку после начавшейся отправки в core. При `503` в spool остаётся ровно одна пачка с исходным сообщением; все отправки используют сохранённые байты. Число HTTP-попыток не фиксировано: первый тик sender и финальная отправка при shutdown могут дать несколько запросов. Это устраняет зависимость теста от порядка выполнения задач на runner.
+
+`retains_batch_rejected_by_core(): ()` ждёт не менее двух отказов core `400`, проверяет одну сохранённую пачку и доставку в исходном порядке после восстановления. Ожидание использует нижнюю границу счётчика, чтобы не пропустить условие между опросами.
+
+`sends_early_when_batch_size_is_reached(): ()` отправляет один запрос с числом событий, равным `batch_size`, и проверяет доставку до 60-секундного тика. Один атомарный запрос исключает отправку первой части начальным тиком до достижения порога вторым запросом.
+
+`start_relay(config: Config): Relay` — открывает spool и запускает тестовый relay. Освобождение файловой блокировки при уничтожении очереди обеспечивает общий [[Delivery/Spool]]; вспомогательный запуск не повторяет попытки открытия каталога.

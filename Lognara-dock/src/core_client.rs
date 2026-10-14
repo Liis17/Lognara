@@ -1,4 +1,5 @@
-//! Клиент core: поиск логов и метрики с query-токеном, определения метрик с admin-токеном.
+//! Клиент core: поиск логов и метрики с query-токеном, определения метрик и управление relay
+//! и агентами `/v1/admin/*` с admin-токеном.
 
 use std::time::Duration;
 
@@ -29,8 +30,9 @@ pub enum CoreError {
     },
     #[error("core answered unexpected data")]
     Format,
-    #[error("admin token is not configured")]
-    AdminDisabled,
+    /// Admin-запрос отклонён; `code` из JSON `{"error": code}` или пустой.
+    #[error("core rejected admin request with {0}: {1:?}")]
+    Rejected(reqwest::StatusCode, String),
 }
 
 /// Успешный ответ core: статус и JSON-тело (`null`, если тела нет).
@@ -39,8 +41,9 @@ pub type CoreReply = (StatusCode, Value);
 pub struct CoreClient {
     http: reqwest::Client,
     base: Url,
+    admin_url: Url,
     query_token: String,
-    admin_token: Option<String>,
+    admin_token: String,
 }
 
 impl CoreClient {
@@ -51,13 +54,13 @@ impl CoreClient {
                 .build()
                 .expect("http client"),
             base: config.core_url.clone(),
+            admin_url: config
+                .core_url
+                .join("v1/admin/")
+                .expect("core url joins path"),
             query_token: config.core_token.clone(),
             admin_token: config.core_admin_token.clone(),
         }
-    }
-
-    pub fn admin_enabled(&self) -> bool {
-        self.admin_token.is_some()
     }
 
     /// Самые свежие события `[from, to)`, по убыванию времени, как их отдаёт core.
@@ -106,18 +109,21 @@ impl CoreClient {
 
     /// Определения метрик: `GET /v1/admin/series/definitions`.
     pub async fn definitions(&self) -> Result<CoreReply, CoreError> {
-        let token = self.admin_token()?;
-        self.call(Method::GET, "v1/admin/series/definitions", token, None)
-            .await
+        self.call(
+            Method::GET,
+            "v1/admin/series/definitions",
+            &self.admin_token,
+            None,
+        )
+        .await
     }
 
     /// Новое определение: `POST /v1/admin/series/definitions`.
     pub async fn create_definition(&self, definition: &Value) -> Result<CoreReply, CoreError> {
-        let token = self.admin_token()?;
         self.call(
             Method::POST,
             "v1/admin/series/definitions",
-            token,
+            &self.admin_token,
             Some(definition),
         )
         .await
@@ -129,33 +135,87 @@ impl CoreClient {
         id: Uuid,
         definition: &Value,
     ) -> Result<CoreReply, CoreError> {
-        let token = self.admin_token()?;
         let path = format!("v1/admin/series/definitions/{id}");
-        self.call(Method::PUT, &path, token, Some(definition)).await
+        self.call(Method::PUT, &path, &self.admin_token, Some(definition))
+            .await
     }
 
     /// Удаление определения: `DELETE /v1/admin/series/definitions/{id}`.
     pub async fn delete_definition(&self, id: Uuid) -> Result<CoreReply, CoreError> {
-        let token = self.admin_token()?;
         let path = format!("v1/admin/series/definitions/{id}");
-        self.call(Method::DELETE, &path, token, None).await
+        self.call(Method::DELETE, &path, &self.admin_token, None)
+            .await
     }
 
     /// Проверка определения на выборке: `POST /v1/admin/series/preview`.
     pub async fn preview(&self, request: &Value) -> Result<CoreReply, CoreError> {
-        let token = self.admin_token()?;
         self.call(
             Method::POST,
             "v1/admin/series/preview",
-            token,
+            &self.admin_token,
             Some(request),
         )
         .await
     }
 
-    /// Без admin-токена запрос к core не отправляется.
-    fn admin_token(&self) -> Result<&str, CoreError> {
-        self.admin_token.as_deref().ok_or(CoreError::AdminDisabled)
+    /// `GET /v1/admin/relays`: `{"relays": [...]}`.
+    pub async fn list_relays(&self) -> Result<Value, CoreError> {
+        self.admin(Method::GET, "relays".into(), None).await
+    }
+
+    /// `POST /v1/admin/relays`: `{"relay": {...}, "token": "lnr_..."}`.
+    pub async fn create_relay(&self, name: &str) -> Result<Value, CoreError> {
+        let body = json!({ "name": name });
+        self.admin(Method::POST, "relays".into(), Some(body)).await
+    }
+
+    pub async fn delete_relay(&self, id: i64) -> Result<(), CoreError> {
+        let path = format!("relays/{id}");
+        self.admin(Method::DELETE, path, None).await.map(drop)
+    }
+
+    /// `GET /v1/admin/agents`: `{"agents": [...]}`.
+    pub async fn list_agents(&self) -> Result<Value, CoreError> {
+        self.admin(Method::GET, "agents".into(), None).await
+    }
+
+    /// `POST /v1/admin/agents`: `{"agent": {...}, "token": "lna_..."}`.
+    pub async fn create_agent(&self, name: &str, relay_id: i64) -> Result<Value, CoreError> {
+        let body = json!({ "name": name, "relay_id": relay_id });
+        self.admin(Method::POST, "agents".into(), Some(body)).await
+    }
+
+    pub async fn delete_agent(&self, id: i64) -> Result<(), CoreError> {
+        let path = format!("agents/{id}");
+        self.admin(Method::DELETE, path, None).await.map(drop)
+    }
+
+    /// Ответ core как JSON; `Null` для 204.
+    async fn admin(
+        &self,
+        method: Method,
+        path: String,
+        body: Option<Value>,
+    ) -> Result<Value, CoreError> {
+        let url = self.admin_url.join(&path).expect("core url joins path");
+        let mut request = self
+            .http
+            .request(method, url)
+            .bearer_auth(&self.admin_token);
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
+        let response = request.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let reply: Value = response.json().await.unwrap_or(Value::Null);
+            let code = reply["error"].as_str().unwrap_or_default().to_owned();
+            return Err(CoreError::Rejected(status, code));
+        }
+        if status == reqwest::StatusCode::NO_CONTENT {
+            return Ok(Value::Null);
+        }
+        Ok(response.json().await?)
     }
 
     async fn call(

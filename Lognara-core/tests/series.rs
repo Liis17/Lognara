@@ -22,7 +22,7 @@ const REPORT_NANOS: i64 = 1_791_904_440_448_032_100;
 
 fn config(path: &Path) -> Config {
     let mut cfg = Config::from_lookup(|key| match key {
-        "LOGNARA_INGEST_TOKEN" => Some("ingest".into()),
+        "LOGNARA_ADMIN_TOKEN" => Some("admin".into()),
         "LOGNARA_QUERY_TOKEN" => Some("query".into()),
         _ => None,
     })

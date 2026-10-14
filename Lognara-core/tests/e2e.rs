@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 async fn actual_pipeline_recovers_after_core_outage_and_public_routes_observe_logs() {
     let dir = tempfile::tempdir().unwrap();
     let mut config = Config::from_lookup(|key| match key {
-        "LOGNARA_INGEST_TOKEN" => Some("ingest".into()),
+        "LOGNARA_ADMIN_TOKEN" => Some("ingest".into()),
         "LOGNARA_QUERY_TOKEN" => Some("query".into()),
         _ => None,
     })
@@ -21,6 +21,13 @@ async fn actual_pipeline_recovers_after_core_outage_and_public_routes_observe_lo
     config.disk_reserve_bytes = 1;
     config.refresh_interval = Duration::from_millis(20);
     let core = Core::open(config).unwrap();
+    let registered = core.journal.access.create_relay("relay").unwrap();
+    let agent_token = core
+        .journal
+        .access
+        .create_agent("agent", registered.relay.id)
+        .unwrap()
+        .token;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let core_addr = listener.local_addr().unwrap();
     let url = format!("http://{core_addr}");
@@ -35,8 +42,7 @@ async fn actual_pipeline_recovers_after_core_outage_and_public_routes_observe_lo
     });
     let relay_config = RelayConfig::from_lookup(|key| match key {
         "LOGNARA_CORE_URL" => Some(format!("{url}/v1/batches")),
-        "LOGNARA_CORE_TOKEN" => Some("ingest".into()),
-        "LOGNARA_RELAY_TOKEN" => Some("relay-secret".into()),
+        "LOGNARA_CORE_TOKEN" => Some(registered.token.clone()),
         "LOGNARA_FLUSH_INTERVAL_MS" => Some("20".into()),
         "LOGNARA_BATCH_SIZE" => Some("1".into()),
         _ => None,
@@ -56,14 +62,14 @@ async fn actual_pipeline_recovers_after_core_outage_and_public_routes_observe_lo
         stop,
     ));
     let batch = Batch { service:"api".into(), server:"srv".into(), backend:"backend".into(), environment:Some("test".into()), service_instance:None,
-        sent_at:1_790_678_511_894_000_001, dropped:0, records:vec![Record { received_at:1_790_678_511_894_000_001,
+        sent_at:1_790_678_511_894_000_001, dropped:0, records:vec![Record { origin: None, received_at:1_790_678_511_894_000_001,
             payload:Payload::Json(r#"{"id":"019d3f8e-7c2a-7b3e-9f1d-2a4b6c8d0e1f","level":"error","message":"relay to core","trace_id":"8c21f0a4b6c8d0e12a4b6c8d0e1f3a5b"}"#.into()) }] };
     let body = zstd::encode_all(&rmp_serde::to_vec_named(&batch).unwrap()[..], 3).unwrap();
     let client = reqwest::Client::new();
     assert_eq!(
         client
             .post(&relay_url)
-            .bearer_auth("relay-secret")
+            .bearer_auth(&agent_token)
             .header("content-type", "application/msgpack")
             .header("content-encoding", "zstd")
             .body(body)
@@ -184,7 +190,7 @@ async fn actual_pipeline_recovers_after_core_outage_and_public_routes_observe_lo
         "LOGNARA_SERVICE" => Some("api".into()),
         "LOGNARA_SERVER" => Some("srv".into()),
         "LOGNARA_BACKEND" => Some("backend".into()),
-        "LOGNARA_RELAY_TOKEN" => Some("relay-secret".into()),
+        "LOGNARA_RELAY_TOKEN" => Some(agent_token.clone()),
         "LOGNARA_RELAY_URL" => Some(relay_url.clone()),
         "LOGNARA_BATCH_SIZE" => Some("1".into()),
         "LOGNARA_FLUSH_INTERVAL_MS" => Some("20".into()),

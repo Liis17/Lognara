@@ -14,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::set_header::SetResponseHeaderLayer;
 
+use crate::access;
 use crate::account;
 use crate::auth::{self, LoginLimiter};
 use crate::config::Config;
@@ -35,7 +36,8 @@ pub struct App {
     pub limiter: LoginLimiter,
     pub webauthn: webauthn_rs::Webauthn,
     pub challenges: Challenges,
-    /// Общий клиент core: query-токен для логов и метрик, admin-токен для определений.
+    /// Общий клиент core: query-токен для логов и метрик, admin-токен для определений,
+    /// relay и агентов.
     pub core: Arc<CoreClient>,
     pub live: Arc<Live>,
     /// Отменяется при остановке: закрывает SSE-потоки и опрос core.
@@ -74,11 +76,12 @@ pub enum ApiError {
     Unauthorized,
     Forbidden,
     NotFound,
+    RelayNotFound,
+    Conflict(&'static str),
     TooManyRequests(Duration),
-    /// Admin-токен не задан в конфигурации.
-    AdminDisabled,
-    CoreUnavailable,
     Internal,
+    /// Core недоступен или ответил неожиданно.
+    CoreUnavailable,
 }
 
 impl From<StoreError> for ApiError {
@@ -89,9 +92,22 @@ impl From<StoreError> for ApiError {
 }
 
 impl From<CoreError> for ApiError {
+    /// Известные коды admin API core отдаются как есть, ошибки валидации метрик с текстом core,
+    /// остальное скрывается за 502.
     fn from(err: CoreError) -> Self {
         match err {
-            CoreError::AdminDisabled => Self::AdminDisabled,
+            CoreError::Rejected(status, code) => match (status.as_u16(), code.as_str()) {
+                (400, "invalid_name") => Self::BadRequest("invalid_name"),
+                (400, "invalid_request") => Self::BadRequest("invalid_request"),
+                (404, "relay_not_found") => Self::RelayNotFound,
+                (404, "not_found") => Self::NotFound,
+                (409, "name_taken") => Self::Conflict("name_taken"),
+                (409, "relay_has_agents") => Self::Conflict("relay_has_agents"),
+                _ => {
+                    tracing::warn!("core admin request failed: {status} {code:?}");
+                    Self::CoreUnavailable
+                }
+            },
             CoreError::Status {
                 status: StatusCode::BAD_REQUEST,
                 detail,
@@ -136,15 +152,16 @@ impl IntoResponse for ApiError {
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
             Self::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found"),
+            Self::RelayNotFound => (StatusCode::NOT_FOUND, "relay_not_found"),
+            Self::Conflict(code) => (StatusCode::CONFLICT, code),
             Self::TooManyRequests(wait) => {
                 let body = Json(json!({ "error": "too_many_attempts" }));
                 let retry = (wait.as_secs() + 1).to_string();
                 return (StatusCode::TOO_MANY_REQUESTS, [(RETRY_AFTER, retry)], body)
                     .into_response();
             }
-            Self::AdminDisabled => (StatusCode::NOT_FOUND, "admin_disabled"),
-            Self::CoreUnavailable => (StatusCode::SERVICE_UNAVAILABLE, "core_unavailable"),
             Self::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
+            Self::CoreUnavailable => (StatusCode::BAD_GATEWAY, "core_unavailable"),
         };
         (status, Json(json!({ "error": code }))).into_response()
     }
@@ -174,6 +191,16 @@ pub fn router(app: AppState) -> Router {
             put(series::update_definition).delete(series::delete_definition),
         )
         .route("/series/preview", post(series::preview))
+        .route(
+            "/relays",
+            get(access::list_relays).post(access::create_relay),
+        )
+        .route("/relays/{id}", delete(access::delete_relay))
+        .route(
+            "/agents",
+            get(access::list_agents).post(access::create_agent),
+        )
+        .route("/agents/{id}", delete(access::delete_agent))
         .layer(middleware::from_fn_with_state(
             app.clone(),
             session::require_origin,

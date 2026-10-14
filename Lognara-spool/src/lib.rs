@@ -58,6 +58,13 @@ pub struct Queue {
     _lock: File,
 }
 
+impl Drop for Queue {
+    fn drop(&mut self) {
+        // fork может временно удерживать дескриптор после закрытия файла в родителе.
+        let _ = self._lock.unlock();
+    }
+}
+
 impl Queue {
     pub fn open(dir: &Path, max_bytes: u64, max_events: u64) -> Result<Self, Error> {
         Self::open_limited(dir, max_bytes, max_events, 100_000)
@@ -164,6 +171,10 @@ impl Queue {
         Ok(queue)
     }
 
+    /// Реально открытый (канонический) каталог очереди.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
     pub fn entries(&self) -> &VecDeque<Entry> {
         &self.files
     }
@@ -396,7 +407,8 @@ fn remove(path: &Path) -> io::Result<()> {
         fs::remove_file(path)
     }
 }
-fn atomic_file(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
+/// Пишет `name` в `dir` через `<name>.tmp`, fsync и rename; `*.tmp` очищает `Queue::open`.
+pub fn atomic_file(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
     let tmp = dir.join(format!("{name}.tmp"));
     let mut file = File::create(&tmp)?;
     file.write_all(bytes)?;
@@ -521,9 +533,49 @@ mod tests {
     }
 
     #[test]
+    fn side_files_are_ignored_and_stale_tmp_is_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = Queue::open(dir.path(), 100, 100).unwrap();
+        atomic_file(queue.dir(), ".agents", b"{\"agents\":[]}").unwrap();
+        queue.append_group([Ok((b"first".to_vec(), 1))]).unwrap();
+        drop(queue);
+        fs::write(dir.path().join(".agents.tmp"), b"partial").unwrap();
+        let queue = Queue::open(dir.path(), 100, 100).unwrap();
+        assert_eq!(queue.entries().len(), 1);
+        assert_eq!(queue.events(), 1);
+        assert_eq!(
+            fs::read(queue.dir().join(".agents")).unwrap(),
+            b"{\"agents\":[]}"
+        );
+        assert!(!queue.dir().join(".agents.tmp").exists());
+    }
+
+    #[test]
     fn exclusive_directory_lock_prevents_competing_writers() {
         let dir = tempfile::tempdir().unwrap();
         let _queue = Queue::open(dir.path(), 100, 100).unwrap();
+        assert!(Queue::open(dir.path(), 100, 100).is_err());
+    }
+
+    #[test]
+    fn dropping_queue_releases_lock_with_a_duplicated_descriptor() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = Queue::open(dir.path(), 100, 100).unwrap();
+        queue
+            .append_group([Ok((b"confirmed".to_vec(), 1))])
+            .unwrap();
+        // fork наследует тот же open file description, что и try_clone.
+        let inherited_lock = queue._lock.try_clone().unwrap();
+        assert!(Queue::open(dir.path(), 100, 100).is_err());
+        drop(queue);
+
+        let reopened = Queue::open(dir.path(), 100, 100);
+        drop(inherited_lock);
+        let reopened = reopened.expect("dropped queue must release its directory lock");
+        assert_eq!(
+            reopened.read(&reopened.entries()[0], 100).unwrap(),
+            b"confirmed"
+        );
         assert!(Queue::open(dir.path(), 100, 100).is_err());
     }
 

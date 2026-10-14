@@ -28,7 +28,7 @@ MessagePack с именованными полями + ZSTD; `CoreBatch = droppe
 
 ## Зависимости
 
-Tokio, Axum, serde/MessagePack/ZSTD; Parquet 59.2 совместим с Arrow из DataFusion 55.1; Tantivy 0.26, SQLite через rusqlite. Зависимость на relay существует только в тестах и примерах, на agent только в сквозном тесте.
+Tokio, Axum, serde/MessagePack/ZSTD; rand 0.9 для системной генерации токенов; Parquet 59.2 совместим с Arrow из DataFusion 55.1; Tantivy 0.26, SQLite через rusqlite. Зависимость на relay существует только в тестах и примерах, на agent только в сквозном тесте.
 
 ## Надёжный приём
 
@@ -42,7 +42,7 @@ WAL хранит одну версионированную запись на ф�
 | `Wal::append(body: &[u8], events: u64, received_at: i64): Result<Receipt>` | Долговечно публикует запись. |
 | `Wal::prune(checkpoint: Position): Result<()>` | Удаляет только полностью материализованные пачки. |
 | `Wal::pending_batches(): usize` | Число пачек для ограничения памяти метаданных очереди. |
-| `Journal::open(config: Config): Result<Arc<Journal>>` | Захватывает блокировку и восстанавливает журнал. |
+| `Journal::open(config: Config): Result<Arc<Journal>>` | Захватывает core.lock, открывает Access и восстанавливает журнал. |
 | `Journal::accept(body: &[u8]): Result<Receipt>` | Дедуплицирует, проверяет лимиты, подтверждает после fsync. |
 | `~~api::router(journal: Arc<Journal>)~~ (удалён: 2026-09-29)` | Приём, health, авторизованные метрики. |
 
@@ -74,8 +74,8 @@ WAL хранит одну версионированную запись на ф�
 
 | Метод | Назначение |
 |---|---|
-| `api::router(core: Arc<Core>): Router` | Собирает HTTP приёма и чтения с отдельными токенами; при `LOGNARA_ADMIN_TOKEN` добавляет `/v1/admin/series/*`. |
-| `api::ingest_router(journal: Arc<Journal>): Router` | Приём, health и метрики. |
+| `api::router(core: Arc<Core>): Router` | Собирает приём relay, query API (логи и серии) и admin API (relay, агенты, `/v1/admin/series/*`). |
+| `api::ingest_router(journal: Arc<Journal>): Router` | Приём relay, список его агентов, health и query-метрики. |
 | `PreparedFilter::new(from, to, filters): Result<PreparedFilter>` | Проверяет диапазон и допустимые фильтры. |
 | `query::search(core, request, ascending, deadline): Result<SearchResponse>` | Ищет в согласованном снимке, возвращает события и курсор. |
 
@@ -98,7 +98,7 @@ Retention смотрит max core_received_at, исключает expired сег
 
 Необязательный `environment` в запросе сужает серию одним окружением; `GET /v1/series` отдаёт окружения (`environments`) из `series_environments` и открытого сегмента. Для полных суток окна запрос берёт суточный агрегат вместо точек, если он актуален (раздел «Суточные агрегаты»).
 
-Ошибки разбора и отброшенные точки считаются в `lognara_core_series_*`; построение агрегатов: `lognara_core_series_rollups_built_total` и `lognara_core_series_rollup_errors_total`. Маршруты определений и предпросмотра включаются только с `LOGNARA_ADMIN_TOKEN`; query-токен даёт только чтение серий. Операционные детали (каталог, слияние, счётчики): `Lognara-core/docs/operations.md`. Структура модулей: [[Core/LognaraCore-ProjectMap]].
+Ошибки разбора и отброшенные точки считаются в `lognara_core_series_*`; построение агрегатов: `lognara_core_series_rollups_built_total` и `lognara_core_series_rollup_errors_total`. Маршруты определений и предпросмотра требуют `LOGNARA_ADMIN_TOKEN`; query-токен даёт только чтение серий. Операционные детали (каталог, слияние, счётчики): `Lognara-core/docs/operations.md`. Структура модулей: [[Core/LognaraCore-ProjectMap]].
 
 | Метод | Назначение |
 |---|---|
@@ -191,3 +191,28 @@ Retention смотрит max core_received_at, исключает expired сег
 |---|---|
 | `Metrics::render(): String` | Сериализует низкокардинальные счётчики/gauges Prometheus, в том числе `lognara_core_series_*`. |
 | `main::shutdown()` | Ждёт SIGINT или SIGTERM. |
+
+## Реестр подключений
+
+`access.sqlite3` в `data_dir` хранит relay и агентов отдельно от `catalog.sqlite`. SQLite использует WAL, FULL, foreign keys и отдельный `user_version=1`. Реестр открывается после захвата `core.lock`. Идентификаторы i64 не переиспользуются, `created_at` — RFC3339 UTC.
+
+Токен: 32 системных случайных байта в hex с префиксом `lnr_` для relay или `lna_` для агента. Plaintext выдаётся только при создании; БД хранит SHA-256. Имя после trim: 1..64 символа, без управляющих. Relay-имена уникальны глобально, имена агентов внутри relay. Relay с агентами удалить нельзя.
+
+`LOGNARA_ADMIN_TOKEN` обязателен и отличается от `LOGNARA_QUERY_TOKEN`; `LOGNARA_INGEST_TOKEN` удалён. Admin API: GET/POST `/v1/admin/relays`, `/v1/admin/agents`, DELETE по `/{id}`. SQLite вызывается через `spawn_blocking`. Ошибки JSON `{"error":"code"}`: invalid_name/invalid_request (400), relay_not_found/not_found (404), name_taken/relay_has_agents (409).
+
+POST `/v1/batches` и GET `/v1/agents` проверяют SHA-256 персонального relay-токена по RwLock-карте до чтения тела. Один Bearer-заголовок, схема без учёта регистра. Relay получает только хеши своих агентов в `{"agents":["sha256 hex"]}`. После удаления relay карта обновляется и токен даёт 401. Поля источника не сверяются.
+
+| Метод | Назначение |
+|---|---|
+| `Access::open(path: &Path): Result<Access>` | Открывает реестр и карту relay-токенов. |
+| `Access::create_relay(name: &str): Result<CreatedRelay>` | Создаёт relay и один раз выдаёт токен. |
+| `Access::create_agent(name: &str, relay_id: i64): Result<CreatedAgent>` | Создаёт агента для существующего relay. |
+| `Access::list_relays(): Result<Vec<Relay>>` | Возвращает профили без токенов. |
+| `Access::list_agents(): Result<Vec<Agent>>` | Возвращает агентов без токенов. |
+| `Access::delete_relay(id: i64): Result<()>` | Удаляет relay без агентов и отзывает доступ. |
+| `Access::delete_agent(id: i64): Result<()>` | Удаляет агента из списка relay. |
+| `Access::relay_for_token(hash: &[u8;32]): Option<i64>` | Проверяет хеш без SQLite. |
+| `Access::agent_hashes(relay_id: i64): Result<Vec<String>>` | Возвращает хеши агентов relay. |
+| `api::authorize_relay(access, request, next): Response` | Проверяет токен и добавляет id relay в extensions. |
+
+`tests/access.rs`: CRUD, права, изоляция, отзыв и восстановление реестра. Нагрузочный скрипт задаёт admin-токен, регистрирует relay и передаёт его токен load через `LOGNARA_CORE_TOKEN`.

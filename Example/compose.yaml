@@ -1,0 +1,132 @@
+name: lognara-example
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: Example/Dockerfile
+      target: app
+    init: true
+    environment:
+      LOGNARA_SERVICE: python-example
+      LOGNARA_SERVER: local-machine
+      LOGNARA_BACKEND: example
+      LOGNARA_ENVIRONMENT: local
+      LOGNARA_LISTEN_ADDR: 127.0.0.1:7400
+      LOGNARA_RELAY_URL: http://relay:7401/v1/batches
+      LOGNARA_RELAY_TOKEN: ${LOGNARA_AGENT_TOKEN:-}
+      LOGNARA_SPOOL_DIR: /data/agent-spool
+      LOGNARA_FLUSH_INTERVAL_MS: "1000"
+    ports:
+      - "127.0.0.1:8881:8881"
+    volumes:
+      - agent-spool:/data/agent-spool
+    depends_on:
+      relay:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8881), 2).close(); socket.create_connection(('127.0.0.1', 7400), 2).close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    stop_grace_period: 30s
+
+  relay:
+    build:
+      context: ..
+      dockerfile: Example/Dockerfile
+      target: relay
+    environment:
+      LOGNARA_LISTEN_ADDR: 0.0.0.0:7401
+      LOGNARA_CORE_URL: http://core:7402/v1/batches
+      LOGNARA_CORE_TOKEN: ${LOGNARA_RELAY_CORE_TOKEN:-}
+      LOGNARA_RELAY_MEMORY_MB: ${LOGNARA_RELAY_MEMORY_MB:-2048}
+      LOGNARA_SPOOL_DIR: /data/relay-spool
+      LOGNARA_FLUSH_INTERVAL_MS: "1000"
+    mem_limit: ${LOGNARA_RELAY_MEMORY_MB:-2048}m
+    volumes:
+      - relay-spool:/data/relay-spool
+    depends_on:
+      core:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 7401), 2).close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    stop_grace_period: 30s
+
+  core:
+    build:
+      context: ..
+      dockerfile: Example/Dockerfile
+      target: core
+    environment:
+      LOGNARA_LISTEN_ADDR: 0.0.0.0:7402
+      LOGNARA_ADMIN_TOKEN: local-admin-token
+      LOGNARA_QUERY_TOKEN: local-query-token
+      LOGNARA_DATA_DIR: /data/core
+    ports:
+      - "127.0.0.1:7402:7402"
+    volumes:
+      - core-data:/data/core
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:7402/health/ready', timeout=2).close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    stop_grace_period: 30s
+
+  dock-init:
+    image: httpd:2.4-alpine
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        if [ ! -f /auth/htpasswd ]; then
+          htpasswd -B -C 12 -bc /auth/htpasswd demo demo-lognara-local
+        fi
+        chown 1000:1000 /auth /auth/htpasswd /data/dock
+        chmod 700 /auth /data/dock
+        chmod 600 /auth/htpasswd
+    volumes:
+      - dock-auth:/auth
+      - dock-data:/data/dock
+
+  dock:
+    build:
+      context: ..
+      dockerfile: Example/Dockerfile
+      target: dock
+    environment:
+      LOGNARA_DOCK_PUBLIC_URL: http://localhost:7403
+      LOGNARA_DOCK_LISTEN_ADDR: 0.0.0.0:7403
+      LOGNARA_DOCK_CORE_URL: http://core:7402
+      LOGNARA_DOCK_CORE_TOKEN: local-query-token
+      LOGNARA_DOCK_CORE_ADMIN_TOKEN: local-admin-token
+      LOGNARA_DOCK_HTPASSWD_FILE: /etc/lognara-dock/auth/htpasswd
+      LOGNARA_DOCK_DATA_DIR: /data/dock
+    ports:
+      - "127.0.0.1:7403:7403"
+    volumes:
+      - dock-auth:/etc/lognara-dock/auth
+      - dock-data:/data/dock
+    depends_on:
+      dock-init:
+        condition: service_completed_successfully
+      core:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:7403/health/ready', timeout=2).close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    stop_grace_period: 30s
+
+volumes:
+  agent-spool:
+  relay-spool:
+  core-data:
+  dock-auth:
+  dock-data:

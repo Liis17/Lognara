@@ -30,7 +30,7 @@ async fn start(path: &std::path::Path, point: Option<&str>) -> Process {
     command
         .env("LOGNARA_DATA_DIR", path)
         .env("LOGNARA_LISTEN_ADDR", format!("127.0.0.1:{port}"))
-        .env("LOGNARA_INGEST_TOKEN", "ingest")
+        .env("LOGNARA_ADMIN_TOKEN", "ingest")
         .env("LOGNARA_QUERY_TOKEN", "query")
         .env("LOGNARA_SEGMENT_ROWS", "2")
         .env("LOGNARA_REFRESH_MS", "20")
@@ -90,9 +90,18 @@ fn batch(time: &str) -> Vec<u8> {
 }
 
 async fn send(client: &Client, url: &str, body: &[u8]) -> reqwest::Result<reqwest::Response> {
+    let created: serde_json::Value = client
+        .post(format!("{url}/v1/admin/relays"))
+        .bearer_auth("ingest")
+        .json(&serde_json::json!({"name":uuid::Uuid::new_v4().to_string()}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
     client
         .post(format!("{url}/v1/batches"))
-        .bearer_auth("ingest")
+        .bearer_auth(created["token"].as_str().unwrap())
         .header("content-type", "application/msgpack")
         .header("content-encoding", "zstd")
         .body(body.to_vec())

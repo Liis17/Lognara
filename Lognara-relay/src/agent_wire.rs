@@ -2,7 +2,7 @@
 //!
 //! Тело запроса: `Batch` в MessagePack (поля по именам), сжатый zstd.
 //! Заголовки: `Content-Type: application/msgpack`, `Content-Encoding: zstd`.
-//! Авторизация: `Authorization: Bearer <LOGNARA_RELAY_TOKEN>`.
+//! Авторизация: `Authorization: Bearer <токен агента>`; токен должен быть в списке агентов core..
 
 use std::io::Read;
 
@@ -27,7 +27,21 @@ pub struct Batch {
 pub struct Record {
     /// Момент приёма агентом, Unix-время в наносекундах.
     pub received_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<Origin>,
     pub payload: Payload,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Origin {
+    pub source: String,
+    pub path: Option<String>,
+    pub stream: Option<String>,
+    pub offset: u64,
+    pub end: u64,
+    pub fragment: u64,
+    pub continued: bool,
 }
 
 /// Лог в том виде, в каком его прислало приложение.
@@ -138,14 +152,17 @@ mod tests {
                 records: vec![
                     Record {
                         received_at: 1,
+                        origin: None,
                         payload: Payload::Text("hello".into()),
                     },
                     Record {
                         received_at: 2,
+                        origin: None,
                         payload: Payload::Json(r#"{"level":"error"}"#.into()),
                     },
                     Record {
                         received_at: 3,
+                        origin: None,
                         payload: Payload::Binary(vec![0, 159, 146, 150]),
                     },
                 ],

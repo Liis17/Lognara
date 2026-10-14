@@ -175,7 +175,7 @@ async fn main() -> Result<()> {
     );
 
     let mut config = Config::from_lookup(|key| match key {
-        "LOGNARA_INGEST_TOKEN" => Some("ingest".into()),
+        "LOGNARA_ADMIN_TOKEN" => Some("admin".into()),
         "LOGNARA_QUERY_TOKEN" => Some("query".into()),
         _ => None,
     })?;

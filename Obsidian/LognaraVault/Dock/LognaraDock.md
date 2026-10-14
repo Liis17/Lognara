@@ -4,7 +4,7 @@ Parent: [[Index]]
 
 ## Назначение
 
-Веб-интерфейс Lognara за nginx (TLS). Rust-сервис в `Lognara-dock/` отдаёт React-приложение из `web/`, проверяет вход, показывает логи [[Core/LognaraCore]] в реальном времени и графики метрик (раздел «Метрики»). Query-токен и admin-токен core хранятся только в dock.
+Веб-интерфейс Lognara за nginx (TLS). Rust-сервис в `Lognara-dock/` отдаёт React-приложение из `web/`, проверяет вход, регистрирует relay и агентов, показывает логи [[Core/LognaraCore]] в реальном времени и графики метрик (раздел «Метрики»). Query- и admin-токены core хранятся только в dock.
 
 Поток: браузер → nginx :443 → dock :7403 → `POST /v1/logs/search` core с Bearer query-токеном. Метрики: `/api/series*` → `/v1/series*` с тем же query-токеном; определения и предпросмотр → `/v1/admin/series/*` с admin-токеном.
 
@@ -33,9 +33,9 @@ SSE-поток каждые 60 секунд перепроверяет сесс�
 - Select «Окружение» рядом с разбиением появляется, если у метрики есть `environments` из `GET /api/series`; по умолчанию «Все окружения», и поле `environment` в запросе не передаётся. Смена метрики сбрасывает окружение, смена окружения перезапрашивает график.
 - График рисует `components/Chart.tsx` на uPlot: восемь категориальных цветов по порядку, серии сверх них серые.
 - Редактор `pages/MetricEditor.tsx` создаёт правило из текста логов, настраивает метрику по имени, проверяет правило предпросмотром (`POST /api/series/preview`, окно фиксировано 60 минут) и сохраняет (`POST`/`PUT /api/series/definitions`) или удаляет (`DELETE`) определение.
-- Кнопки редактора видны только при `series_admin` из `GET /api/me`, то есть при заданном `LOGNARA_DOCK_CORE_ADMIN_TOKEN`. Без него все `/api/series/definitions*` и `/api/series/preview` отвечают `404 admin_disabled`.
+- Кнопки редактора видны всегда: `LOGNARA_DOCK_CORE_ADMIN_TOKEN` обязателен.
 
-`series.rs` - прокси: тело запроса передаётся core как есть, проверяет его core. Запрос серий ждёт core 35 секунд (`SERIES_QUERY_TIMEOUT`), остальные вызовы 10 секунд (`REQUEST_TIMEOUT`). Core отрезает запрос по `LOGNARA_QUERY_TIMEOUT_SECONDS` (30 секунд по умолчанию), то есть таймаут dock на 5 секунд больше. Ответы core переводятся в коды ошибок API: `admin_disabled`, `invalid` (с `detail`), `not_found`, `core_unavailable` (сеть, таймаут, 5xx), `internal` (core отклонил токен). Таблица кодов: [[Dock/LognaraDock-ProjectMap]] и `Lognara-dock/README.md`.
+`series.rs` - прокси: тело запроса передаётся core как есть, проверяет его core. Запрос серий ждёт core 35 секунд (`SERIES_QUERY_TIMEOUT`), остальные вызовы 10 секунд (`REQUEST_TIMEOUT`). Core отрезает запрос по `LOGNARA_QUERY_TIMEOUT_SECONDS` (30 секунд по умолчанию), то есть таймаут dock на 5 секунд больше. Ответы core переводятся в коды ошибок API: `invalid` (с `detail`), `not_found`, `core_unavailable` (502: сеть, таймаут, 5xx), `internal` (core отклонил токен). Таблица кодов: [[Dock/LognaraDock-ProjectMap]] и `Lognara-dock/README.md`.
 
 Ограничения: диапазон «1 год» получает шаг 12 часов (730 корзин), такой шаг не измерялся: замер года выполнен для шага 1 день (см. [[Design/Metrics]], раздел «Суточные агрегаты»).
 
@@ -46,7 +46,7 @@ SSE-поток каждые 60 секунд перепроверяет сесс�
 | `LOGNARA_DOCK_PUBLIC_URL` | да | - | внешний адрес; origin для passkey и проверки Origin; http только для localhost |
 | `LOGNARA_DOCK_CORE_URL` | да | - | базовый адрес core |
 | `LOGNARA_DOCK_CORE_TOKEN` | да | - | query-токен core, скрыт в Debug |
-| `LOGNARA_DOCK_CORE_ADMIN_TOKEN` | нет | не задан | admin-токен core для определений метрик; пусто = отключено, скрыт в Debug |
+| `LOGNARA_DOCK_CORE_ADMIN_TOKEN` | да | - | отдельный admin-токен core для relay, агентов и определений метрик, ASCII без пробелов/control, скрыт в Debug |
 | `LOGNARA_DOCK_LISTEN_ADDR` | нет | `127.0.0.1:7403` | в образе `0.0.0.0:7403` |
 | `LOGNARA_DOCK_HTPASSWD_FILE` | нет | `/etc/lognara-dock/auth/htpasswd` | файл пользователей |
 | `LOGNARA_DOCK_DATA_DIR` | нет | `/var/lib/lognara-dock` | SQLite и lock |
@@ -81,7 +81,7 @@ SSE-поток каждые 60 секунд перепроверяет сесс�
 - `CoreClient::search(&self, from, to, limit: usize): Result<Vec<Value>, CoreError>` — поиск core
 - `CoreClient::call_within(&self, method: Method, path: &str, token: &str, body: Option<&Value>, timeout: Duration): Result<CoreReply, CoreError>` - общий HTTP-вызов core с явным таймаутом; `call` подставляет 10 секунд
 - `CoreClient::series_query(&self, query: &Value): Result<CoreReply, CoreError>` - `POST /v1/series/query` с таймаутом 35 секунд
-- `CoreClient::admin_enabled(&self): bool` - задан ли admin-токен; от него зависит `series_admin` в `/api/me`
+- ~~`CoreClient::admin_enabled`~~ (удалён: 2026-10-14)
 - `CoreClient::preview(&self, request: &Value): Result<CoreReply, CoreError>` - предпросмотр правила, admin-токен
 - `From<CoreError> for ApiError` (`api.rs`) - перевод ответов core в коды ошибок API
 - `Live::new(config: &Config, core: Arc<CoreClient>, shutdown: CancellationToken): Arc<Live>` - опрос использует общий клиент
@@ -92,6 +92,29 @@ SSE-поток каждые 60 секунд перепроверяет сесс�
 
 ## Зависимости
 
-- Использует: [[Core/LognaraCore]] (`POST /v1/logs/search`, `GET /v1/series`, `POST /v1/series/query` с query-токеном; `/v1/admin/series/*` с admin-токеном).
+- Использует: [[Core/LognaraCore]] (`POST /v1/logs/search`, `GET /v1/series`, `POST /v1/series/query` с query-токеном; `/v1/admin/*`, включая `/v1/admin/series/*`, с admin-токеном).
 - Библиотеки фронтенда: uPlot (`web/package.json`, график метрик), React и react-router.
 - Используется в: браузер через nginx.
+
+## Подключения
+
+Страница `/access` («Подключения») показывает relay и агентов, создаёт их по имени и привязке к relay, удаляет профили. React получает список без токенов. После POST новый токен виден один раз вместе с `.env` строкой `LOGNARA_RELAY_CORE_TOKEN=…` или `LOGNARA_AGENT_TOKEN=…`; до «Я сохранил токен» создание следующего профиля заблокировано. Plaintext хранится только в состоянии страницы, не в localStorage. При выборе relay учитывается его удаление из списка.
+
+API GET/POST `/api/relays`, `/api/agents`, DELETE по `/{id}` требует AuthUser, изменения — корректный Origin. CoreClient отправляет admin Bearer с REQUEST_TIMEOUT=10s. Известные коды core отображаются статическими строками с сохранением 400/404/409; недоступность, неверная авторизация core и неожиданный ответ дают 502 core_unavailable. Ответ создания — 201 с Cache-Control no-store. Query/admin-токены различаются и не выдаются браузеру.
+
+| Метод | Назначение |
+|---|---|
+| `CoreClient::list_relays(): Result<Value, CoreError>` | Получает профили relay из core. |
+| `CoreClient::create_relay(name: &str): Result<Value, CoreError>` | Создаёт relay и проксирует одноразовый токен. |
+| `CoreClient::delete_relay(id: i64): Result<(), CoreError>` | Удаляет relay без агентов. |
+| `CoreClient::list_agents(): Result<Value, CoreError>` | Получает профили агентов. |
+| `CoreClient::create_agent(name: &str, relay_id: i64): Result<Value, CoreError>` | Создаёт агента в выбранном relay. |
+| `CoreClient::delete_agent(id: i64): Result<(), CoreError>` | Удаляет агента. |
+| `access::list_relays(State<AppState>, AuthUser): Result<Json<Value>, ApiError>` | Авторизованный список relay. |
+| `access::list_agents(State<AppState>, AuthUser): Result<Json<Value>, ApiError>` | Авторизованный список агентов. |
+| `access::create_relay(State<AppState>, AuthUser, Json<NewRelay>): Result<Response, ApiError>` | Валидирует JSON и проксирует создание relay. |
+| `access::create_agent(State<AppState>, AuthUser, Json<NewAgent>): Result<Response, ApiError>` | Валидирует JSON и проксирует создание агента. |
+| `access::delete_relay(State<AppState>, AuthUser, Path<i64>): Result<StatusCode, ApiError>` | Проксирует удаление relay. |
+| `access::delete_agent(State<AppState>, AuthUser, Path<i64>): Result<StatusCode, ApiError>` | Проксирует удаление агента. |
+
+Обработчики принимают JSON/Path как Result и возвращают JSON invalid_request вместо plain-text rejection. tests/access.rs проверяет admin Bearer/path/body, no-store, сессию, Origin, 409/404 и 502.

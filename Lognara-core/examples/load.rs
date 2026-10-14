@@ -49,7 +49,7 @@ fn timings(values: &[u64]) -> serde_json::Value {
 #[tokio::main]
 async fn main() -> Result<()> {
     let url = std::env::var("LOGNARA_BENCH_URL").unwrap_or_else(|_| "http://127.0.0.1:7402".into());
-    let ingest_token = std::env::var("LOGNARA_INGEST_TOKEN")?;
+    let ingest_token = std::env::var("LOGNARA_CORE_TOKEN")?;
     let query_token = std::env::var("LOGNARA_QUERY_TOKEN")?;
     let seconds = number("LOGNARA_BENCH_SECONDS", 1800)?;
     let rate = number("LOGNARA_BENCH_RATE", 10_000)?;

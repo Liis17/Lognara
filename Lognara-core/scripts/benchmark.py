@@ -44,7 +44,7 @@ def main():
     crate = Path(__file__).resolve().parents[1]
     url = f"http://127.0.0.1:{args.port}"
     env = dict(os.environ, LOGNARA_DATA_DIR=str(data), LOGNARA_LISTEN_ADDR=f"127.0.0.1:{args.port}",
-               LOGNARA_INGEST_TOKEN=secrets.token_urlsafe(32), LOGNARA_QUERY_TOKEN=secrets.token_urlsafe(32),
+               LOGNARA_ADMIN_TOKEN=secrets.token_urlsafe(32), LOGNARA_QUERY_TOKEN=secrets.token_urlsafe(32),
                LOGNARA_BENCH_URL=url, LOGNARA_BENCH_SECONDS=str(args.seconds), LOGNARA_BENCH_RATE=str(args.rate),
                LOGNARA_BENCH_REPORT=str(args.output.resolve() / "latencies.json"))
     metadata = {"platform": platform.platform(), "cpu_count": os.cpu_count(), "rate": args.rate,
@@ -73,6 +73,11 @@ def main():
                     if server.poll() is not None or time.monotonic() > deadline:
                         raise RuntimeError("core failed to become ready; see server.log")
                     time.sleep(0.1)
+            request = urllib.request.Request(url + "/v1/admin/relays",
+                data=json.dumps({"name": "benchmark"}).encode(), method="POST",
+                headers={"Authorization": "Bearer " + env["LOGNARA_ADMIN_TOKEN"], "Content-Type": "application/json"})
+            with urllib.request.urlopen(request, timeout=5) as response:
+                env["LOGNARA_CORE_TOKEN"] = json.load(response)["token"]
             iostat = shutil.which("iostat") or ("/usr/sbin/iostat" if Path("/usr/sbin/iostat").exists() else None)
             if iostat:
                 command = [iostat, "-d", "-w", "5"] if platform.system() == "Darwin" else [iostat, "-dx", "5"]

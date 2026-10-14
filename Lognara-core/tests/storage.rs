@@ -6,7 +6,7 @@ use std::{
 
 fn config(path: &std::path::Path) -> Config {
     let mut cfg = Config::from_lookup(|key| match key {
-        "LOGNARA_INGEST_TOKEN" => Some("ingest".into()),
+        "LOGNARA_ADMIN_TOKEN" => Some("ingest".into()),
         "LOGNARA_QUERY_TOKEN" => Some("query".into()),
         _ => None,
     })

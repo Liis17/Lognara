@@ -6,7 +6,7 @@ Parent: [[Index]]
 
 Rust-процесс, один на машину. Принимает пачки от [[Agent/LognaraAgent]] всех микросервисов, разбирает сырые записи в события, группирует их по источнику и сжатыми пачками отправляет в lognara-core раз в интервал. Пока core недоступен, пачки ждут на диске (spool) и потом уходят от старых к новым. Метрики пока не поддерживаются.
 
-Поток: агент → `POST /v1/batches` → проверка общего Bearer-токена до чтения тела → разбор в `Event` → пачки MessagePack + zstd → атомарный durable spool → `202` → `POST` в core.
+Поток: агент → `POST /v1/batches` → проверка персонального токена агента по списку core до чтения тела → разбор в `Event` → пачки MessagePack + zstd → атомарный durable spool → `202` → `POST` в core.
 
 Файлы, модули и связи между ними описаны в [[Relay/LognaraRelay-ProjectMap]].
 
@@ -14,13 +14,12 @@ Rust-процесс, один на машину. Принимает пачки �
 
 Правила как у агента: переменные в верхнем регистре, пустое значение считается незаданным, при ошибке relay завершается с кодом 1 и называет переменную.
 
-`LOGNARA_RELAY_TOKEN` должен содержать только печатные ASCII-символы без пробелов и управляющих символов. Он скрыт в ошибках валидации; `Debug` конфигурации скрывает ключи relay и core.
+`LOGNARA_CORE_TOKEN` содержит персональный токен relay из dock, скрытый в Debug. Общий `LOGNARA_RELAY_TOKEN` из конфигурации relay удалён.
 
 | Переменная | Обяз. | По умолчанию | Назначение |
 |---|---|---|---|
 | `LOGNARA_CORE_URL` | да | - | адрес core, схема `http` или `https` |
-| `LOGNARA_CORE_TOKEN` | да | - | Bearer-токен для core |
-| `LOGNARA_RELAY_TOKEN` | да | - | общий Bearer-токен агентов |
+| `LOGNARA_CORE_TOKEN` | да | - | персональный токен relay для batches и списка агентов |
 | `LOGNARA_FLUSH_INTERVAL_MS` | нет | `60000` | интервал отправки в core |
 | `LOGNARA_BATCH_SIZE` | нет | `10000` | при таком числе событий пачка уходит раньше интервала |
 | `LOGNARA_MAX_BUFFER` | нет | `100000` | лимит подтверждённых событий в очереди, не меньше `BATCH_SIZE`; сверх него агенты получают `503` |
@@ -30,14 +29,16 @@ Rust-процесс, один на машину. Принимает пачки �
 | `LOGNARA_CORE_MAX_BODY_BYTES` | нет | `67108864` | максимум сжатой исходящей пачки, не больше лимита core |
 | `LOGNARA_CORE_MAX_DECODED_BYTES` | нет | `268435456` | максимум MessagePack до сжатия, не больше лимита core |
 | `LOGNARA_CORE_MAX_MODEL_BYTES` | нет | `268435456` | бюджет модели: 128 байт на узел MessagePack плюс string/bin |
-| `LOGNARA_RELAY_MEMORY_BYTES` | нет | `1879048192` | сумма резервов приёма, буфера и sender |
+| `LOGNARA_RELAY_MEMORY_MB` | нет | `2048` | общий RAM в MiB, минимум 2048; 256 MiB запас runtime |
 | `LOGNARA_RELAY_MAX_MODEL_BYTES` | нет | `268435456` | резерв входной модели и нормализации |
 | `LOGNARA_RELAY_MAX_BUFFER_BYTES` | нет | `268435456` | резерв нормализованных моделей до durable commit |
 | `LOGNARA_RELAY_MAX_INGEST_CONCURRENCY` | нет | `1` | число одновременных чтений/обработок |
 
 Ресурсная конфигурация, admission до чтения тела и ожидание blocking-работников при остановке описаны в [[Relay/Memory]].
 
-Пример docker-compose (Dockerfile пока нет):
+`Lognara-relay/Dockerfile` собирается из корня репозитория и включает общий spool. Образ GHCR публикуется после успешного CI в `master`, работает от `1000:1000`; схема поставки и тегов в [[Repository/Images]].
+
+Пример docker-compose:
 
 ```yaml
 services:
@@ -45,10 +46,11 @@ services:
     image: lognara-relay
     environment:
       LOGNARA_CORE_URL: https://core.example.com/v1/batches
-      LOGNARA_CORE_TOKEN: ${LOGNARA_CORE_TOKEN:?Задайте LOGNARA_CORE_TOKEN}
-      LOGNARA_RELAY_TOKEN: ${LOGNARA_RELAY_TOKEN:?Задайте LOGNARA_RELAY_TOKEN}
+      LOGNARA_CORE_TOKEN: ${LOGNARA_RELAY_CORE_TOKEN:?Задайте токен relay из dock}
+      LOGNARA_RELAY_MEMORY_MB: ${LOGNARA_RELAY_MEMORY_MB:-2048}
       LOGNARA_LISTEN_ADDR: "0.0.0.0:7401"
       LOGNARA_FLUSH_INTERVAL_MS: "60000"
+    mem_limit: ${LOGNARA_RELAY_MEMORY_MB:-2048}m
     volumes:
       - ${LOGNARA_RELAY_DATA:-lognara-spool}:/var/lib/lognara-relay/spool
     networks: [lognara-ingest]
@@ -59,17 +61,17 @@ volumes:
   lognara-spool:
 ```
 
-Пустой `LOGNARA_RELAY_DATA` оставляет volume `lognara-spool`, абсолютный путь монтирует папку на хосте. Агенты по умолчанию шлют на `http://lognara-relay:7401/v1/batches`, то есть на сервис с этим именем в той же сети. Все агенты получают тот же `LOGNARA_RELAY_TOKEN` через `environment`. Порт `7401` на хост не публикуется, `network_mode: host` не используется. `.env.example` находится в корне репозитория, а фрагмент для контейнера приложения с агентом показан в корневом README. После смены ключа пересоздаются relay и все агенты.
+Пустой `LOGNARA_RELAY_DATA` оставляет volume `lognara-spool`, абсолютный путь монтирует папку на хосте. Агенты по умолчанию шлют на `http://lognara-relay:7401/v1/batches`, то есть на сервис с этим именем в той же сети. Каждый агент получает свой токен из dock как `LOGNARA_RELAY_TOKEN` через environment. Порт `7401` на хост не публикуется, `network_mode: host` не используется. `.env.example` находится в корне репозитория, а фрагмент для контейнера приложения с агентом показан в корневом README. После пересоздания профиля обновляется токен только соответствующего процесса с сохранением spool.
 
 ## Приём: `POST /v1/batches`
 
-Нужен единственный `Authorization: Bearer {LOGNARA_RELAY_TOKEN}`. Middleware проверяет SHA-256 ключа сравнением через `subtle` до чтения тела и распаковки; схема Bearer без учёта регистра. Затем проверяются `Content-Type: application/msgpack` и `Content-Encoding: zstd`; тело — `Batch` агента (см. «Контракт с relay» в [[Agent/LognaraAgent]]). Relay держит копию этих типов, совместимость проверяет фикстура `tests/fixtures/agent-batch.bin`, закодированная кодом агента.
+Нужен единственный `Authorization: Bearer {персональный токен агента}`. Middleware проверяет SHA-256 по HashSet зарегистрированных агентов данного relay до чтения тела и распаковки; схема Bearer без учёта регистра. Затем проверяются `Content-Type: application/msgpack` и `Content-Encoding: zstd`; тело — `Batch` агента (см. «Контракт с relay» в [[Agent/LognaraAgent]]). Relay держит копию этих типов, совместимость проверяет фикстура `tests/fixtures/agent-batch.bin`, закодированная кодом агента.
 
 Ответы: `401` отказ авторизации до тела; `202` все части запроса сохранены и синхронизированы на диске; `415` неподдерживаемые заголовки; `413` превышение 2 MiB одной записи, 64/256 MiB тела/распаковки, бюджета модели либо лимитов кодирования отдельного события; `400` невалидное тело или пустые records; `503` admission, память, квота spool или ошибки диска; `408` тайм-аут чтения. При отказе не подтверждается ни одна часть запроса; ранее подтверждённые данные не вытесняются.
 
 После декодирования relay требует хотя бы одну запись: `records=[]` отклоняется с `400` при любом `dropped`, до создания группы и резервирования памяти буфера. Пустая пачка не меняет счётчики и не попадает в core или spool; сведения о потерях агент передаёт вместе с записями.
 
-Все владельцы общего ключа считаются доверенными. Поля `service/server/backend` принимаются от них без проверки принадлежности, поэтому новый контейнер с агентом не требует регистрации в relay.
+Агент сначала регистрируется в core через dock с привязкой к relay. Поля `service/server/backend` принимаются без проверки принадлежности.
 
 ## Разбор записей в события
 
@@ -84,6 +86,8 @@ volumes:
 | `Json`, объект | канонические ключи в поля события, остальные в `attributes` |
 
 Канонические ключи: `id` (UUID), `timestamp` (RFC 3339), `level` (`trace`/`debug`/`info`/`warn`/`error`/`fatal` без учёта регистра; синонимы Serilog: `verbose` = `trace`, `information` = `info`, `warning` = `warn`, `critical` = `fatal`), `message`, `action`, `request_id` (строки), `trace_id` (32 hex), `span_id`, `parent_span_id` (16 hex), `attributes` (объект; его ключи перекрывают одноимённые ключи верхнего уровня). Значение неподходящего типа или формата остаётся в `attributes` под тем же ключом, поле получает значение по умолчанию. Ключи источника и `ingested_at` из JSON тоже попадают в `attributes`: источник всегда берётся от агента.
+
+Origin агента необязателен и совместим со старыми записями. До создания атрибутов нормализация резервирует их модельную память, проверяет ID/путь/поток и диапазон байтов, затем добавляет `lognara.source`, `log.file.path` или `log.stream`, `log.origin.offset/end`, `log.fragment.index/continued`. Служебные атрибуты имеют приоритет над payload. Детали происхождения в [[Agent/LogSources]]; core получает обычные attributes.
 
 ## Контракт с core
 
@@ -119,8 +123,8 @@ struct LogId(Uuid); struct TraceId([u8; 16]); struct SpanId([u8; 8]);  // bin 16
 |---|---|
 | `run(config: Config, listener: TcpListener, spool: Spool, shutdown: CancellationToken): io::Result<()>` | Запускает приём и отправку; после `shutdown` доставляет или сохраняет в spool накопленное. |
 | `Config::from_env(): Result<Config, ConfigError>` | Читает параметры `LOGNARA_*` из окружения. |
-| `Config::from_lookup(lookup: impl Fn(&str) -> Option<String>): Result<Config, ConfigError>` | Собирает конфиг из произвольного источника и проверяет обязательный ключ агентов. |
-| `Config::fmt(f: &mut fmt::Formatter<'_>): fmt::Result` | Форматирует `Debug` конфигурации со скрытыми ключами relay и core. |
+| `Config::from_lookup(lookup: impl Fn(&str) -> Option<String>): Result<Config, ConfigError>` | Собирает конфиг и проверяет параметры core и ресурсы. |
+| `Config::fmt(f: &mut fmt::Formatter<'_>): fmt::Result` | Форматирует `Debug` конфигурации со скрытым токеном core. |
 | `agent_wire::decode(body: &[u8], limit: u64): Result<Batch, DecodeError>` | Распаковывает zstd не больше `limit` байт и разбирает пачку агента. |
 | `normalize::event(record: Record): Event` | Превращает запись агента в событие по правилам разбора. |
 | `agent_wire::decode_with_budget(body: &[u8], limit: usize, budget: &mut ModelBudget): Result<Batch, DecodeError>` | Проверяет распаковку и модель до serde. |
@@ -130,8 +134,9 @@ struct LogId(Uuid); struct TraceId([u8; 16]); struct SpanId([u8; 8]);  // bin 16
 | ~~`ingest::router(buffer: Arc<Buffer>): Router`~~ (удалён: 2026-10-07) | Заменён вариантом с обязательным ключом. |
 | ~~`ingest::router(buffer: Arc<Buffer>, token: &str): Router`~~ (удалён: 2026-10-07) | Заменён вариантом с ресурсами admission. |
 | ~~`ingest::router(buffer: Arc<Buffer>, token: &str, resources: Arc<Resources>): Router`~~ (удалён: 2026-10-08) | Проверяет авторизацию, заголовки и admission перед чтением тела. |
-| `ingest::token_hash(token: &str): [u8; 32]` | Вычисляет SHA-256 для сравнения ключей. |
-| `ingest::authorize(State(expected): State<[u8; 32]>, request: Request, next: Next): Response` | Отклоняет неверную авторизацию до чтения тела запроса. |
+| ~~`ingest::token_hash(token: &str): [u8; 32]`~~ (удалён: 2026-10-13) | Хеширование перенесено в Agents. |
+| ~~`ingest::authorize(State(expected): State<[u8; 32]>, request: Request, next: Next): Response`~~ (удалён: 2026-10-13) | Общий ключ заменён списком агентов. |
+| `ingest::authorize(State(agents): State<Arc<Agents>>, request: Request, next: Next): Response` | Проверяет персональный токен до тела. |
 | `ingest::read_body(body: Body): Result<Vec<u8>, IngestError>` | Копирует фрагменты последовательно в capacity 64 MiB, освобождая каждый до следующего. |
 | ~~`ingest::accept(buffer: &Buffer, body: &[u8], model_limit: usize): Result<StatusCode, IngestError>`~~ (удалён: 2026-10-08) | Декодирует пачку, отклоняет пустые records и атомарно добавляет нормализованные события. |
 | ~~`Buffer::push(source: Source, dropped: u64, events: Vec<Event>): Result<(), Full>`~~ (удалён: 2026-10-08) | Резервирует capacity до изменения группы; различает TooLarge и Busy. |
@@ -168,3 +173,24 @@ struct LogId(Uuid); struct TraceId([u8; 16]); struct SpanId([u8; 8]);  // bin 16
 | `Spool::remove_oldest(): Result<(), Error>` | Удаляет только после подтверждения core. |
 | `Spool::drain()` | Ждёт завершения отменённого чтения/ACK sender. |
 | `Sender::flush()` | Отправляет сохранённые байты до первого отказа. |
+
+## Синхронизация агентов
+
+`Agents` хранит RwLock<HashSet<[u8;32]>>. Перед axum serve: загрузка `.agents` из `Spool::dir()`, затем один GET по `core_url.join("agents")` с relay Bearer и timeout 5 секунд. Далее обновление раз в 10 секунд; shutdown отменяет фоновую задачу. Кеш — JSON ответа core, atomic_file/fsync/rename; spool игнорирует этот side-файл и очищает `.agents.tmp`. Файл перезаписывается только при изменении множества хешей; ошибка записи warn и повтор на следующем тике. Память обновляется при каждом успешном ответе независимо от сохранённого кеша.
+
+Не-200, сеть, невалидный JSON/хеш оставляют старый список. Размер кеша/ответа ограничен 8 MiB. Без валидного кеша и доступного core никто не принимается. При недоступном core кеш позволяет работу после рестарта; отзыв применяется при успешном обновлении списка.
+
+| Метод | Назначение |
+|---|---|
+| ~~`ingest::router(spool: Spool, token: &str, resources: Arc<Resources>): Router`~~ (удалён: 2026-10-13) | Один общий ключ заменён Agents. |
+| `ingest::router(spool: Spool, agents: Arc<Agents>, resources: Arc<Resources>): Router` | Собирает авторизованный приём. |
+| `Agents::contains(token: &str): bool` | Проверяет SHA-256 токена по множеству хешей. |
+| `AgentSync::new(core_url: &Url, core_token: &str, dir: &Path, agents: Arc<Agents>): AgentSync` | Создаёт клиент и путь кеша. |
+| `AgentSync::load_cache(): ()` | Восстанавливает валидный кеш без plaintext токенов. |
+| `AgentSync::sync(): ()` | Обновляет память и при необходимости дисковый кеш. |
+| `AgentSync::run(interval: Duration, stop: CancellationToken): ()` | Обновляет список до отмены. |
+| `Spool::dir(): &Path` | Возвращает фактический канонический каталог spool. |
+
+Unit/e2e: неизвестный токен отклоняется до тела, добавление и отзыв в фоне, кеш при рестарте и недоступном core, отсутствие кеша закрывает приём, сбой записи кеша не сохраняет отозванные права в памяти.
+
+`LOGNARA_RELAY_MEMORY_MB` заменяет прежний лимит резервов в байтах. `Config::memory_mb` — RAM всего процесса/контейнера; `Config::reserve_bytes(): Option<usize>` вычисляет `MB * MiB - RUNTIME_RESERVE` с checked arithmetic. По умолчанию резерв равен прежним 1792 MiB.
