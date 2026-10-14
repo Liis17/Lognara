@@ -46,11 +46,15 @@ Query parser поддерживает точные поля, AND между ус
 
 Live включается отдельно от истории, имеет паузу с буфером до 2000, обработку lagged и предупреждения о возможных пропусках. Space не переключает паузу внутри контролов. Фильтрация общей SSE-ленты не обещает полноту конкретного сервиса. Переподключение дедуплицирует по id; это ограничение существующего потока, а не истории.
 
-`/logs?view=patterns` показывает серверные паттерны того же q/range/from/to: количество событий, паттернов и новых, долю от всех совпавших событий (включая скрытые), рост к прошлому окну той же длины, sparkline, покрытие истории и отставание индекса. Сортировка и `show_hidden` хранятся в URL. Раскрытие строки запрашивает детали: top-5 значений переменных и остаток, до 3 реальных примеров и ссылку «Все события» с точным `pattern_id`. Live для паттернов и для запроса с `pattern_id` отключён: идентичность вычисляет core. Действия «Проблема» и «Алерт» скрыты до этапов 5 и 7.
+`/logs?view=patterns` показывает серверные паттерны того же q/range/from/to: количество событий, паттернов и новых, долю от всех совпавших событий (включая скрытые), рост к прошлому окну той же длины, sparkline, покрытие истории и отставание индекса. Сортировка и `show_hidden` хранятся в URL. Раскрытие строки запрашивает детали: top-5 значений переменных и остаток, до 3 реальных примеров и ссылку «Все события» с точным `pattern_id`. Live для паттернов и для запроса с `pattern_id` отключён: идентичность вычисляет core. Действие «Алерт» скрыто до этапа 7. Проблемы группируются собственным fingerprint на странице `/errors`, поэтому строка паттерна на них не ссылается.
 
 API: `POST /api/patterns/search?show_hidden=bool` (добавляет персонально скрытые ID в `exclude_patterns`), `POST /api/patterns/{id}/details`, `GET /api/patterns/hidden`, `POST`/`DELETE /api/patterns/{id}/hide` (204, идемпотентно, лимит 1000 → 409 `pattern_limit`). SQLite-таблица `hidden_patterns(username, pattern_id, created_at)` изолирует пользователей. Ошибки: 404 `pattern_not_found`, 503 `patterns_not_ready`/`query_unavailable`.
 
-`/analytics` показывает периоды 1 час/24 часа/7 дней, общий count, среднее событий в минуту за окно, долю ERROR с учётом всех семи уровней в знаменателе, распределение уровней и до 5 сервисов по ERROR. Список сервисов ограничен 100 активными значениями. Сравнение использует предыдущее окно той же длины; запросы идут последовательно и отменяются при смене параметров. Основные блоки объединены одной summary, её as_of показан явно; предыдущее окно имеет отдельный снимок. График и сервис/level ведут к поиску с теми же границами/фильтрами. P95 duration_ms и action-группы доступны; проблемы и алерты остаются следующими этапами [[Dock/DesignIntegration]].
+`/errors` показывает проблемы error/fatal по `errors.dc.html`: вкладки «Открытые» (включают «Новые» и «Возвращаются») и «Решённые» со счётчиками, сервис, период 1 час/24 часа/7 дней, «N ошибок → M проблем», статус, повторы, distinct серверы, последний случай и sparkline. Раскрытие: сообщение и stack trace последнего случая, фреймы fingerprint, серверы, история действий, «Все N событий» (`fingerprint:` в /logs, Live для него отключён), «Поиск первопричины» (Trace последнего случая или логи источника ±5 минут), «Отметить решённой»/«Открыть снова». Статус общий для всех пользователей.
+
+API: `POST /api/issues/search`, `POST /api/issues/{fingerprint}/details`, `POST /api/issues/{fingerprint}/resolve` и `/reopen` (204, Origin). SQLite: `issue_states`, `issue_history`, `issue_watch`; до 10000 строк статусов, иначе 409 `issue_limit`. Наблюдатель `issues::watch` каждые 5 секунд читает `recurrences` core для решённых проблем и переводит в «Возвращается» только при случае после checkpoint решения и со временем не раньше решения. Ошибки: 404 `issue_not_found`, 503 `issues_not_ready`. Контракт: [DockIssuesContract](../../../docs/DockIssuesContract.md).
+
+`/analytics` показывает периоды 1 час/24 часа/7 дней, общий count, среднее событий в минуту за окно, долю ERROR с учётом всех семи уровней в знаменателе, распределение уровней и до 5 сервисов по ERROR. Список сервисов ограничен 100 активными значениями. Сравнение использует предыдущее окно той же длины; запросы идут последовательно и отменяются при смене параметров. Основные блоки объединены одной summary, её as_of показан явно; предыдущее окно имеет отдельный снимок. График и сервис/level ведут к поиску с теми же границами/фильтрами. P95 duration_ms и action-группы доступны; алерты остаются следующим этапом [[Dock/DesignIntegration]].
 
 | Функция | Назначение |
 |---|---|
@@ -58,6 +62,7 @@ API: `POST /api/patterns/search?show_hidden=bool` (добавляет персо
 | `appendHistory(current: LogEvent[], page: LogEvent[]): LogEvent[]` | Добавляет страницу без потери серверного порядка и повторяющихся id. |
 | `prependLive(current: LogEvent[], batch: LogEvent[], limit: number): {rows, trimmed}` | Добавляет новые поступления с ограничением памяти и Live-дедупликацией. |
 | `matchesQuery(event: LogEvent, query: ParsedQuery): boolean` | Проверяет структурные/текстовые условия для ограниченной Live-ленты. |
+| `withFilter(query: string, field: "pattern_id" \| "fingerprint", id: string): string` | Заменяет точный фильтр ID с сохранением остального запроса. |
 | `eventBounds(timestamp: string): {from: string, to: string}` | Строит точное 1 ns окно события для восстановления ссылки без округления Date. |
 | `sourceQuery(event: LogEvent): string` | Строит точные условия источника для контекста события. |
 | `contextBounds(timestamp: string): {from: string, to: string}` | Строит окно контекста ±5 минут. |
@@ -116,6 +121,18 @@ API: `POST /api/patterns/search?show_hidden=bool` (добавляет персо
 - `Store::hidden_patterns(&self, username: String): Result<Vec<String>, StoreError>` — скрытые ID пользователя
 - `Store::hide_pattern(&self, username: String, pattern_id: String): Result<bool, StoreError>` — идемпотентно скрывает, false при лимите 1000
 - `Store::show_pattern(&self, username: String, pattern_id: String): Result<(), StoreError>` — снимает скрытие
+- `CoreClient::issues(&self, request: &CoreSearchRequest): Result<IssueResponse, CoreQueryError>` — проблемы статуса с проверкой вкладки, сумм и лимита
+- `CoreClient::issue_details(&self, fingerprint: &str, request: &DetailsRequest): Result<IssueDetails, CoreQueryError>` — детали проблемы с проверкой суммы серверов
+- `CoreClient::issue_recurrences(&self, request: &RecurrenceRequest): Result<RecurrenceResponse, CoreQueryError>` — случаи решённых проблем после checkpoint
+- `issues::search/details/resolve/reopen(State, AuthUser, ...): Result<..., ApiError>` — проблемы и общий статус
+- `issues::sync(app: &App): Result<bool, SyncError>` — один шаг наблюдателя, true пока core не догнан
+- `issues::watch(app: AppState)` — фоновый наблюдатель возвратов до остановки dock
+- `Store::issue_states(&self): Result<HashMap<String, IssueState>, StoreError>` — все строки статусов
+- `Store::issue(&self, fingerprint: String): Result<(Option<IssueState>, Vec<IssueAction>), StoreError>` — статус и 50 последних действий
+- `Store::resolve_issue(&self, fingerprint: String, username: String): Result<bool, StoreError>` — решение с checkpoint наблюдателя, false при лимите
+- `Store::reopen_issue(&self, fingerprint: String, username: String): Result<(), StoreError>` — открывает решённую
+- `Store::issue_watch(&self): Result<(Option<u64>, Vec<(String, i64)>), StoreError>` — checkpoint и решённые проблемы
+- `Store::record_recurrences(&self, after: u64, watermark: u64, found: Vec<Recurrence>): Result<Vec<String>, StoreError>` — возвраты и новый checkpoint одной транзакцией
 - `live::stream(State, AuthUser): Sse<...>` — SSE `logs`, `core_error`, `core_ok`, `lagged`
 
 ## Зависимости

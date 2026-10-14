@@ -114,6 +114,24 @@ Retention смотрит max core_received_at, исключает expired сег
 | `patterns::details(core: &Core, pattern_id: &str, request: DetailsRequest): Result<DetailsResponse, QueryError>` | Top-5 значений переменных, до 3 новейших примеров и метрики паттерна. |
 | `PatternCatalog::checkpoint(): Option<u64>` | Обработанный sequence каталога или None до первичного прохода. |
 
+## Проблемы ошибок
+
+`issue_identity` группирует только error и fatal (v1). Fingerprint `f1_` + SHA-256: environment/service/action и `exception.type` с первыми 5 фреймами `exception.stacktrace` без номеров строк, колонок и адресов (`at …`, Python `File "…"` в обратном порядке). Без `exception.type` используется pattern_id сообщения и action. Поле `fingerprint` добавлено в Tantivy как точное, в агрегатах фильтр вычисляет UDF `log_issue_fingerprint`.
+
+Каталог `patterns.sqlite` версии 2 в том же проходе и с тем же checkpoint ведёт таблицу `issues`: scope, тип, фреймы, шаблон первого события и lifetime first/last. Каталог версии 1 пересобирается из оставшихся raw событий. Лимиты `LOGNARA_PATTERN_MAX_ENTRIES`/`_CATALOG_BYTES` общие для паттернов и проблем.
+
+`POST /v1/issues/search` получает от Dock решённые и вернувшиеся fingerprint и отдаёт счётчики вкладок, сумму событий статуса и проблемы с count/distinct servers/корзинами. `POST /v1/issues/{fingerprint}/details` отдаёт top-5 серверов и до 3 примеров. `POST /v1/issues/recurrences` по одному сегменту после `after` ищет случаи с timestamp не раньше `since`, независимо от готовности каталога. Контракт: [DockIssuesContract](../../../docs/DockIssuesContract.md).
+
+| Метод | Назначение |
+|---|---|
+| `issue_identity::fingerprint(environment: Option<&str>, service: &str, action: Option<&str>, level: LogLevel, pattern: &Identity, exception: &Exception): Option<Fingerprint>` | Fingerprint проблемы для error/fatal. |
+| `issue_identity::valid_id(id: &str): bool` | Проверяет формат `f1_` + 64 lowercase hex. |
+| `Exception::parse(attributes: &str): Exception` | Читает exception.type/stacktrace из JSON атрибутов. |
+| `issues::id_expr(): Expr` | DataFusion-выражение fingerprint для точного фильтра агрегатов. |
+| `issues::search(core: &Core, request: IssueRequest): Result<IssueResponse, QueryError>` | Проблемы статуса и счётчики вкладок по сырым событиям. |
+| `issues::details(core: &Core, fingerprint: &str, request: IssueDetailsRequest): Result<IssueDetails, QueryError>` | Серверы, примеры и метрики проблемы. |
+| `issues::recurrences(core: &Core, request: RecurrenceRequest): Result<RecurrenceResponse, QueryError>` | Случаи наблюдаемых проблем после checkpoint Dock. |
+
 ## Эксплуатация и проверки
 
 `Lognara-core/docs/operations.md` описывает все переменные, запуск за TLS-прокси, остановку, резервную копию всего каталога и восстановление. SIGTERM/SIGINT прекращает HTTP, дорабатывает WAL и закрывает открытый сегмент. Метрики Prometheus защищены query-токеном; health доступен без токена. В примере Compose корневого README каталог `LOGNARA_DATA_DIR` монтируется из `LOGNARA_CORE_DATA` (папка на хосте) или volume `lognara-core-data`.

@@ -83,3 +83,4 @@ SQLite dock `hidden_patterns(username,pattern_id,created_at)`; максимум1
 - Примеры details: до 3 новейших событий по (timestamp, sequence) DESC. Значения переменных и примеры берутся только из текущего окна.
 - limit × число корзин × 64 байта не должно превышать `LOGNARA_PATTERN_QUERY_BYTES`, иначе 400.
 - Live недоступен в режиме паттернов и для запроса с `pattern_id`: браузер не вычисляет идентичность.
+- Этап 5: каталог версии 2 хранит также проблемы ([контракт](DockIssuesContract.md)); каталог версии 1 пересобирается. Текст 404 core — `not found in range`.

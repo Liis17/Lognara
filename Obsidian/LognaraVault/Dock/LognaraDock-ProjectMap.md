@@ -12,12 +12,13 @@ Lognara-dock/
   nginx.example.conf          TLS и отдельный location для SSE
   src/
     main.rs                   tracing, конфиг, App::open, SIGTERM/SIGINT
-    lib.rs                    run(): axum::serve + отмена App::shutdown
+    lib.rs                    run(): axum::serve, наблюдатель проблем, отмена App::shutdown
     config.rs                 LOGNARA_DOCK_* и проверки
     api.rs                    App/AppState, ApiError, router, health, SPA
     htpasswd.rs               разбор, кэш по stamp, verify, атомарная перезапись
-    store.rs                  SQLite, миграции, lock каталога данных, скрытые паттерны
+    store.rs                  SQLite, миграции, lock каталога данных, скрытые паттерны, статусы проблем
     patterns.rs               DTO паттернов, proxy search/details и персональное скрытие
+    issues.rs                 DTO проблем, proxy search/details, resolve/reopen, наблюдатель возвратов
     session.rs                Sessions, cookie, AuthUser, require_origin
     auth.rs                   login/logout, LoginLimiter, check_password
     access.rs                 /api/relays, /api/agents: сессия и proxy admin core
@@ -35,6 +36,7 @@ Lognara-dock/
     live.rs                   поддельный core: дедупликация, ошибки, остановка опроса
     query.rs                  query Bearer, DTO/cursor, Origin/сессия, no-store, ошибки, timeout
     patterns.rs               скрытие по пользователю, лимит 1000, exclude_patterns, ошибки паттернов
+    issues.rs                 общий статус, история, Origin, проверка ответов core, наблюдатель
     static.rs                 SPA fallback и 404 для /api
   web/
     public/fonts/             локальные Commissioner / IBM Plex Mono, OFL, provenance
@@ -46,13 +48,14 @@ Lognara-dock/
     src/components/Histogram.tsx count SVG, сравнение, доступные числа и drilldown
     src/components/Patterns.tsx  режим паттернов: таблица, sparkline, детали, скрытие, переход к событиям
     src/webauthn.ts           base64url ↔ ArrayBuffer для navigator.credentials
-    src/App.tsx               проверка /api/me, маршруты /login, /logs, /analytics, /access, /settings
+    src/App.tsx               проверка /api/me, маршруты /login, /logs, /errors, /analytics, /access, /settings
     src/pages/Login.tsx       пароль и кнопка passkey
     src/pages/Logs.tsx        история/cursor/Trace, URL, отдельный Live, детали, экспорт
+    src/pages/Errors.tsx      проблемы: вкладки статусов, stack trace, история, решение и переходы
     src/pages/Analytics.tsx   единая сводка, stacked levels, p95/coverage/actions, сравнение и переход в логи
     src/pages/Access.tsx      профили relay/агентов, создание, одноразовый токен, удаление
     src/pages/Settings.tsx    смена пароля, список и добавление passkey
-    playwright.config.ts     Chromium, Vite webServer и сценарии tests/dock.spec.ts
+    playwright.config.ts     Chromium, Vite webServer и сценарии tests/dock.spec.ts и tests/errors.spec.ts
     tests/dock.spec.ts        вход, аккаунт, поиск, cursor, Trace/ссылка, аналитика, Live, mobile
 ```
 
