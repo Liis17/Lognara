@@ -13,7 +13,6 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::api::{ApiError, AppState};
-use crate::core_client::CoreError;
 use crate::session::AuthUser;
 
 #[derive(Deserialize)]
@@ -27,25 +26,6 @@ pub struct NewRelay {
 pub struct NewAgent {
     name: String,
     relay_id: i64,
-}
-
-impl From<CoreError> for ApiError {
-    /// Известные коды core отдаются как есть, остальное скрывается за 502.
-    fn from(err: CoreError) -> Self {
-        if let CoreError::Rejected(status, code) = &err {
-            match (status.as_u16(), code.as_str()) {
-                (400, "invalid_name") => return Self::BadRequest("invalid_name"),
-                (400, "invalid_request") => return Self::BadRequest("invalid_request"),
-                (404, "relay_not_found") => return Self::RelayNotFound,
-                (404, "not_found") => return Self::NotFound,
-                (409, "name_taken") => return Self::Conflict("name_taken"),
-                (409, "relay_has_agents") => return Self::Conflict("relay_has_agents"),
-                _ => {}
-            }
-        }
-        tracing::warn!("core admin request failed: {err}");
-        Self::CoreUnavailable
-    }
 }
 
 pub async fn list_relays(

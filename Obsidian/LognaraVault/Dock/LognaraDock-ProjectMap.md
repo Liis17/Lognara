@@ -22,24 +22,31 @@ Lognara-dock/
     access.rs                 /api/relays, /api/agents: сессия и proxy admin core
     account.rs                /api/me, смена пароля, check_current_password
     passkey.rs                Webauthn, Challenges, вход и регистрация, список, удаление
-    core_client.rs            query поиск и admin CRUD relay/агентов
-    live.rs                   Live (poller + broadcast), SSE stream
+    core_client.rs            клиент core: поиск, серии, определения, предпросмотр, admin CRUD relay/агентов; таймауты 10 с и 35 с для серий
+    series.rs                 прокси /api/series*: серии, запрос, определения, предпросмотр
+    live.rs                   Live (poller + broadcast) на общем CoreClient, SSE stream
   tests/
-    common/mod.rs             TestApp, запросы, htpasswd с cost 4
+    common/mod.rs             TestApp, запросы, htpasswd с cost 4, поддельный core с серийными маршрутами и поддельный admin API core
     access.rs                 proxy admin API, сессия, Origin, no-store, ошибки core
     auth.rs                   вход, перечитывание htpasswd, TTL, Origin, блокировка
     password.rs               смена пароля и сохранение остальных строк
     passkey.rs                церемония с SoftPasskey, отказ challenge
     live.rs                   поддельный core: дедупликация, ошибки, остановка опроса
+    series.rs                 прокси метрик, invalid и internal от core, 502 при недоступности, сессия и Origin
     static.rs                 SPA fallback и 404 для /api
   web/
-    src/api.ts                fetch-обёртка и тексты ошибок
+    src/api.ts                fetch-обёртка, типы метрик и определений, тексты ошибок
     src/webauthn.ts           base64url ↔ ArrayBuffer для navigator.credentials
-    src/App.tsx               проверка /api/me, маршруты /login, /logs, /access, /settings
+    src/App.tsx               проверка /api/me, маршруты /login, /logs, /metrics, /access, /settings
     src/pages/Login.tsx       пароль и кнопка passkey
     src/pages/Logs.tsx        EventSource, 2000 строк, пауза, раскрытие события
+    src/pages/Metrics.tsx     список метрик, диапазон, разбиение и окружение, график, кнопки редактора
+    src/pages/MetricEditor.tsx форма определения, предпросмотр правила, сохранение и удаление
+    src/components/Chart.tsx  график uPlot: восемь категориальных цветов, остальные серые
     src/pages/Access.tsx      профили relay/агентов, создание, одноразовый токен, удаление
     src/pages/Settings.tsx    смена пароля, список и добавление passkey
+    src/index.css             стили страницы метрик и редактора
+    package.json              React, react-router и uplot (график метрик)
 ```
 
 ## Связи модулей
@@ -51,5 +58,6 @@ Lognara-dock/
 - `account::change_password` и `passkey::register_start/delete` подтверждают действие через `account::check_current_password` → `auth::check_password` (общая блокировка логина).
 - `passkey::login_finish` и `auth::login` создают сессию через `auth::start_session`.
 - `live::Live` использует `CoreClient`; `live::stream` перепроверяет сессию через `Sessions::lookup_hash`.
-
-- `access` → `App.core: CoreClient`: admin-токен из Config; Live использует query-клиент. Реестр хранится только в core.
+- `series::*` (обработчики `/api/series*`) и `access::*` вызывают общий `App.core: Arc<CoreClient>`; ошибки превращаются в `ApiError` через единый `From<CoreError>` в `api.rs`. Все маршруты требуют `session::AuthUser`; запросы не GET/HEAD/OPTIONS проверяет `session::require_origin` (нужен `Origin` равный `LOGNARA_DOCK_PUBLIC_URL`).
+- `Metrics.tsx` вызывает `api.ts` (`api`, `SeriesReply`, `Definition`), график строит `components/Chart.tsx`, редактор открывается из `Metrics.tsx` и сообщает о сохранении через `onDone`.
+- Admin-токен берётся из Config; Live использует тот же клиент с query-токеном. Реестр relay/агентов хранится только в core.

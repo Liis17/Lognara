@@ -4,6 +4,8 @@ export class ApiError extends Error {
   constructor(
     public status: number,
     public code: string,
+    /** Текст ошибки валидации от core (код invalid). */
+    public detail?: string,
   ) {
     super(code);
   }
@@ -19,7 +21,7 @@ export async function api<T = unknown>(method: string, path: string, body?: unkn
   const text = await response.text();
   const data = text ? JSON.parse(text) : null;
   if (!response.ok) {
-    throw new ApiError(response.status, data?.error ?? "unknown");
+    throw new ApiError(response.status, data?.error ?? "unknown", data?.detail);
   }
   return data as T;
 }
@@ -34,6 +36,86 @@ export interface PasskeyInfo {
   name: string;
   created_at: number;
   last_used_at: number | null;
+}
+
+export type Origin = "counter" | "gauge" | "rule";
+export type Kind = "delta" | "cumulative" | "gauge";
+export type Aggregation = "sum" | "avg" | "min" | "max" | "last";
+export type Split = "none" | "instance" | "labels";
+
+export interface Rule {
+  environment: string | null;
+  contains: string;
+  pattern: string;
+  value_group: string | null;
+  label_groups: string[];
+}
+
+export interface Definition {
+  id: string;
+  service: string;
+  name: string;
+  title: string;
+  description: string;
+  unit: string;
+  kind: Kind;
+  aggregation: Aggregation;
+  enabled: boolean;
+  rule: Rule | null;
+  updated_at: string;
+}
+
+/** Тело создания и изменения определения: без id и времени обновления, агрегация необязательна. */
+export type DefinitionInput = Omit<Definition, "id" | "updated_at" | "aggregation"> & {
+  aggregation?: Aggregation;
+};
+
+export interface SeriesMetric {
+  service: string;
+  name: string;
+  origin: Origin;
+  first_seen: string | null;
+  last_seen: string | null;
+  definition: Definition | null;
+  /** Окружения точек метрики по всем origin; пусто, если окружений нет. */
+  environments: string[];
+}
+
+/** Тело запроса серии; без environment сумма по всем окружениям. */
+export interface SeriesQuery {
+  service: string;
+  name: string;
+  from: string;
+  to: string;
+  step_seconds: number;
+  split: Split;
+  environment?: string;
+}
+
+export interface SeriesLine {
+  label: string;
+  values: (number | null)[];
+}
+
+export interface SeriesReply {
+  kind: Kind;
+  aggregation: Aggregation;
+  unit: string;
+  buckets: string[];
+  series: SeriesLine[];
+}
+
+export interface PreviewSample {
+  timestamp: string;
+  message: string;
+  value: number;
+  labels: string;
+}
+
+export interface PreviewReply {
+  scanned: number;
+  matched: number;
+  samples: PreviewSample[];
 }
 
 export interface Relay {
@@ -69,6 +151,7 @@ const messages: Record<string, string> = {
 
 export function errorText(error: unknown): string {
   if (error instanceof ApiError) {
+    if (error.code === "invalid") return `Ошибка в запросе: ${error.detail ?? "неверные данные"}`;
     return messages[error.code] ?? `Ошибка ${error.status}`;
   }
   if (error instanceof DOMException && error.name === "NotAllowedError") {

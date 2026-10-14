@@ -1,7 +1,9 @@
 //! Типизированная аналитика над одним снимком Parquet и открытых Arrow-батчей.
 use crate::{
     columns,
-    model::format_timestamp,
+    definitions::{self, CompiledRule, Rule},
+    extract,
+    model::{format_timestamp, now_nanos},
     query::{Filters, PreparedFilter, QueryError, level},
     storage::{Core, Snapshot},
     wire::LogLevel,
@@ -207,6 +209,120 @@ pub async fn group_by(core: &Core, request: GroupRequest) -> Result<GroupRespons
         groups,
         as_of: format_timestamp(snapshot.published_at),
     })
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreviewRequest {
+    pub service: String,
+    #[serde(default)]
+    pub environment: Option<String>,
+    pub rule: Rule,
+    #[serde(default = "preview_minutes")]
+    pub minutes: u64,
+}
+fn preview_minutes() -> u64 {
+    60
+}
+
+#[derive(Debug, Serialize)]
+pub struct PreviewResponse {
+    /// Строки сервиса после фильтра и подстрочного отбора, не больше 5000.
+    pub scanned: usize,
+    pub matched: usize,
+    pub samples: Vec<Sample>,
+}
+#[derive(Debug, Serialize)]
+pub struct Sample {
+    pub timestamp: String,
+    pub message: String,
+    pub value: f64,
+    pub labels: String,
+}
+
+const PREVIEW_SCAN_ROWS: usize = 5000;
+const PREVIEW_SAMPLES: usize = 50;
+
+/// Правило на последних строках сервиса за окно; извлечение то же, что при записи.
+pub async fn preview(core: &Core, request: PreviewRequest) -> Result<PreviewResponse, QueryError> {
+    let PreviewRequest {
+        service,
+        environment,
+        rule,
+        minutes,
+    } = request;
+    definitions::validate_service(&service).map_err(QueryError::Invalid)?;
+    definitions::validate_environment(environment.as_deref()).map_err(QueryError::Invalid)?;
+    if !(1..=60).contains(&minutes) {
+        return Err(QueryError::Invalid("minutes must be 1..60".into()));
+    }
+    // Окружение задаётся на верхнем уровне, поэтому environment внутри rule игнорируется.
+    let rule = Rule {
+        environment: None,
+        ..rule
+    };
+    definitions::validate_rule(&rule).map_err(QueryError::Invalid)?;
+    let rule = CompiledRule::new(String::new(), String::new(), &rule)?;
+    let now = now_nanos();
+    let minute: i64 = 60_000_000_000;
+    let from = format_timestamp(now - minutes as i64 * minute);
+    let to = format_timestamp(now + minute);
+    let mut filters = Filters::from([("service".to_owned(), vec![service])]);
+    if let Some(environment) = environment {
+        filters.insert("environment".to_owned(), vec![environment]);
+    }
+    let filter = PreparedFilter::new(&from, &to, &filters)?;
+    let snapshot = core.snapshot();
+    let frame = frame(core, &snapshot, &filter)
+        .await?
+        .filter(col("message").like(lit(like_pattern(&rule.contains))))
+        .and_then(|frame| frame.sort(vec![col("timestamp").sort(false, false)]))
+        .and_then(|frame| frame.limit(0, Some(PREVIEW_SCAN_ROWS)))
+        .map_err(anyhow::Error::from)?;
+    let batches: Vec<RecordBatch> = frame
+        .execute_stream()
+        .await
+        .map_err(anyhow::Error::from)?
+        .try_collect()
+        .await
+        .map_err(anyhow::Error::from)?;
+    let mut response = PreviewResponse {
+        scanned: 0,
+        matched: 0,
+        samples: vec![],
+    };
+    for batch in &batches {
+        for row in columns::decode(batch)? {
+            response.scanned += 1;
+            let (point, _) = extract::rule_point(&rule, &row);
+            let Some(point) = point else {
+                continue;
+            };
+            response.matched += 1;
+            if response.samples.len() < PREVIEW_SAMPLES {
+                response.samples.push(Sample {
+                    timestamp: format_timestamp(point.timestamp),
+                    message: row.event.message,
+                    value: point.value,
+                    labels: point.labels,
+                });
+            }
+        }
+    }
+    Ok(response)
+}
+
+/// Шаблон LIKE для подстроки: %, _ и \ экранируются обратной косой (экран по умолчанию в Arrow).
+fn like_pattern(text: &str) -> String {
+    let mut pattern = String::from("%");
+    for character in text.chars() {
+        if matches!(character, '%' | '_' | '\\') {
+            pattern.push('\\');
+        }
+        pattern.push(character);
+    }
+    pattern.push('%');
+    pattern
 }
 
 fn count_value(batch: &RecordBatch, column: usize, row: usize) -> Result<u64> {

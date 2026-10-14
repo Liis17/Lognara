@@ -21,6 +21,11 @@ pub struct Config {
     pub segment_age: Duration,
     pub refresh_interval: Duration,
     pub retention: Duration,
+    pub series_compact_quiet: Duration,
+    pub series_raw_days: u64,
+    pub series_hourly_days: u64,
+    pub series_rollup_hour_utc: u8,
+    pub series_rollup_pause: Duration,
     pub query_memory_bytes: usize,
     pub search_memory_bytes: usize,
     pub query_timeout: Duration,
@@ -68,6 +73,23 @@ impl Config {
             segment_age: Duration::from_secs(number("LOGNARA_SEGMENT_SECONDS", 300)?),
             refresh_interval: Duration::from_millis(number("LOGNARA_REFRESH_MS", 1000)?),
             retention: Duration::from_secs(number("LOGNARA_RETENTION_SECONDS", 7 * 86400)?),
+            series_compact_quiet: Duration::from_secs(number(
+                "LOGNARA_SERIES_COMPACT_QUIET_SECONDS",
+                3600,
+            )?),
+            series_raw_days: number("LOGNARA_SERIES_RAW_DAYS", 7)?,
+            series_hourly_days: number("LOGNARA_SERIES_HOURLY_DAYS", 35)?,
+            series_rollup_hour_utc: match get("LOGNARA_SERIES_ROLLUP_HOUR_UTC") {
+                None => 0,
+                Some(value) => match value.parse::<u8>() {
+                    Ok(hour) if hour <= 23 => hour,
+                    _ => bail!("LOGNARA_SERIES_ROLLUP_HOUR_UTC must be 0..=23"),
+                },
+            },
+            series_rollup_pause: Duration::from_millis(number(
+                "LOGNARA_SERIES_ROLLUP_PAUSE_MS",
+                1000,
+            )?),
             query_memory_bytes: number("LOGNARA_QUERY_MEMORY_BYTES", 1 << 30)? as usize,
             search_memory_bytes: number("LOGNARA_SEARCH_MEMORY_BYTES", 128 << 20)? as usize,
             query_timeout: Duration::from_secs(number("LOGNARA_QUERY_TIMEOUT_SECONDS", 30)?),
@@ -92,6 +114,12 @@ impl Config {
         }
         if config.retention.as_secs() > i64::MAX as u64 / 1_000_000_000 {
             bail!("LOGNARA_RETENTION_SECONDS is too large");
+        }
+        if config.series_compact_quiet.as_secs() > i64::MAX as u64 / 1_000_000_000 {
+            bail!("LOGNARA_SERIES_COMPACT_QUIET_SECONDS is too large");
+        }
+        if config.series_hourly_days <= config.series_raw_days {
+            bail!("LOGNARA_SERIES_HOURLY_DAYS must be greater than LOGNARA_SERIES_RAW_DAYS");
         }
         if config.query_timeout > Duration::from_secs(3600)
             || config.refresh_interval > Duration::from_secs(3600)

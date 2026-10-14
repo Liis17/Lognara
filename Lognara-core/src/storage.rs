@@ -1,18 +1,23 @@
 //! Материализация WAL и атомарные снимки открытых/закрытых сегментов.
 use crate::{
-    catalog::SegmentMeta,
+    catalog::{SegmentMeta, SeriesEnvironment, SeriesName},
     columns,
     config::Config,
+    definitions::{LabelGuard, RuleSet},
+    extract,
     index::{ActiveIndex, IndexCache},
     journal::Journal,
+    metrics::Metrics,
     model::{StoredEvent, now_nanos},
+    rollup::{self, RollupFile},
+    series::{self, SeriesFile, SeriesFileMeta},
     wal::{Position, failpoint, sync_dir},
     wire,
 };
 use anyhow::{Context, Result, ensure};
 use datafusion::arrow::array::RecordBatch;
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, BTreeSet, HashSet},
     fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
@@ -34,12 +39,16 @@ pub struct DiskSegment {
 pub struct ActiveView {
     pub meta: SegmentMeta,
     pub batches: Vec<RecordBatch>,
+    pub points: Vec<RecordBatch>,
+    pub names: BTreeMap<(String, String, &'static str), (i64, i64)>,
+    pub environments: BTreeSet<SeriesEnvironment>,
     pub searcher: Searcher,
 }
 
 #[derive(Default)]
 pub struct Snapshot {
     pub closed: Vec<Arc<DiskSegment>>,
+    pub series_files: Vec<Arc<SeriesFile>>,
     pub active: Option<ActiveView>,
     pub watermark: u64,
     pub generation: u64,
@@ -49,13 +58,17 @@ pub struct Snapshot {
 pub struct Core {
     pub journal: Arc<Journal>,
     snapshot: RwLock<Arc<Snapshot>>,
+    pub rules: RwLock<Arc<RuleSet>>,
     pub indexes: IndexCache,
     pub instance: Uuid,
     pub(crate) cursor_key: [u8; 32],
     pub search_slots: Arc<Semaphore>,
     pub analytics_slots: Arc<Semaphore>,
     pub query_runtime: Arc<datafusion::execution::runtime_env::RuntimeEnv>,
+    /// Готовые суточные агрегаты; публикует поток lognara-rollups.
+    pub rollups: RwLock<Arc<Vec<Arc<RollupFile>>>>,
     worker: Mutex<Option<JoinHandle<Result<()>>>>,
+    rollup_worker: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Core {
@@ -72,6 +85,7 @@ impl Core {
             .with_object_list_cache_limit(8 << 20)
             .build_arc()?;
         let journal = Journal::open(config)?;
+        let rules = RuleSet::load(&journal.catalog.lock().unwrap().definitions()?)?;
         let mut key = [0; 32];
         key[..16].copy_from_slice(Uuid::new_v4().as_bytes());
         key[16..].copy_from_slice(Uuid::new_v4().as_bytes());
@@ -82,12 +96,15 @@ impl Core {
             ),
             journal,
             snapshot: RwLock::new(Arc::new(Snapshot::default())),
+            rules: RwLock::new(Arc::new(rules)),
             instance: Uuid::new_v4(),
             cursor_key: key,
             search_slots: Arc::new(Semaphore::new(4)),
             analytics_slots: Arc::new(Semaphore::new(2)),
             query_runtime,
+            rollups: RwLock::new(Arc::new(vec![])),
             worker: Mutex::new(None),
+            rollup_worker: Mutex::new(None),
         });
         let mut worker = Materializer::recover(core.clone())?;
         while worker.next()? {}
@@ -101,6 +118,8 @@ impl Core {
             result
         })?;
         *core.worker.lock().unwrap() = Some(handle);
+        let rollups = rollup::spawn(core.clone())?;
+        *core.rollup_worker.lock().unwrap() = Some(rollups);
         Ok(core)
     }
 
@@ -110,6 +129,13 @@ impl Core {
 
     pub fn shutdown(&self) -> Result<()> {
         self.journal.stopping.store(true, Ordering::Release);
+        let rollups = self.rollup_worker.lock().unwrap().take();
+        if let Some(handle) = rollups {
+            handle.thread().unpark();
+            if handle.join().is_err() {
+                tracing::error!("rollup worker panicked; rollups are derived and rebuilt on start");
+            }
+        }
         let handle = self.worker.lock().unwrap().take();
         if let Some(handle) = handle {
             handle.thread().unpark();
@@ -119,26 +145,110 @@ impl Core {
         }
         Ok(())
     }
+
+    /// Будит поток агрегатов после изменения файлов серий.
+    fn wake_rollups(&self) {
+        if let Some(handle) = self.rollup_worker.lock().unwrap().as_ref() {
+            handle.thread().unpark();
+        }
+    }
 }
 
 struct ActiveSegment {
     meta: SegmentMeta,
     path: PathBuf,
     batches: Vec<RecordBatch>,
+    points: Vec<RecordBatch>,
+    point_rows: usize,
+    point_min: i64,
+    point_max: i64,
+    names: BTreeMap<(String, String, &'static str), (i64, i64)>,
+    environments: BTreeSet<SeriesEnvironment>,
+    series_path: String,
     index: ActiveIndex,
     started: Instant,
+}
+
+impl ActiveSegment {
+    /// Извлекает точки из строк пачки; ошибки разбора только считаются в метриках.
+    fn add_points(
+        &mut self,
+        rows: &[StoredEvent],
+        rules: &RuleSet,
+        guard: &mut LabelGuard,
+        metrics: &Metrics,
+    ) -> Result<()> {
+        let mut points = vec![];
+        for row in rows {
+            let (found, invalid) = extract::native(row);
+            if invalid {
+                metrics.series_parse_errors.fetch_add(1, Ordering::Relaxed);
+            }
+            points.extend(found);
+            let (found, invalid) = extract::rules(row, rules);
+            if invalid {
+                metrics.series_parse_errors.fetch_add(1, Ordering::Relaxed);
+            }
+            points.extend(found);
+        }
+        let extracted = points.len();
+        points.retain(|point| {
+            point
+                .rule_id
+                .as_ref()
+                .is_none_or(|rule_id| guard.admit(rule_id, &point.labels))
+        });
+        metrics
+            .series_dropped_points
+            .fetch_add((extracted - points.len()) as u64, Ordering::Relaxed);
+        if points.is_empty() {
+            return Ok(());
+        }
+        metrics
+            .series_points
+            .fetch_add(points.len() as u64, Ordering::Relaxed);
+        for point in &points {
+            self.names
+                .entry((
+                    point.source.service.clone(),
+                    point.name.clone(),
+                    point.origin.as_str(),
+                ))
+                .and_modify(|(first, last)| {
+                    *first = (*first).min(point.timestamp);
+                    *last = (*last).max(point.timestamp);
+                })
+                .or_insert((point.timestamp, point.timestamp));
+            if let Some(environment) = &point.source.environment {
+                self.environments.insert((
+                    point.source.service.clone(),
+                    point.name.clone(),
+                    environment.clone(),
+                ));
+            }
+            self.point_min = self.point_min.min(point.timestamp);
+            self.point_max = self.point_max.max(point.timestamp);
+        }
+        self.point_rows += points.len();
+        self.points.push(series::encode(&points)?);
+        Ok(())
+    }
 }
 
 struct Materializer {
     core: Arc<Core>,
     closed: Vec<Arc<DiskSegment>>,
+    series_files: Vec<Arc<SeriesFile>>,
     active: Option<ActiveSegment>,
     retired: Vec<Arc<DiskSegment>>,
+    retired_series: Vec<Arc<SeriesFile>>,
     position: Position,
     watermark: u64,
     generation: u64,
+    guard: LabelGuard,
     last_publish: Instant,
     last_retention: Instant,
+    last_compaction: Instant,
 }
 
 impl Materializer {
@@ -178,10 +288,54 @@ impl Materializer {
             closed.push(Arc::new(DiskSegment { meta, path }));
         }
         let retained: HashSet<_> = closed.iter().map(|segment| segment.path.clone()).collect();
-        for path in segment_directories(&root)? {
+        for path in nested_directories(&root, 4)? {
             if !retained.contains(&path) {
                 fs::remove_dir_all(&path)?;
                 sync_dir(path.parent().unwrap())?;
+            }
+        }
+        let series_root = core.journal.config.data_dir.join("metrics");
+        fs::create_dir_all(&series_root)?;
+        let deleting_series = core
+            .journal
+            .catalog
+            .lock()
+            .unwrap()
+            .series_files("deleting")?;
+        for meta in deleting_series {
+            let path = core.journal.config.data_dir.join(&meta.path);
+            if path.exists() {
+                fs::remove_file(&path)?;
+                sync_dir(path.parent().unwrap())?;
+            }
+            core.journal
+                .catalog
+                .lock()
+                .unwrap()
+                .finish_deleting_series(&meta.id)?;
+        }
+        let mut series_files = vec![];
+        for meta in core.journal.catalog.lock().unwrap().series_files("ready")? {
+            let path = core.journal.config.data_dir.join(&meta.path);
+            ensure!(path.is_file(), "missing durable series file {}", meta.id);
+            series_files.push(Arc::new(SeriesFile { meta, path }));
+        }
+        let registered: HashSet<_> = series_files.iter().map(|file| file.path.clone()).collect();
+        for day in nested_directories(&series_root, 3)? {
+            let mut removed = false;
+            for entry in fs::read_dir(&day)? {
+                let path = entry?.path();
+                let stray = path.is_file()
+                    && path
+                        .extension()
+                        .is_some_and(|ext| ext == "parquet" || ext == "tmp");
+                if stray && !registered.contains(&path) {
+                    fs::remove_file(&path)?;
+                    removed = true;
+                }
+            }
+            if removed {
+                sync_dir(&day)?;
             }
         }
         let wal = core.journal.wal.lock().unwrap();
@@ -198,13 +352,17 @@ impl Materializer {
         Ok(Self {
             core,
             closed,
+            series_files,
             active: None,
             retired: vec![],
+            retired_series: vec![],
             position,
             watermark,
             generation: 0,
+            guard: LabelGuard::default(),
             last_publish: Instant::now(),
             last_retention: Instant::now() - Duration::from_secs(60),
+            last_compaction: Instant::now() - Duration::from_secs(60),
         })
     }
 
@@ -222,6 +380,16 @@ impl Materializer {
             if self.last_retention.elapsed() >= Duration::from_secs(1) {
                 self.retain()?;
                 self.last_retention = Instant::now();
+            }
+            let compact_every = self
+                .core
+                .journal
+                .config
+                .series_compact_quiet
+                .min(Duration::from_secs(60));
+            if self.last_compaction.elapsed() >= compact_every {
+                self.compact()?;
+                self.last_compaction = Instant::now();
             }
             if !worked {
                 if self.core.journal.stopping.load(Ordering::Acquire) {
@@ -286,7 +454,7 @@ impl Materializer {
         }
         // Пачки только со счётчиками dropped тоже должны двигать checkpoint.
         if receipt.events == 0 && self.active.is_none() {
-            self.checkpoint(None)?;
+            self.checkpoint(None, None, &[], &[])?;
         }
         Ok(true)
     }
@@ -295,6 +463,8 @@ impl Materializer {
         if self.active.is_none() {
             self.active = Some(self.new_segment(&rows[0])?);
         }
+        // Один снимок правил на пачку: изменение в середине пачки не разделяет её строки.
+        let rules = self.core.rules.read().unwrap().clone();
         let active = self.active.as_mut().unwrap();
         let batch = columns::encode(rows)?;
         for row in rows {
@@ -307,6 +477,7 @@ impl Materializer {
         }
         active.meta.uncompressed_bytes += batch.get_array_memory_size();
         active.batches.push(batch);
+        active.add_points(rows, &rules, &mut self.guard, &self.core.journal.metrics)?;
         self.position.offset += rows.len() as u64;
         self.watermark = rows.last().unwrap().sequence;
         active.meta.checkpoint = self.position;
@@ -323,12 +494,14 @@ impl Materializer {
     fn new_segment(&self, row: &StoredEvent) -> Result<ActiveSegment> {
         let id = Uuid::now_v7().to_string();
         let date = OffsetDateTime::from_unix_timestamp_nanos(row.core_received_at as i128)?;
-        let relative = format!(
-            "segments/{:04}/{:02}/{:02}/{id}",
+        let day = format!(
+            "{:04}/{:02}/{:02}",
             date.year(),
             date.month() as u8,
             date.day()
         );
+        let relative = format!("segments/{day}/{id}");
+        let series_path = format!("metrics/{day}/{id}.parquet");
         let path = self.core.journal.config.data_dir.join(&relative);
         fs::create_dir_all(&path)?;
         let index = ActiveIndex::create(
@@ -352,6 +525,13 @@ impl Materializer {
             },
             path,
             batches: vec![],
+            points: vec![],
+            point_rows: 0,
+            point_min: i64::MAX,
+            point_max: i64::MIN,
+            names: BTreeMap::new(),
+            environments: BTreeSet::new(),
+            series_path,
             index,
             started: Instant::now(),
         })
@@ -362,6 +542,9 @@ impl Materializer {
             Some(ActiveView {
                 meta: segment.meta.clone(),
                 batches: segment.batches.clone(),
+                points: segment.points.clone(),
+                names: segment.names.clone(),
+                environments: segment.environments.clone(),
                 searcher: segment.index.publish()?,
             })
         } else {
@@ -369,6 +552,7 @@ impl Materializer {
         };
         *self.core.snapshot.write().unwrap() = Arc::new(Snapshot {
             closed: self.closed.clone(),
+            series_files: self.series_files.clone(),
             active,
             watermark: self.watermark,
             generation: self.generation,
@@ -406,6 +590,7 @@ impl Materializer {
         let mut segment = self.active.take().unwrap();
         columns::write_parquet(&segment.path.join("logs.parquet"), &segment.batches)?;
         failpoint("segment_after_parquet");
+        let sealed_series = self.seal_series(&segment)?;
         segment.index.finish()?;
         segment.meta.closed_at = now_nanos();
         segment.meta.checkpoint = self.position;
@@ -416,19 +601,34 @@ impl Materializer {
             segment.path.join("meta.json.tmp"),
             segment.path.join("meta.json"),
         )?;
-        let mut parent = segment.path.join("index");
-        loop {
-            sync_dir(&parent)?;
-            if parent == self.core.journal.config.data_dir {
-                break;
-            }
-            parent = parent
-                .parent()
-                .context("segment outside data directory")?
-                .into();
-        }
+        sync_ancestors(
+            &segment.path.join("index"),
+            &self.core.journal.config.data_dir,
+        )?;
         failpoint("segment_before_catalog");
-        self.checkpoint(Some(&segment.meta))?;
+        let names: Vec<SeriesName> = segment
+            .names
+            .iter()
+            .map(
+                |((service, name, origin), (first_seen, last_seen))| SeriesName {
+                    service: service.clone(),
+                    name: name.clone(),
+                    origin: origin.to_string(),
+                    first_seen: *first_seen,
+                    last_seen: *last_seen,
+                },
+            )
+            .collect();
+        let environments: Vec<SeriesEnvironment> = segment.environments.iter().cloned().collect();
+        self.checkpoint(
+            Some(&segment.meta),
+            sealed_series.as_ref().map(|file| &file.meta),
+            &names,
+            &environments,
+        )?;
+        if let Some(file) = sealed_series {
+            self.series_files.push(Arc::new(file));
+        }
         self.closed.push(Arc::new(DiskSegment {
             meta: segment.meta,
             path: segment.path,
@@ -439,15 +639,56 @@ impl Materializer {
             .metrics
             .sealed_segments
             .fetch_add(1, Ordering::Relaxed);
+        self.core.wake_rollups();
         Ok(())
     }
 
-    fn checkpoint(&self, segment: Option<&SegmentMeta>) -> Result<()> {
+    /// Пишет Parquet серий сегмента; без точек файл не создаётся.
+    fn seal_series(&self, segment: &ActiveSegment) -> Result<Option<SeriesFile>> {
+        if segment.point_rows == 0 {
+            return Ok(None);
+        }
+        let root = &self.core.journal.config.data_dir;
+        let path = root.join(&segment.series_path);
+        let directory = path.parent().context("series outside data directory")?;
+        fs::create_dir_all(directory)?;
+        columns::write_parquet_with(
+            &path,
+            series::schema(),
+            &segment.points,
+            "series_during_parquet",
+        )?;
+        sync_ancestors(directory, root)?;
+        failpoint("series_after_parquet");
+        Ok(Some(SeriesFile {
+            meta: SeriesFileMeta {
+                version: 1,
+                id: segment.meta.id.clone(),
+                path: segment.series_path.clone(),
+                rows: segment.point_rows,
+                min_timestamp: segment.point_min,
+                max_timestamp: segment.point_max,
+                closed_at: now_nanos(),
+            },
+            path,
+        }))
+    }
+
+    fn checkpoint(
+        &self,
+        segment: Option<&SegmentMeta>,
+        series: Option<&SeriesFileMeta>,
+        names: &[SeriesName],
+        environments: &[SeriesEnvironment],
+    ) -> Result<()> {
         // Lock order всегда WAL -> catalog, как при дедупликации входящего запроса.
         let mut wal = self.core.journal.wal.lock().unwrap();
         let receipts = wal.through(self.position);
         self.core.journal.catalog.lock().unwrap().publish(
             segment,
+            series,
+            names,
+            environments,
             self.position,
             &receipts,
             wal.next_ids(),
@@ -540,6 +781,98 @@ impl Materializer {
                 .fetch_add(1, Ordering::Relaxed);
         }
         self.retired = waiting;
+        self.finish_series_deletions()
+    }
+
+    /// Сливает файлы серий одного дня, если все они старше порога тишины; за проход один день.
+    fn compact(&mut self) -> Result<()> {
+        let quiet = self.core.journal.config.series_compact_quiet.as_nanos() as i64;
+        let cutoff = now_nanos().saturating_sub(quiet);
+        let mut days: BTreeMap<&str, Vec<&Arc<SeriesFile>>> = BTreeMap::new();
+        for file in &self.series_files {
+            let (day, _) = file
+                .meta
+                .path
+                .rsplit_once('/')
+                .context("series file outside day directory")?;
+            days.entry(day).or_default().push(file);
+        }
+        // Ключи упорядочены по строке YYYY/MM/DD: первым идёт самый старый день.
+        let Some((day, files)) = days.into_iter().find(|(_, files)| {
+            files.len() >= 2 && files.iter().all(|file| file.meta.closed_at < cutoff)
+        }) else {
+            return Ok(());
+        };
+        let day = day.to_owned();
+        let sources: Vec<Arc<SeriesFile>> = files.into_iter().cloned().collect();
+        let id = Uuid::now_v7().to_string();
+        let relative = format!("{day}/{id}.parquet");
+        let path = self.core.journal.config.data_dir.join(&relative);
+        let mut writer = columns::ParquetWriter::create(&path, series::schema())?;
+        for source in &sources {
+            for batch in columns::stream_batches(&source.path)? {
+                writer.write(&batch?)?;
+                failpoint("series_compact_during_parquet");
+            }
+        }
+        writer.finish()?;
+        failpoint("series_compact_after_parquet");
+        let old_ids: Vec<String> = sources.iter().map(|file| file.meta.id.clone()).collect();
+        let merged = SeriesFileMeta {
+            version: 1,
+            id,
+            path: relative,
+            rows: sources.iter().map(|file| file.meta.rows).sum(),
+            min_timestamp: sources
+                .iter()
+                .fold(i64::MAX, |min, file| min.min(file.meta.min_timestamp)),
+            max_timestamp: sources
+                .iter()
+                .fold(i64::MIN, |max, file| max.max(file.meta.max_timestamp)),
+            closed_at: now_nanos(),
+        };
+        self.core
+            .journal
+            .catalog
+            .lock()
+            .unwrap()
+            .replace_series(&merged, &old_ids)?;
+        failpoint("series_compact_after_mark");
+        let removed: HashSet<&str> = old_ids.iter().map(String::as_str).collect();
+        self.series_files
+            .retain(|file| !removed.contains(file.meta.id.as_str()));
+        self.series_files
+            .push(Arc::new(SeriesFile { meta: merged, path }));
+        self.series_files.sort_by(|a, b| a.path.cmp(&b.path));
+        self.retired_series.extend(sources);
+        self.publish()?;
+        self.core
+            .journal
+            .metrics
+            .series_compactions
+            .fetch_add(1, Ordering::Relaxed);
+        self.core.wake_rollups();
+        Ok(())
+    }
+
+    /// Удаляет исходные файлы серий без держателей снимка; остальные ждут в retired_series.
+    fn finish_series_deletions(&mut self) -> Result<()> {
+        let mut waiting = vec![];
+        for file in self.retired_series.drain(..) {
+            if Arc::strong_count(&file) != 1 {
+                waiting.push(file);
+                continue;
+            }
+            fs::remove_file(&file.path)?;
+            sync_dir(file.path.parent().unwrap())?;
+            self.core
+                .journal
+                .catalog
+                .lock()
+                .unwrap()
+                .finish_deleting_series(&file.meta.id)?;
+        }
+        self.retired_series = waiting;
         Ok(())
     }
 }
@@ -556,9 +889,25 @@ fn estimated_bytes(row: &StoredEvent) -> usize {
         + row.event.request_id.as_ref().map_or(0, String::len)
 }
 
-fn segment_directories(root: &Path) -> Result<Vec<PathBuf>> {
+/// Синхронизирует каталог и его предков до корня данных, чтобы новые имена пережили сбой.
+fn sync_ancestors(start: &Path, root: &Path) -> Result<()> {
+    let mut parent = start.to_path_buf();
+    loop {
+        sync_dir(&parent)?;
+        if parent == root {
+            return Ok(());
+        }
+        parent = parent
+            .parent()
+            .context("path outside data directory")?
+            .into();
+    }
+}
+
+/// Каталоги ровно на указанной глубине под root (например, segments/YYYY/MM/DD/<id>).
+pub(crate) fn nested_directories(root: &Path, depth: usize) -> Result<Vec<PathBuf>> {
     let mut level = vec![root.to_path_buf()];
-    for _ in 0..4 {
+    for _ in 0..depth {
         let mut next = vec![];
         for parent in level {
             for entry in fs::read_dir(parent)? {

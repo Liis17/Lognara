@@ -29,7 +29,7 @@ cargo run --example relay_fixture -- tests/fixtures/relay-batch.bin
 
 ## Профили relay и агентов
 
-Core запускается с обязательными разными `LOGNARA_ADMIN_TOKEN` и `LOGNARA_QUERY_TOKEN`. Dock использует admin-токен для страницы «Подключения». Реестр хранится в отдельном `access.sqlite3` внутри каталога данных, WAL/FULL, под общей блокировкой `core.lock`. Plaintext возвращается только в ответе создания; в БД хранится SHA-256.
+Core запускается с обязательными разными `LOGNARA_ADMIN_TOKEN` и `LOGNARA_QUERY_TOKEN`. Dock использует admin-токен для страницы «Подключения» и определений метрик. Реестр хранится в отдельном `access.sqlite3` внутри каталога данных, WAL/FULL, под общей блокировкой `core.lock`. Plaintext возвращается только в ответе создания; в БД хранится SHA-256.
 
 | Метод и путь | Токен | Тело / ответ |
 |---|---|---|
@@ -77,6 +77,23 @@ Core запускается с обязательными разными `LOGNAR
 ```
 
 Ответ: `groups: [{values: {service: "api", level: "error"}, count}]`, `as_of`. Разрешены 1–2 разных поля: environment, server, backend, service, service_instance, level, action. Отсутствующее значение — JSON null. Сортировка count DESC, затем ключи группы. Limit 1..1000, по умолчанию 100. Фильтры совпадают с поиском; `text`, `attributes` и SQL отклоняются.
+
+## Определения метрик
+
+Маршруты доступны только с `LOGNARA_ADMIN_TOKEN` (Bearer).
+
+- `GET /v1/admin/series/definitions` возвращает `{"definitions": [...]}` в порядке service, name.
+- `POST /v1/admin/series/definitions` отвечает `201`, `PUT /v1/admin/series/definitions/{id}` — `200`, `DELETE` — `204`; неизвестный id — `404`.
+- `POST /v1/admin/series/preview` с `service`, `environment`, `rule` и `minutes` (1..60, по умолчанию 60) возвращает `scanned`, `matched` и до 50 последних `samples`.
+
+Определение без `rule` описывает native-метрику с тем же service и name. С `rule` core извлекает точку из `message`: `contains` — подстрока, `pattern` — регулярное выражение, `value_group` — именованная группа значения (без неё значение 1), `label_groups` — именованные группы меток. Правило действует на строки, материализованные после изменения; историю не пересчитывает. Точки хранятся сырыми, `kind` и `aggregation` применяются при запросе.
+
+## Графики метрик
+
+Маршруты доступны с токеном запросов (Bearer), как поиск и статистика.
+
+- `GET /v1/series` возвращает `{"metrics": [...]}`: по записи на (service, name, origin) с `first_seen`, `last_seen` в RFC3339, `definition` и `environments` (отсортированные окружения точек по всем origin, `[]` если окружений нет). Определения без точек тоже в списке, даты в них `null`.
+- `POST /v1/series/query` с `service`, `name`, `from`, `to`, `step_seconds` (1..604800), `split` (`none`, `instance` или `labels`, по умолчанию `none`) и необязательными `origin` и `environment` (без `environment` - сумма по всем окружениям) возвращает `kind`, `aggregation`, `unit`, `buckets`, до 20 серий `series` с `values` (`null` без данных) и `as_of`. Корзин не больше 10000. У `cumulative` значения - приращения; первое приращение считается от предыдущей корзины. Сутки окна читаются суточными агрегатами вместо точек, если шаг кратен их корзине и агрегат актуален (см. [эксплуатация](docs/operations.md)).
 
 ## Запуск и проверка
 

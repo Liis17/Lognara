@@ -1,36 +1,48 @@
-//! Клиент core: поиск `POST /v1/logs/search` с query-токеном и управление relay и агентами
-//! `/v1/admin/*` с admin-токеном.
+//! Клиент core: поиск логов и метрики с query-токеном, определения метрик и управление relay
+//! и агентами `/v1/admin/*` с admin-токеном.
 
 use std::time::Duration;
 
-use reqwest::Method;
+use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use url::Url;
+use uuid::Uuid;
 
 use crate::config::Config;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// Серия за год на стенде core (examples/series_bench.rs) считалась около 16 с; таймаут core 30 с (LOGNARA_QUERY_TIMEOUT_SECONDS).
+const SERIES_QUERY_TIMEOUT: Duration = Duration::from_secs(35);
+/// Сколько символов текста ошибки core передаётся дальше.
+const DETAIL_LIMIT: usize = 1000;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {
     #[error("core request failed: {0}")]
     Request(#[from] reqwest::Error),
-    #[error("core answered {0}")]
-    Status(reqwest::StatusCode),
-    #[error("core answered without events")]
+    /// `detail` - текст поля `error` из ответа core. В Display его нет.
+    #[error("core answered {status}")]
+    Status {
+        status: StatusCode,
+        detail: Option<String>,
+    },
+    #[error("core answered unexpected data")]
     Format,
     /// Admin-запрос отклонён; `code` из JSON `{"error": code}` или пустой.
     #[error("core rejected admin request with {0}: {1:?}")]
     Rejected(reqwest::StatusCode, String),
 }
 
+/// Успешный ответ core: статус и JSON-тело (`null`, если тела нет).
+pub type CoreReply = (StatusCode, Value);
+
 pub struct CoreClient {
     http: reqwest::Client,
-    search_url: Url,
+    base: Url,
     admin_url: Url,
-    token: String,
+    query_token: String,
     admin_token: String,
 }
 
@@ -41,15 +53,12 @@ impl CoreClient {
                 .timeout(REQUEST_TIMEOUT)
                 .build()
                 .expect("http client"),
-            search_url: config
-                .core_url
-                .join("v1/logs/search")
-                .expect("core url joins path"),
+            base: config.core_url.clone(),
             admin_url: config
                 .core_url
                 .join("v1/admin/")
                 .expect("core url joins path"),
-            token: config.core_token.clone(),
+            query_token: config.core_token.clone(),
             admin_token: config.core_admin_token.clone(),
         }
     }
@@ -66,21 +75,87 @@ impl CoreClient {
             "to": to.format(&Rfc3339).expect("RFC3339 time"),
             "limit": limit,
         });
-        let response = self
-            .http
-            .post(self.search_url.clone())
-            .bearer_auth(&self.token)
-            .json(&body)
-            .send()
+        let (_, mut reply) = self
+            .call(
+                Method::POST,
+                "v1/logs/search",
+                &self.query_token,
+                Some(&body),
+            )
             .await?;
-        if !response.status().is_success() {
-            return Err(CoreError::Status(response.status()));
-        }
-        let mut reply: Value = response.json().await?;
         match reply.get_mut("events").map(Value::take) {
             Some(Value::Array(events)) => Ok(events),
             _ => Err(CoreError::Format),
         }
+    }
+
+    /// Список метрик: `GET /v1/series`.
+    pub async fn series(&self) -> Result<CoreReply, CoreError> {
+        self.call(Method::GET, "v1/series", &self.query_token, None)
+            .await
+    }
+
+    /// Серии за период: `POST /v1/series/query`.
+    pub async fn series_query(&self, query: &Value) -> Result<CoreReply, CoreError> {
+        self.call_within(
+            Method::POST,
+            "v1/series/query",
+            &self.query_token,
+            Some(query),
+            SERIES_QUERY_TIMEOUT,
+        )
+        .await
+    }
+
+    /// Определения метрик: `GET /v1/admin/series/definitions`.
+    pub async fn definitions(&self) -> Result<CoreReply, CoreError> {
+        self.call(
+            Method::GET,
+            "v1/admin/series/definitions",
+            &self.admin_token,
+            None,
+        )
+        .await
+    }
+
+    /// Новое определение: `POST /v1/admin/series/definitions`.
+    pub async fn create_definition(&self, definition: &Value) -> Result<CoreReply, CoreError> {
+        self.call(
+            Method::POST,
+            "v1/admin/series/definitions",
+            &self.admin_token,
+            Some(definition),
+        )
+        .await
+    }
+
+    /// Замена определения: `PUT /v1/admin/series/definitions/{id}`.
+    pub async fn update_definition(
+        &self,
+        id: Uuid,
+        definition: &Value,
+    ) -> Result<CoreReply, CoreError> {
+        let path = format!("v1/admin/series/definitions/{id}");
+        self.call(Method::PUT, &path, &self.admin_token, Some(definition))
+            .await
+    }
+
+    /// Удаление определения: `DELETE /v1/admin/series/definitions/{id}`.
+    pub async fn delete_definition(&self, id: Uuid) -> Result<CoreReply, CoreError> {
+        let path = format!("v1/admin/series/definitions/{id}");
+        self.call(Method::DELETE, &path, &self.admin_token, None)
+            .await
+    }
+
+    /// Проверка определения на выборке: `POST /v1/admin/series/preview`.
+    pub async fn preview(&self, request: &Value) -> Result<CoreReply, CoreError> {
+        self.call(
+            Method::POST,
+            "v1/admin/series/preview",
+            &self.admin_token,
+            Some(request),
+        )
+        .await
     }
 
     /// `GET /v1/admin/relays`: `{"relays": [...]}`.
@@ -142,4 +217,60 @@ impl CoreClient {
         }
         Ok(response.json().await?)
     }
+
+    async fn call(
+        &self,
+        method: Method,
+        path: &str,
+        token: &str,
+        body: Option<&Value>,
+    ) -> Result<CoreReply, CoreError> {
+        self.call_within(method, path, token, body, REQUEST_TIMEOUT)
+            .await
+    }
+
+    async fn call_within(
+        &self,
+        method: Method,
+        path: &str,
+        token: &str,
+        body: Option<&Value>,
+        timeout: Duration,
+    ) -> Result<CoreReply, CoreError> {
+        let url = self.base.join(path).expect("core url joins path");
+        let mut request = self
+            .http
+            .request(method, url)
+            .bearer_auth(token)
+            .timeout(timeout);
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        let response = request.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(status_error(response).await);
+        }
+        let bytes = response.bytes().await?;
+        if bytes.is_empty() {
+            return Ok((status, Value::Null));
+        }
+        let value = serde_json::from_slice(&bytes).map_err(|_| CoreError::Format)?;
+        Ok((status, value))
+    }
+}
+
+/// Ошибка по ответу core с не-2xx статусом. Текст поля `error` сохраняется, но обрезается.
+async fn status_error(response: reqwest::Response) -> CoreError {
+    let status = response.status();
+    let body = response.bytes().await.unwrap_or_default();
+    let detail: Option<String> = serde_json::from_slice::<Value>(&body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("error")?
+                .as_str()
+                .map(|text| text.chars().take(DETAIL_LIMIT).collect())
+        });
+    CoreError::Status { status, detail }
 }

@@ -1,0 +1,379 @@
+//! Определения метрик: ручные настройки и правила извлечения точек из текста сообщений.
+//! Точки хранятся сырыми; kind и aggregation применяются при запросе.
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
+
+use anyhow::Result;
+use regex::{Regex, RegexBuilder};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::{
+    model::{format_timestamp, now_nanos},
+    query::QueryError,
+    storage::Core,
+};
+
+const MAX_RULES: usize = 64;
+const MAX_LABEL_GROUPS: usize = 4;
+/// Различных меток на правило за время жизни процесса.
+const LABEL_LIMIT: usize = 1000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    Delta,
+    Cumulative,
+    Gauge,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Aggregation {
+    Sum,
+    Avg,
+    Min,
+    Max,
+    Last,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Rule {
+    #[serde(default)]
+    pub environment: Option<String>,
+    pub contains: String,
+    pub pattern: String,
+    #[serde(default)]
+    pub value_group: Option<String>,
+    #[serde(default)]
+    pub label_groups: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Definition {
+    pub id: Uuid,
+    pub service: String,
+    pub name: String,
+    pub title: String,
+    pub description: String,
+    pub unit: String,
+    pub kind: Kind,
+    pub aggregation: Aggregation,
+    pub enabled: bool,
+    pub rule: Option<Rule>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DefinitionInput {
+    pub service: String,
+    pub name: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub unit: String,
+    pub kind: Kind,
+    #[serde(default)]
+    pub aggregation: Option<Aggregation>,
+    #[serde(default = "enabled_by_default")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub rule: Option<Rule>,
+}
+
+fn enabled_by_default() -> bool {
+    true
+}
+
+impl Definition {
+    fn new(id: Uuid, input: DefinitionInput) -> Self {
+        let aggregation = input.aggregation.unwrap_or(match input.kind {
+            Kind::Gauge => Aggregation::Avg,
+            Kind::Delta | Kind::Cumulative => Aggregation::Sum,
+        });
+        Self {
+            id,
+            service: input.service,
+            name: input.name,
+            title: input.title,
+            description: input.description,
+            unit: input.unit,
+            kind: input.kind,
+            aggregation,
+            enabled: input.enabled,
+            rule: input.rule,
+            updated_at: format_timestamp(now_nanos()),
+        }
+    }
+}
+
+pub fn validate_service(service: &str) -> Result<(), String> {
+    if (1..=128).contains(&service.len()) {
+        Ok(())
+    } else {
+        Err("service must be 1..=128 bytes".into())
+    }
+}
+
+pub fn validate_environment(environment: Option<&str>) -> Result<(), String> {
+    match environment {
+        Some(environment) if !(1..=128).contains(&environment.len()) => {
+            Err("environment must be 1..=128 bytes".into())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Проверяет запись. others - остальные определения каталога; native - есть ли у (service, name) counter или gauge.
+pub fn validate(
+    input: &DefinitionInput,
+    others: &[Definition],
+    native: bool,
+) -> Result<(), String> {
+    validate_service(&input.service)?;
+    if !(1..=128).contains(&input.name.len())
+        || !input
+            .name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_.:-".contains(&byte))
+    {
+        return Err("name must be 1..=128 bytes of letters, digits, _, ., : or -".into());
+    }
+    if input.title.chars().count() > 128 {
+        return Err("title must be at most 128 characters".into());
+    }
+    if input.description.chars().count() > 2000 {
+        return Err("description must be at most 2000 characters".into());
+    }
+    if input.unit.chars().count() > 32 {
+        return Err("unit must be at most 32 characters".into());
+    }
+    if others
+        .iter()
+        .any(|definition| definition.service == input.service && definition.name == input.name)
+    {
+        return Err("definition already exists".into());
+    }
+    if let Some(rule) = &input.rule {
+        validate_rule(rule)?;
+        if others
+            .iter()
+            .filter(|definition| definition.rule.is_some())
+            .count()
+            >= MAX_RULES
+        {
+            return Err(format!("at most {MAX_RULES} definitions may have a rule"));
+        }
+        if native {
+            return Err(
+                "name collides with a native counter or gauge of this service; choose another name"
+                    .into(),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Проверяет правило и возвращает его regex.
+pub fn validate_rule(rule: &Rule) -> Result<Regex, String> {
+    validate_environment(rule.environment.as_deref())?;
+    if !(1..=256).contains(&rule.contains.len()) {
+        return Err("contains must be 1..=256 bytes".into());
+    }
+    if rule.pattern.len() > 4096 {
+        return Err("pattern exceeds 4096 bytes".into());
+    }
+    let regex = compile(&rule.pattern).map_err(|error| format!("pattern is invalid: {error}"))?;
+    let named = |group: &str| regex.capture_names().flatten().any(|name| name == group);
+    if let Some(group) = &rule.value_group
+        && !named(group)
+    {
+        return Err(format!(
+            "value_group {group} is not a named group in pattern"
+        ));
+    }
+    if rule.label_groups.len() > MAX_LABEL_GROUPS {
+        return Err(format!("at most {MAX_LABEL_GROUPS} label_groups"));
+    }
+    for (index, group) in rule.label_groups.iter().enumerate() {
+        if !named(group) {
+            return Err(format!(
+                "label group {group} is not a named group in pattern"
+            ));
+        }
+        if rule.value_group.as_deref() == Some(group.as_str()) {
+            return Err(format!("label group {group} must differ from value_group"));
+        }
+        if rule.label_groups[..index].contains(group) {
+            return Err(format!("label group {group} is repeated"));
+        }
+    }
+    Ok(regex)
+}
+
+fn compile(pattern: &str) -> Result<Regex, regex::Error> {
+    RegexBuilder::new(pattern).size_limit(1 << 20).build()
+}
+
+/// Включённое правило с готовым regex; id и name берутся из определения.
+pub struct CompiledRule {
+    pub id: String,
+    pub name: String,
+    pub environment: Option<String>,
+    pub contains: String,
+    pub regex: Regex,
+    pub value_group: Option<String>,
+    pub label_groups: Vec<String>,
+}
+
+impl CompiledRule {
+    pub fn new(id: String, name: String, rule: &Rule) -> Result<Self> {
+        Ok(Self {
+            id,
+            name,
+            environment: rule.environment.clone(),
+            contains: rule.contains.clone(),
+            regex: compile(&rule.pattern)?,
+            value_group: rule.value_group.clone(),
+            label_groups: rule.label_groups.clone(),
+        })
+    }
+}
+
+/// Включённые правила по сервису. Core держит снимок и заменяет его после каждой записи.
+pub struct RuleSet {
+    services: HashMap<String, Vec<CompiledRule>>,
+}
+
+impl RuleSet {
+    pub fn load(definitions: &[Definition]) -> Result<Self> {
+        let mut services: HashMap<String, Vec<CompiledRule>> = HashMap::new();
+        for definition in definitions.iter().filter(|definition| definition.enabled) {
+            if let Some(rule) = &definition.rule {
+                services
+                    .entry(definition.service.clone())
+                    .or_default()
+                    .push(CompiledRule::new(
+                        definition.id.to_string(),
+                        definition.name.clone(),
+                        rule,
+                    )?);
+            }
+        }
+        Ok(Self { services })
+    }
+
+    pub fn for_service(&self, service: &str) -> &[CompiledRule] {
+        self.services.get(service).map_or(&[], Vec::as_slice)
+    }
+}
+
+/// Лимит различных меток на правило. Состояние только в памяти: после перезапуска начинается заново.
+#[derive(Default)]
+pub struct LabelGuard {
+    seen: HashMap<String, HashSet<String>>,
+}
+
+impl LabelGuard {
+    /// Пропускает известные метки и новые, пока у правила не набрано LABEL_LIMIT.
+    pub fn admit(&mut self, rule_id: &str, labels: &str) -> bool {
+        let seen = self.seen.entry(rule_id.to_owned()).or_default();
+        if seen.contains(labels) {
+            true
+        } else if seen.len() < LABEL_LIMIT {
+            seen.insert(labels.to_owned());
+            true
+        } else {
+            false
+        }
+    }
+}
+
+pub fn list(core: &Core) -> Result<Vec<Definition>, QueryError> {
+    Ok(core.journal.catalog.lock().unwrap().definitions()?)
+}
+
+pub fn create(core: &Core, input: DefinitionInput) -> Result<Definition, QueryError> {
+    // Проверка, запись и публикация правил идут под одной блокировкой каталога.
+    let catalog = core.journal.catalog.lock().unwrap();
+    let mut definitions = catalog.definitions()?;
+    let native = catalog.has_native_name(&input.service, &input.name)?;
+    validate(&input, &definitions, native).map_err(QueryError::Invalid)?;
+    let definition = Definition::new(Uuid::new_v4(), input);
+    definitions.push(definition.clone());
+    let rules = RuleSet::load(&definitions)?;
+    catalog.insert_definition(&definition)?;
+    *core.rules.write().unwrap() = Arc::new(rules);
+    Ok(definition)
+}
+
+/// None - определения с таким id нет.
+pub fn update(
+    core: &Core,
+    id: &str,
+    input: DefinitionInput,
+) -> Result<Option<Definition>, QueryError> {
+    let Ok(id) = Uuid::parse_str(id) else {
+        return Ok(None);
+    };
+    let catalog = core.journal.catalog.lock().unwrap();
+    let mut definitions = catalog.definitions()?;
+    let Some(position) = definitions
+        .iter()
+        .position(|definition| definition.id == id)
+    else {
+        return Ok(None);
+    };
+    definitions.remove(position);
+    let native = catalog.has_native_name(&input.service, &input.name)?;
+    validate(&input, &definitions, native).map_err(QueryError::Invalid)?;
+    let definition = Definition::new(id, input);
+    definitions.push(definition.clone());
+    let rules = RuleSet::load(&definitions)?;
+    if !catalog.update_definition(&definition)? {
+        return Ok(None);
+    }
+    *core.rules.write().unwrap() = Arc::new(rules);
+    Ok(Some(definition))
+}
+
+pub fn delete(core: &Core, id: &str) -> Result<bool, QueryError> {
+    let Ok(id) = Uuid::parse_str(id) else {
+        return Ok(false);
+    };
+    let catalog = core.journal.catalog.lock().unwrap();
+    let mut definitions = catalog.definitions()?;
+    let before = definitions.len();
+    definitions.retain(|definition| definition.id != id);
+    if definitions.len() == before {
+        return Ok(false);
+    }
+    let rules = RuleSet::load(&definitions)?;
+    if !catalog.delete_definition(&id.to_string())? {
+        return Ok(false);
+    }
+    *core.rules.write().unwrap() = Arc::new(rules);
+    Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn label_guard_admits_known_labels_and_limits_new_ones_per_rule() {
+        let mut guard = LabelGuard::default();
+        for i in 0..LABEL_LIMIT {
+            assert!(guard.admit("rule", &format!("code={i}")));
+        }
+        assert!(!guard.admit("rule", "code=new"));
+        assert!(guard.admit("rule", "code=0"));
+        assert!(guard.admit("other", "code=new"));
+    }
+}

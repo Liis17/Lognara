@@ -4,6 +4,7 @@ import { api, type Me } from "./api";
 import Access from "./pages/Access";
 import Login from "./pages/Login";
 import Logs from "./pages/Logs";
+import Metrics from "./pages/Metrics";
 import Settings from "./pages/Settings";
 
 export default function App() {
@@ -43,6 +44,7 @@ export default function App() {
         <strong>Lognara</strong>
         <nav>
           <NavLink to="/logs">Логи</NavLink>
+          <NavLink to="/metrics">Метрики</NavLink>
           <NavLink to="/access">Подключения</NavLink>
           <NavLink to="/settings">Настройки</NavLink>
         </nav>
@@ -52,6 +54,10 @@ export default function App() {
       <main>
         <Routes>
           <Route path="/logs" element={<Logs onUnauthorized={() => setMe(null)} />} />
+          <Route
+            path="/metrics"
+            element={<Metrics onUnauthorized={() => setMe(null)} />}
+          />
           <Route path="/access" element={<Access onUnauthorized={() => setMe(null)} />} />
           <Route path="/settings" element={<Settings onChange={refresh} />} />
           <Route path="*" element={<Navigate to="/logs" replace />} />

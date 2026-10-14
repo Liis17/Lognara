@@ -41,14 +41,46 @@ flowchart LR
 3. Relay проверяет токен по списку своих агентов из core до чтения тела, разбирает записи в события и сохраняет все допустимые части запроса на диск до `202`. По количеству событий или таймеру отправляет сохранённые тела в core с персональным токеном relay. Пока downstream недоступен, обе очереди остаются на диске.
 4. Core проверяет зарегистрированный токен relay и подтверждает пачку (`204`) только после fsync WAL, затем материализует её в сегмент и публикует для поиска и аналитики.
 
+### Serilog (.NET)
+
+Приложения на .NET отправляют логи через Serilog.Sinks.Http с форматтером из Serilog.Expressions (`ExpressionTemplate`). Установите пакеты `Serilog.Sinks.Http` и `Serilog.Expressions`. Агент работает в контейнере приложения, поэтому адрес всегда `http://127.0.0.1:7400/v1/logs`.
+
+Каждое событие должно быть в каноническом JSON Lognara: relay раскладывает по полям только канонические ключи, остальные уходят в `attributes`. Массив JSON агент делит на записи, по одной на элемент. Пачку держите меньше 1 MiB (`batchSizeLimitBytes`): агент принимает тело не больше 2 MiB.
+
+```csharp
+using Serilog;
+using Serilog.Templates;
+using Serilog.Sinks.Http.BatchFormatters;
+
+Log.Logger = new LoggerConfiguration()
+    .WriteTo.Http(
+        requestUri: "http://127.0.0.1:7400/v1/logs",
+        queueLimitBytes: null,
+        batchSizeLimitBytes: 1024 * 1024,
+        textFormatter: new ExpressionTemplate(
+            "{ {timestamp: UtcDateTime(@t), level: @l, message: @m, exception: @x, attributes: @p} }\n"),
+        batchFormatter: new ArrayBatchFormatter())
+    .CreateLogger();
+```
+
+Пример C# в этом репозитории не компилировался и не запускался. Перед использованием проверьте его в вашем приложении.
+
+| Поле Lognara | Откуда в шаблоне | Что попадает |
+|---|---|---|
+| `timestamp` | `@t` через `UtcDateTime` | время события |
+| `level` | `@l` | `Verbose`, `Information`, `Warning` и `Critical` понимаются как `trace`, `info`, `warn` и `fatal`; `Debug`, `Error`, `Fatal` совпадают с каноническими |
+| `message` | `@m` | текст события с подставленными значениями |
+| `attributes` | `@p` | все свойства Serilog; у сервисов с `ServiceMetrics` здесь окажется объект `Metrics` |
+| прочие ключи | `exception` (`@x`) | не канонические ключи уходят в `attributes` как есть |
+
 ## Возможности
 
 | Компонент | Что делает | Ключевые свойства |
 |-----------|------------|-------------------|
 | [`Lognara-agent`](Lognara-agent) | Принимает HTTP, читает файлы и stdout/stderr, сохраняет на диск, отправляет в relay | text/NDJSON/multiline для файлов и потоков; HTTP text/JSON/bytes; пачки MessagePack + zstd; точные повторы с backoff; переполнение HTTP даёт `503` без вытеснения |
 | [`Lognara-relay`](Lognara-relay) | Разбирает записи в события, группирует по источнику, отправляет в core | spool на диске с лимитом; порядок пачек сохраняется; деление по байтовым лимитам core |
-| [`Lognara-dock`](Lognara-dock) | Веб-интерфейс: вход и логи в реальном времени | вход по htpasswd (bcrypt) и passkey; сессии и ключи в SQLite; смена пароля переписывает htpasswd; SSE-лента по поиску core |
-| [`Lognara-core`](Lognara-core) | Хранит логи, ищет и считает статистику | WAL + fsync до ACK; дедупликация по SHA-256; полнотекстовый поиск, trace lookup, гистограммы и group-by; retention; метрики Prometheus |
+| [`Lognara-dock`](Lognara-dock) | Веб-интерфейс: вход и логи в реальном времени | вход по htpasswd (bcrypt) и passkey; сессии и ключи в SQLite; смена пароля переписывает htpasswd; SSE-лента по поиску core; страница «Метрики» с графиками и редактор правил |
+| [`Lognara-core`](Lognara-core) | Хранит логи, ищет и считает статистику | WAL + fsync до ACK; дедупликация по SHA-256; полнотекстовый поиск, trace lookup, гистограммы и group-by; retention; точки метрик ServiceMetrics и regex-правила; метрики Prometheus |
 
 Подключение [Nginx, PostgreSQL, Seq и MinIO](Lognara-agent/docs/log-sources.md#подключение-приложений), JSON-конфигурация источников и режим `run` описаны в [руководстве агента](Lognara-agent/docs/log-sources.md).
 
@@ -135,7 +167,7 @@ curl -X POST http://127.0.0.1:7402/v1/logs/search \
 |--------|-------------------|--------------|------------------------|
 | agent | `127.0.0.1:7400` | `LOGNARA_SERVICE`, `LOGNARA_SERVER`, `LOGNARA_BACKEND`, `LOGNARA_RELAY_TOKEN` | `LOGNARA_RELAY_URL`, `LOGNARA_BATCH_SIZE` (1000), `LOGNARA_FLUSH_INTERVAL_MS` (5000) |
 | relay | `127.0.0.1:7401` | `LOGNARA_CORE_URL`, `LOGNARA_CORE_TOKEN` | `LOGNARA_SPOOL_DIR`, `LOGNARA_SPOOL_MAX_MB` (1024), `LOGNARA_FLUSH_INTERVAL_MS` (60000), `LOGNARA_BATCH_SIZE` (10000) |
-| core | `127.0.0.1:7402` | `LOGNARA_ADMIN_TOKEN`, `LOGNARA_QUERY_TOKEN` | `LOGNARA_DATA_DIR`, `LOGNARA_RETENTION_SECONDS` (604800) |
+| core | `127.0.0.1:7402` | `LOGNARA_ADMIN_TOKEN`, `LOGNARA_QUERY_TOKEN` | `LOGNARA_DATA_DIR`, `LOGNARA_RETENTION_SECONDS` (604800), `LOGNARA_SERIES_COMPACT_QUIET_SECONDS` (3600), `LOGNARA_SERIES_RAW_DAYS` (7), `LOGNARA_SERIES_HOURLY_DAYS` (35), `LOGNARA_SERIES_ROLLUP_HOUR_UTC` (0), `LOGNARA_SERIES_ROLLUP_PAUSE_MS` (1000) |
 | dock | `127.0.0.1:7403` | `LOGNARA_DOCK_PUBLIC_URL`, `LOGNARA_DOCK_CORE_URL`, `LOGNARA_DOCK_CORE_TOKEN`, `LOGNARA_DOCK_CORE_ADMIN_TOKEN` | `LOGNARA_DOCK_HTPASSWD_FILE`, `LOGNARA_DOCK_DATA_DIR`, `LOGNARA_DOCK_SESSION_TTL_SECONDS` (43200) |
 
 <details>
@@ -299,6 +331,48 @@ CI входит в GHCR с автоматически выданным `GITHUB_T
 4. Обновите agent с отдельным постоянным volume; приложение должно повторять неподтверждённые запросы.
 5. Проверьте backlog и доставку после восстановления downstream. При ошибке чтения/изменении сохранённого файла приём закрывается; после устранения причины перезапустите процесс с прежним каталогом.
 
+## Метрики
+
+Приложения пишут метрики в лог. Core понимает два источника: встроенный формат ServiceMetrics версии 2 и правила с регулярным выражением, которые задаются в dock.
+
+```json
+{"level":"info","message":"ServiceMetrics","attributes":{"Metrics":{"SchemaVersion":2,"Counters":{"offline_detection_runs":10},"Gauges":{"queue_length":3},"Timestamp":"2026-10-13T15:14:00.4480321Z"}}}
+```
+
+- Встроенный формат: core разбирает только `attributes.Metrics` и только при `SchemaVersion` равном `2`; текст сообщения не читается. Сервис берётся из источника агента, а не из `ServiceName`.
+- `Counters` - приращения с прошлого отчёта, `Gauges` - текущие значения. Время точки берётся из `Timestamp`, без него - время события.
+- Тот же отчёт, повторно пришедший от того же источника с тем же временем и именем, учитывается один раз.
+
+Правило задаётся в dock на странице «Метрики» (кнопки редактирования видны, если задан `LOGNARA_DOCK_CORE_ADMIN_TOKEN`). Оно состоит из подстроки, регулярного выражения с именованными группами, группы значения (без неё каждое совпадение даёт 1) и групп меток. Core применяет правило при записи новых событий и не пересчитывает историю. Предпросмотр проверяет до 5000 последних строк сервиса за последний час.
+
+- Тип `delta` - приращения, по умолчанию сумма (для счётчиков). `cumulative` - растущий счётчик: график показывает приращения между корзинами, уменьшение считается перезапуском. `gauge` - показатель, по умолчанию среднее.
+- Агрегация: `sum`, `avg`, `min`, `max`, `last`; у `cumulative` всегда сумма. График суммирует все экземпляры или разбивается по экземплярам или по меткам.
+- Точки метрик не удаляются вместе с логами: `LOGNARA_RETENTION_SECONDS` их не трогает. Файлы точек дня сливаются в один, когда все они старше `LOGNARA_SERIES_COMPACT_QUIET_SECONDS` (3600 секунд по умолчанию).
+- Точки правил сворачиваются только при совпавшем id события. Если приложение повторяет запрос и агент присваивает новые id, такая точка учитывается дважды.
+- Ответ содержит не больше 20 серий (остальные не возвращаются, признака в ответе нет) и не больше 10000 корзин; шаг от 1 секунды до 7 дней.
+
+**Суточные агрегаты.** Фоновый поток core `lognara-rollups` строит агрегаты по суткам UTC из файлов `metrics/` и пишет их в `rollups/1h/` (корзины по часу) и `rollups/12h/` (корзины по 12 часов). Сырые точки остаются источником истины и не удаляются. Сутки, закончившиеся менее 7 суток назад, агрегата не имеют и читаются сырыми точками. Более старые сутки имеют агрегат:
+
+- сутки, закончившиеся 7-35 суток назад (`LOGNARA_SERIES_HOURLY_DAYS`, по умолчанию 35), - почасовые агрегаты;
+- сутки старше 35 суток - агрегаты по 12 часов.
+
+Запрос берёт агрегат вместо точек, если сутки целиком внутри окна, шаг кратен корзине агрегата, агрегат актуален (отпечаток файлов точек суток совпадает) и в открытом сегменте нет точек этих суток. Остальное читается из сырых точек, результаты складываются. Поздние точки или слияние файлов делают сутки устаревшими, и они пересобираются фоном. Ночная перепроверка: раз в сутки в 03:00 по Москве (`LOGNARA_SERIES_ROLLUP_HOUR_UTC`, по умолчанию 0 UTC) все существующие агрегаты пересобираются заново, по одним суткам за проход с паузой `LOGNARA_SERIES_ROLLUP_PAUSE_MS`.
+
+Изменение определения метрики (вид, агрегация, единица измерения) не требует пересчёта: агрегаты хранят сумму, количество, минимум, максимум и последнее значение по корзинам, а вид и агрегация применяются при запросе.
+
+Замер на синтетическом стенде [`examples/series_bench.rs`](Lognara-core/examples/series_bench.rs) (release, macOS, 3 сервиса по 3 счётчика, 2 экземпляра, точка каждые 10 секунд, 365 дней: 56 764 800 точек, 365 файлов, 27,1 MiB в `metrics/`). Замер вызывает `series_query::query` напрямую, без HTTP и dock:
+
+| Запрос | Только сырые точки | С агрегатами |
+|--------|--------------------|--------------|
+| 1 год, шаг 1 день | 15,1 с | около 55 мс |
+| 1 год, шаг 1 день, `split: instance` | 15,7 с | около 54 мс |
+| 30 дней, шаг 1 час | 340 мс | около 48 мс |
+| 24 часа, шаг 1 минута | около 11 мс | без изменений |
+
+Построение агрегатов для 359 суток заняло 18,3 с, `rollups/` занимает 1,7 MiB. Dock для года выбирает шаг 12 часов (730 корзин); такой запрос на стенде не измерялся. Измерения сделаны на хосте разработки.
+
+Подробности, счётчики `lognara_core_series_rollups_built_total` и `lognara_core_series_rollup_errors_total`, параметры: [эксплуатация core](Lognara-core/docs/operations.md).
+
 ## HTTP API core
 
 | Метод и путь | Токен | Назначение |
@@ -311,10 +385,28 @@ CI входит в GHCR с автоматически выданным `GITHUB_T
 | `GET /v1/traces/{trace_id}` | query | события trace по возрастанию времени |
 | `POST /v1/stats/histogram` | query | число событий по временным корзинам |
 | `POST /v1/stats/group-by` | query | число событий по 1-2 полям |
+| `GET /v1/series` | query | список метрик с датами первой и последней точки и окружениями (`environments`) |
+| `POST /v1/series/query` | query | значения серии по корзинам времени; необязательные `origin` и `environment` (без него сумма по всем окружениям) |
+| `/v1/admin/series/*` | admin | определения метрик и предпросмотр правила |
 | `GET /metrics` | query | метрики Prometheus |
 | `GET /health/live`, `GET /health/ready` | нет | живость и готовность |
 
 Форматы запросов и ответов, лимиты и коды ошибок: [`Lognara-core/README.md`](Lognara-core/README.md).
+
+Маршруты метрик dock, все под сессией:
+
+| Метод и путь | Доступ | Назначение |
+|--------------|--------|------------|
+| `GET /api/series` | сессия | список метрик core с окружениями |
+| `POST /api/series/query` | сессия | значения серии по корзинам; тело передаётся core, включая `environment` |
+| `GET`, `POST /api/series/definitions`; `PUT`, `DELETE /api/series/definitions/{id}`; `POST /api/series/preview` | сессия | определения и предпросмотр через admin-токен core |
+
+Коды ошибок dock для метрик (JSON `{"error": "<код>"}`):
+
+- `core_unavailable` (502): core недоступен, не ответил за 10 секунд (35 для запроса серий) или ответил 5xx.
+- `invalid` (400): запрос отклонён; поле `detail` содержит причину от core.
+- `not_found` (404): определения с таким id нет.
+- `internal` (500): core отклонил токен (401/403); проверьте `LOGNARA_DOCK_CORE_TOKEN` и `LOGNARA_DOCK_CORE_ADMIN_TOKEN`.
 
 ## Эксплуатация
 

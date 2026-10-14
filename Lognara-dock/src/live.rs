@@ -44,7 +44,7 @@ pub enum Message {
 }
 
 pub struct Live {
-    core: CoreClient,
+    core: Arc<CoreClient>,
     poll: Duration,
     lookback: Duration,
     tx: broadcast::Sender<Message>,
@@ -65,9 +65,9 @@ struct LiveState {
 }
 
 impl Live {
-    pub fn new(config: &Config, shutdown: CancellationToken) -> Arc<Self> {
+    pub fn new(config: &Config, core: Arc<CoreClient>, shutdown: CancellationToken) -> Arc<Self> {
         Arc::new(Self {
-            core: CoreClient::new(config),
+            core,
             poll: config.live_poll,
             lookback: config.live_lookback,
             tx: broadcast::channel(CHANNEL).0,

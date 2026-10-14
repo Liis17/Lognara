@@ -4,9 +4,9 @@ Parent: [[Index]]
 
 ## Назначение
 
-Веб-интерфейс Lognara за nginx (TLS). Rust-сервис в `Lognara-dock/` отдаёт React-приложение из `web/`, проверяет вход и показывает логи [[Core/LognaraCore]] в реальном времени. Query- и admin-токены core хранятся только в dock.
+Веб-интерфейс Lognara за nginx (TLS). Rust-сервис в `Lognara-dock/` отдаёт React-приложение из `web/`, проверяет вход, регистрирует relay и агентов, показывает логи [[Core/LognaraCore]] в реальном времени и графики метрик (раздел «Метрики»). Query- и admin-токены core хранятся только в dock.
 
-Поток: браузер → nginx :443 → dock :7403 → `POST /v1/logs/search` core с Bearer query-токеном.
+Поток: браузер → nginx :443 → dock :7403 → `POST /v1/logs/search` core с Bearer query-токеном. Метрики: `/api/series*` → `/v1/series*` с тем же query-токеном; определения и предпросмотр → `/v1/admin/series/*` с admin-токеном.
 
 Файлы и связи модулей описаны в [[Dock/LognaraDock-ProjectMap]].
 
@@ -24,6 +24,21 @@ Parent: [[Index]]
 
 SSE-поток каждые 60 секунд перепроверяет сессию и закрывается при остановке процесса (`App::shutdown`), иначе graceful shutdown ждал бы его вечно.
 
+Опрос `Live` использует общий `CoreClient` из `App`, а не собственный клиент.
+
+## Метрики
+
+Страница `/metrics` (пункт «Метрики» в меню) показывает серии core. Список берётся из `GET /api/series`, график из `POST /api/series/query`. Диапазоны: 1 час, 24 часа, 7 дней, 30 дней, 1 год и «всё время» (от первой точки метрики). Шаг выбирает браузер: самый мелкий из списка от 10 секунд до 7 дней, при котором не больше 1000 корзин. Разбиение: сумма, по экземплярам или по меткам.
+
+- Select «Окружение» рядом с разбиением появляется, если у метрики есть `environments` из `GET /api/series`; по умолчанию «Все окружения», и поле `environment` в запросе не передаётся. Смена метрики сбрасывает окружение, смена окружения перезапрашивает график.
+- График рисует `components/Chart.tsx` на uPlot: восемь категориальных цветов по порядку, серии сверх них серые.
+- Редактор `pages/MetricEditor.tsx` создаёт правило из текста логов, настраивает метрику по имени, проверяет правило предпросмотром (`POST /api/series/preview`, окно фиксировано 60 минут) и сохраняет (`POST`/`PUT /api/series/definitions`) или удаляет (`DELETE`) определение.
+- Кнопки редактора видны всегда: `LOGNARA_DOCK_CORE_ADMIN_TOKEN` обязателен.
+
+`series.rs` - прокси: тело запроса передаётся core как есть, проверяет его core. Запрос серий ждёт core 35 секунд (`SERIES_QUERY_TIMEOUT`), остальные вызовы 10 секунд (`REQUEST_TIMEOUT`). Core отрезает запрос по `LOGNARA_QUERY_TIMEOUT_SECONDS` (30 секунд по умолчанию), то есть таймаут dock на 5 секунд больше. Ответы core переводятся в коды ошибок API: `invalid` (с `detail`), `not_found`, `core_unavailable` (502: сеть, таймаут, 5xx), `internal` (core отклонил токен). Таблица кодов: [[Dock/LognaraDock-ProjectMap]] и `Lognara-dock/README.md`.
+
+Ограничения: диапазон «1 год» получает шаг 12 часов (730 корзин), такой шаг не измерялся: замер года выполнен для шага 1 день (см. [[Design/Metrics]], раздел «Суточные агрегаты»).
+
 ## Параметры запуска
 
 | Переменная | Обяз. | По умолчанию | Назначение |
@@ -31,7 +46,7 @@ SSE-поток каждые 60 секунд перепроверяет сесс�
 | `LOGNARA_DOCK_PUBLIC_URL` | да | - | внешний адрес; origin для passkey и проверки Origin; http только для localhost |
 | `LOGNARA_DOCK_CORE_URL` | да | - | базовый адрес core |
 | `LOGNARA_DOCK_CORE_TOKEN` | да | - | query-токен core, скрыт в Debug |
-| `LOGNARA_DOCK_CORE_ADMIN_TOKEN` | да | - | отдельный admin-токен core, ASCII без пробелов/control, скрыт в Debug |
+| `LOGNARA_DOCK_CORE_ADMIN_TOKEN` | да | - | отдельный admin-токен core для relay, агентов и определений метрик, ASCII без пробелов/control, скрыт в Debug |
 | `LOGNARA_DOCK_LISTEN_ADDR` | нет | `127.0.0.1:7403` | в образе `0.0.0.0:7403` |
 | `LOGNARA_DOCK_HTPASSWD_FILE` | нет | `/etc/lognara-dock/auth/htpasswd` | файл пользователей |
 | `LOGNARA_DOCK_DATA_DIR` | нет | `/var/lib/lognara-dock` | SQLite и lock |
@@ -64,11 +79,21 @@ SSE-поток каждые 60 секунд перепроверяет сесс�
 - `passkey::register_start(...)` — options регистрации с resident key после проверки пароля
 - `Live::subscribe(self: &Arc<Self>): (Vec<Value>, Option<String>, Receiver<Message>)` — снимок и подписка, запускает опрос
 - `CoreClient::search(&self, from, to, limit: usize): Result<Vec<Value>, CoreError>` — поиск core
+- `CoreClient::call_within(&self, method: Method, path: &str, token: &str, body: Option<&Value>, timeout: Duration): Result<CoreReply, CoreError>` - общий HTTP-вызов core с явным таймаутом; `call` подставляет 10 секунд
+- `CoreClient::series_query(&self, query: &Value): Result<CoreReply, CoreError>` - `POST /v1/series/query` с таймаутом 35 секунд
+- ~~`CoreClient::admin_enabled`~~ (удалён: 2026-10-14)
+- `CoreClient::preview(&self, request: &Value): Result<CoreReply, CoreError>` - предпросмотр правила, admin-токен
+- `From<CoreError> for ApiError` (`api.rs`) - перевод ответов core в коды ошибок API
+- `Live::new(config: &Config, core: Arc<CoreClient>, shutdown: CancellationToken): Arc<Live>` - опрос использует общий клиент
 - `live::stream(State, AuthUser): Sse<...>` — SSE `logs`, `core_error`, `core_ok`, `lagged`
+- `series::query(State, AuthUser, Json<Value>): Result<(StatusCode, Json<Value>), ApiError>` - `POST /api/series/query`, тело передаётся core как есть
+- `series::list(State, AuthUser): Result<(StatusCode, Json<Value>), ApiError>` - `GET /api/series`
+- `series::create_definition(State, AuthUser, Json<Value>): Result<(StatusCode, Json<Value>), ApiError>` - `POST /api/series/definitions`, admin-токен
 
 ## Зависимости
 
-- Использует: [[Core/LognaraCore]] (`POST /v1/logs/search` и `/v1/admin/*`).
+- Использует: [[Core/LognaraCore]] (`POST /v1/logs/search`, `GET /v1/series`, `POST /v1/series/query` с query-токеном; `/v1/admin/*`, включая `/v1/admin/series/*`, с admin-токеном).
+- Библиотеки фронтенда: uPlot (`web/package.json`, график метрик), React и react-router.
 - Используется в: браузер через nginx.
 
 ## Подключения

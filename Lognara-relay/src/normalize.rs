@@ -171,14 +171,15 @@ fn unix_nanos(text: &str) -> Option<i64> {
     i64::try_from(time.unix_timestamp_nanos()).ok()
 }
 
+/// Имена уровней Serilog (`verbose`, `information`, `warning`, `critical`) - синонимы канонических.
 fn level(text: &str) -> Option<LogLevel> {
     Some(match text.to_ascii_lowercase().as_str() {
-        "trace" => LogLevel::Trace,
+        "trace" | "verbose" => LogLevel::Trace,
         "debug" => LogLevel::Debug,
-        "info" => LogLevel::Info,
-        "warn" => LogLevel::Warn,
+        "info" | "information" => LogLevel::Info,
+        "warn" | "warning" => LogLevel::Warn,
         "error" => LogLevel::Error,
-        "fatal" => LogLevel::Fatal,
+        "fatal" | "critical" => LogLevel::Fatal,
         _ => return None,
     })
 }
@@ -361,7 +362,7 @@ mod tests {
         let invalid = json!({
             "id": "not-a-uuid",
             "timestamp": 1_790_678_511,
-            "level": "verbose",
+            "level": "notice",
             "message": {"text": "nested"},
             "action": 42,
             "trace_id": "xyz",
@@ -387,6 +388,22 @@ mod tests {
     #[test]
     fn level_is_case_insensitive() {
         assert_eq!(from_json(json!({"level": "WARN"})).level, LogLevel::Warn);
+    }
+
+    #[test]
+    fn serilog_level_names_are_synonyms() {
+        for (name, level) in [
+            ("Information", LogLevel::Info),
+            ("Warning", LogLevel::Warn),
+            ("Verbose", LogLevel::Trace),
+            ("Critical", LogLevel::Fatal),
+        ] {
+            assert_eq!(from_json(json!({"level": name})).level, level);
+        }
+
+        let unknown = from_json(json!({"level": "notice"}));
+        assert_eq!(unknown.level, LogLevel::Unknown);
+        assert_eq!(unknown.attributes, attributes(json!({"level": "notice"})));
     }
 
     #[test]
