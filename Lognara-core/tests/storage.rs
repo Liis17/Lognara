@@ -50,6 +50,20 @@ fn batch_spans_segments_and_remains_deduplicated_after_wal_cleanup_and_restart()
     core.shutdown().unwrap();
     let snapshot = core.snapshot();
     assert_eq!(snapshot.closed.len(), 3);
+    let status = lognara_core::status::status(&core).unwrap();
+    let parquet: u64 = snapshot
+        .closed
+        .iter()
+        .map(|segment| {
+            std::fs::metadata(segment.path.join("logs.parquet"))
+                .unwrap()
+                .len()
+        })
+        .sum();
+    assert_eq!(status.storage.segments, 3);
+    assert_eq!(status.storage.parquet_bytes, parquet);
+    assert!(status.storage.index_bytes > 0);
+    assert!(status.storage.oldest_event_at.is_some());
     let mut rows = vec![];
     for segment in &snapshot.closed {
         for batch in columns::read_all(&segment.path.join("logs.parquet")).unwrap() {

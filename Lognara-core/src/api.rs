@@ -25,6 +25,7 @@ use crate::{
     query::{self, QueryError, SearchRequest},
     storage::Core,
     summary::{self, SummaryRequest},
+    telemetry::{self, RelayHeartbeat},
     wire::DecodeError,
 };
 
@@ -40,6 +41,7 @@ pub fn router(core: Arc<Core>) -> Router {
         .route("/v1/issues/search", post(issue_search))
         .route("/v1/issues/recurrences", post(issue_recurrences))
         .route("/v1/issues/{fingerprint}/details", post(issue_details))
+        .route("/v1/status", get(status))
         .route_layer(middleware::from_fn_with_state(
             token_hash(&core.journal.config.query_token),
             authorize,
@@ -136,6 +138,15 @@ async fn issue_recurrences(
     }
 }
 
+/// Не требует готовности: размеры и lag нужны и при недоступном хранилище.
+async fn status(State(core): State<Arc<Core>>) -> Response {
+    match tokio::task::spawn_blocking(move || crate::status::status(&core)).await {
+        Ok(Ok(status)) => Json(status).into_response(),
+        Ok(Err(error)) => QueryError::Storage(error.into()).into_response(),
+        Err(error) => QueryError::Storage(error.into()).into_response(),
+    }
+}
+
 async fn group_by(
     State(core): State<Arc<Core>>,
     request: Result<Json<GroupRequest>, axum::extract::rejection::JsonRejection>,
@@ -191,6 +202,7 @@ pub fn ingest_router(journal: Arc<Journal>) -> Router {
     let ingest = Router::new()
         .route("/v1/batches", post(ingest))
         .route("/v1/agents", get(agent_hashes))
+        .route("/v1/heartbeat", post(heartbeat))
         .route_layer(middleware::from_fn_with_state(
             journal.access.clone(),
             authorize_relay,
@@ -485,19 +497,23 @@ async fn access_task<T: serde::Serialize + Send + 'static>(
     }
 }
 
+/// `as_of` — часы core, относительно которых считается свежесть heartbeat.
 async fn list_relays(State(access): State<Arc<Access>>) -> Response {
     access_task(
-        move || Ok(serde_json::json!({"relays":access.list_relays()?})),
+        move || Ok(serde_json::json!({"relays":access.list_relays()?, "as_of":as_of()})),
         StatusCode::OK,
     )
     .await
 }
 async fn list_agents(State(access): State<Arc<Access>>) -> Response {
     access_task(
-        move || Ok(serde_json::json!({"agents":access.list_agents()?})),
+        move || Ok(serde_json::json!({"agents":access.list_agents()?, "as_of":as_of()})),
         StatusCode::OK,
     )
     .await
+}
+fn as_of() -> String {
+    crate::model::format_timestamp(crate::model::now_nanos())
 }
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -564,6 +580,28 @@ async fn agent_hashes(
     access_task(
         move || Ok(serde_json::json!({"agents":journal.access.agent_hashes(relay_id)?})),
         StatusCode::OK,
+    )
+    .await
+}
+
+async fn heartbeat(
+    State(journal): State<Arc<Journal>>,
+    Extension(relay_id): Extension<i64>,
+    request: Request,
+) -> Response {
+    let body = match to_bytes(request.into_body(), telemetry::MAX_BODY).await {
+        Ok(body) => body,
+        Err(_) => {
+            return (StatusCode::PAYLOAD_TOO_LARGE, "heartbeat exceeds limit").into_response();
+        }
+    };
+    let heartbeat = match serde_json::from_slice::<RelayHeartbeat>(&body) {
+        Ok(heartbeat) if heartbeat.valid() => heartbeat,
+        _ => return invalid_request(),
+    };
+    access_task(
+        move || journal.access.record_heartbeat(relay_id, heartbeat),
+        StatusCode::NO_CONTENT,
     )
     .await
 }
