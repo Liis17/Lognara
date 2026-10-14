@@ -75,7 +75,7 @@ cargo run --example relay_fixture -- tests/fixtures/relay-batch.bin
 Маршруты доступны с токеном запросов (Bearer), как поиск и статистика.
 
 - `GET /v1/series` возвращает `{"metrics": [...]}`: по записи на (service, name, origin) с `first_seen`, `last_seen` в RFC3339, `definition` и `environments` (отсортированные окружения точек по всем origin, `[]` если окружений нет). Определения без точек тоже в списке, даты в них `null`.
-- `POST /v1/series/query` с `service`, `name`, `from`, `to`, `step_seconds` (1..604800), `split` (`none`, `instance` или `labels`, по умолчанию `none`) и необязательными `origin` и `environment` (без `environment` - сумма по всем окружениям) возвращает `kind`, `aggregation`, `unit`, `buckets`, до 20 серий `series` с `values` (`null` без данных) и `as_of`. Корзин не больше 10000. У `cumulative` значения - приращения; первое приращение считается от предыдущей корзины.
+- `POST /v1/series/query` с `service`, `name`, `from`, `to`, `step_seconds` (1..604800), `split` (`none`, `instance` или `labels`, по умолчанию `none`) и необязательными `origin` и `environment` (без `environment` - сумма по всем окружениям) возвращает `kind`, `aggregation`, `unit`, `buckets`, до 20 серий `series` с `values` (`null` без данных) и `as_of`. Корзин не больше 10000. У `cumulative` значения - приращения; первое приращение считается от предыдущей корзины. Сутки окна читаются суточными агрегатами вместо точек, если шаг кратен их корзине и агрегат актуален (см. [эксплуатация](docs/operations.md)).
 
 ## Запуск и проверка
 

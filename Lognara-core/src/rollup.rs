@@ -33,7 +33,7 @@ use crate::{
     wal::{failpoint, sync_dir},
 };
 
-const DAY_NANOS: i128 = 86_400 * 1_000_000_000;
+pub(crate) const DAY_NANOS: i128 = 86_400 * 1_000_000_000;
 const HOURLY: u32 = 3600;
 const HALF_DAY: u32 = 43_200;
 /// Без работы поток спит до пробуждения при изменении серий, но не дольше этого срока.
@@ -159,6 +159,43 @@ fn fingerprint(files: &[Arc<SeriesFile>], (from, to): (i64, i64)) -> String {
         hasher.update(b"\n");
     }
     hex::encode(hasher.finalize())
+}
+
+/// Агрегат суток для чтения вместо точек: шаг кратен корзине, отпечаток равен текущим файлам,
+/// и в открытом сегменте нет точек суток.
+pub(crate) fn usable_rollup(
+    rollups: &[Arc<RollupFile>],
+    snapshot: &Snapshot,
+    day_start: i128,
+    step_seconds: u64,
+) -> Option<Arc<RollupFile>> {
+    let day = OffsetDateTime::from_unix_timestamp_nanos(day_start)
+        .ok()?
+        .date();
+    let key = key(day);
+    let candidates: Vec<&Arc<RollupFile>> = rollups
+        .iter()
+        .filter(|file| {
+            file.meta.day == key && step_seconds.is_multiple_of(u64::from(file.meta.resolution))
+        })
+        .collect();
+    if candidates.is_empty() || open_points(snapshot, day_start) {
+        return None;
+    }
+    let digest = fingerprint(&snapshot.series_files, window(day));
+    candidates
+        .into_iter()
+        .find(|file| file.meta.fingerprint == digest)
+        .cloned()
+}
+
+/// Есть ли в открытом сегменте точки суток: агрегат их не содержит, поэтому сутки читаются сырыми.
+fn open_points(snapshot: &Snapshot, day_start: i128) -> bool {
+    snapshot.active.as_ref().is_some_and(|active| {
+        active.names.values().any(|&(first, last)| {
+            i128::from(first) < day_start + DAY_NANOS && i128::from(last) >= day_start
+        })
+    })
 }
 
 /// Агрегаты суток по файлам серий, пересекающим сутки. Открытый сегмент не входит:

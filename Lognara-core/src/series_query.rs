@@ -15,7 +15,7 @@ use datafusion::{
     common::ScalarValue,
     datasource::MemTable,
     functions::datetime::expr_fn::date_bin,
-    functions_aggregate::expr_fn::{count, last_value, max, min, sum},
+    functions_aggregate::expr_fn::{last_value, max, min, sum},
     prelude::*,
 };
 use futures::TryStreamExt;
@@ -26,6 +26,7 @@ use crate::{
     definitions::{Aggregation, Definition, Kind},
     model::format_timestamp,
     query::{Filters, PreparedFilter, QueryError},
+    rollup::{self, DAY_NANOS, RollupFile},
     series::{self, Origin},
     storage::{Core, Snapshot},
 };
@@ -350,7 +351,7 @@ pub async fn query(core: Arc<Core>, request: QueryRequest) -> Result<QueryRespon
     })
 }
 
-/// Строки (bucket, split, серия) из DataFusion. Повторно доставленные точки схлопываются до агрегации.
+/// Строки (bucket, split, серия) из сырых точек и агрегатов суток. Повторно доставленные точки схлопываются до агрегации.
 async fn read_buckets(
     core: &Core,
     snapshot: &Snapshot,
@@ -359,10 +360,181 @@ async fn read_buckets(
     from: i64,
     to: i64,
 ) -> Result<Vec<RecordBatch>> {
-    let mut predicate = col("timestamp")
-        .gt_eq(timestamp(from))
-        .and(col("timestamp").lt(timestamp(to)))
-        .and(col("service").eq(lit(request.service.as_str())))
+    let (files, ranges) = plan(core, snapshot, request.step_seconds, from, to);
+    let raw = raw_rows(core, snapshot, request, step, &ranges).await?;
+    let rolled = rollup_rows(core, &files, request, step).await?;
+    let rows = match (raw, rolled) {
+        (Some(raw), Some(rolled)) => raw.union(rolled)?,
+        (Some(rows), None) | (None, Some(rows)) => rows,
+        (None, None) => return Ok(vec![]),
+    };
+    Ok(merge(rows)?.execute_stream().await?.try_collect().await?)
+}
+
+/// Суточные агрегаты для полных суток окна и диапазоны сырых точек для остальных; соседние диапазоны сливаются.
+fn plan(
+    core: &Core,
+    snapshot: &Snapshot,
+    step_seconds: u64,
+    from: i64,
+    to: i64,
+) -> (Vec<Arc<RollupFile>>, Vec<(i64, i64)>) {
+    let rollups = core.rollups.read().unwrap().clone();
+    let (from, to) = (i128::from(from), i128::from(to));
+    let (mut files, mut ranges) = (vec![], Vec::<(i64, i64)>::new());
+    let mut day = from.div_euclid(DAY_NANOS) * DAY_NANOS;
+    while day < to {
+        let end = day + DAY_NANOS;
+        let whole = day >= from && end <= to;
+        let file = if whole {
+            rollup::usable_rollup(&rollups, snapshot, day, step_seconds)
+        } else {
+            None
+        };
+        match file {
+            Some(file) => files.push(file),
+            None => {
+                let (start, stop) = (day.max(from) as i64, end.min(to) as i64);
+                match ranges.last_mut() {
+                    Some(last) if last.1 == start => last.1 = stop,
+                    _ => ranges.push((start, stop)),
+                }
+            }
+        }
+        day = end;
+    }
+    (files, ranges)
+}
+
+/// Строки сырых точек в диапазонах; None, если диапазонов нет.
+async fn raw_rows(
+    core: &Core,
+    snapshot: &Snapshot,
+    request: &QueryRequest,
+    step: i64,
+    ranges: &[(i64, i64)],
+) -> Result<Option<DataFrame>> {
+    let (Some(&(from, _)), Some(&(_, to)), Some(inside)) = (
+        ranges.first(),
+        ranges.last(),
+        ranges
+            .iter()
+            .map(|&(start, stop)| {
+                col("timestamp")
+                    .gt_eq(timestamp(start))
+                    .and(col("timestamp").lt(timestamp(stop)))
+            })
+            .reduce(Expr::or),
+    ) else {
+        return Ok(None);
+    };
+    let frame = dedup(
+        frame(core, snapshot, from, to)
+            .await?
+            .filter(inside.and(scope(request)))?,
+    )?;
+    let mut columns = keys(bucket(step, col("timestamp")), split_key(request.split));
+    columns.extend([
+        col("value").alias("sum"),
+        lit(1i64).alias("count"),
+        col("value").alias("min"),
+        col("value").alias("max"),
+        col("value").alias("last"),
+        col("timestamp").alias("last_ts"),
+    ]);
+    Ok(Some(frame.select(columns)?))
+}
+
+/// Строки агрегатов суток той же формы, что сырые; None, если агрегатов нет.
+async fn rollup_rows(
+    core: &Core,
+    files: &[Arc<RollupFile>],
+    request: &QueryRequest,
+    step: i64,
+) -> Result<Option<DataFrame>> {
+    if files.is_empty() {
+        return Ok(None);
+    }
+    let paths: Vec<String> = files
+        .iter()
+        .map(|file| file.path.to_string_lossy().into_owned())
+        .collect();
+    let frame = session(core)
+        .read_parquet(
+            paths,
+            ParquetReadOptions::default().schema(&rollup::schema()),
+        )
+        .await?
+        .filter(scope(request))?;
+    let mut columns = keys(bucket(step, col("bucket")), split_key(request.split));
+    columns.extend(["sum", "count", "min", "max", "last", "last_ts"].map(col));
+    Ok(Some(frame.select(columns)?))
+}
+
+/// Слияние строк одной корзины, split и серии: суммы, минимум, максимум и последнее значение по времени.
+fn merge(rows: DataFrame) -> Result<DataFrame> {
+    Ok(rows.aggregate(
+        keys(col("bucket"), col("split")),
+        vec![
+            sum(col("sum")).alias("sum"),
+            sum(col("count")).alias("count"),
+            min(col("min")).alias("min"),
+            max(col("max")).alias("max"),
+            last_value(
+                col("last"),
+                vec![
+                    col("last_ts").sort(true, false),
+                    col("last").sort(true, false),
+                ],
+            )
+            .alias("last"),
+            max(col("last_ts")).alias("last_ts"),
+        ],
+    )?)
+}
+
+/// Столбцы строки: корзина, split и серия (окружение, сервер, бэкенд, экземпляр, origin, правило, метки).
+fn keys(bucket: Expr, split: Expr) -> Vec<Expr> {
+    let identity = [
+        "environment",
+        "server",
+        "backend",
+        "service_instance",
+        "origin",
+        "rule_id",
+        "labels",
+    ]
+    .map(col);
+    [bucket.alias("bucket"), split.alias("split")]
+        .into_iter()
+        .chain(identity)
+        .collect()
+}
+
+/// Корзина запроса: date_bin от эпохи, как у агрегатов суток.
+fn bucket(step: i64, time: Expr) -> Expr {
+    date_bin(
+        lit(ScalarValue::IntervalMonthDayNano(Some(
+            IntervalMonthDayNano::new(0, 0, step),
+        ))),
+        time,
+        timestamp(0),
+    )
+}
+
+/// Ключ split: пустая строка без разбиения, экземпляр или метки.
+fn split_key(split: Split) -> Expr {
+    match split {
+        Split::None => lit(""),
+        Split::Instance => coalesce(vec![col("service_instance"), lit("")]),
+        Split::Labels => col("labels"),
+    }
+}
+
+/// Условия серии: сервис, имя и, если заданы, origin и окружение.
+fn scope(request: &QueryRequest) -> Expr {
+    let mut predicate = col("service")
+        .eq(lit(request.service.as_str()))
         .and(col("name").eq(lit(request.name.as_str())));
     if let Some(origin) = request.origin {
         predicate = predicate.and(col("origin").eq(lit(origin.as_str())));
@@ -370,46 +542,7 @@ async fn read_buckets(
     if let Some(environment) = &request.environment {
         predicate = predicate.and(col("environment").eq(lit(environment.as_str())));
     }
-    let split = match request.split {
-        Split::None => lit(""),
-        Split::Instance => coalesce(vec![col("service_instance"), lit("")]),
-        Split::Labels => col("labels"),
-    };
-    let bucket = date_bin(
-        lit(ScalarValue::IntervalMonthDayNano(Some(
-            IntervalMonthDayNano::new(0, 0, step),
-        ))),
-        col("timestamp"),
-        timestamp(0),
-    );
-    let frame = dedup(frame(core, snapshot, from, to).await?.filter(predicate)?)?.aggregate(
-        vec![
-            bucket.alias("bucket"),
-            split.alias("split"),
-            col("environment"),
-            col("server"),
-            col("backend"),
-            col("service_instance"),
-            col("origin"),
-            col("rule_id"),
-            col("labels"),
-        ],
-        vec![
-            sum(col("value")).alias("sum"),
-            count(lit(1u8)).alias("count"),
-            min(col("value")).alias("min"),
-            max(col("value")).alias("max"),
-            last_value(
-                col("value"),
-                vec![
-                    col("timestamp").sort(true, false),
-                    col("value").sort(true, false),
-                ],
-            )
-            .alias("last"),
-        ],
-    )?;
-    Ok(frame.execute_stream().await?.try_collect().await?)
+    predicate
 }
 
 /// Повторно доставленные точки схлопываются: одна строка на серию, время и event_id, значение - максимум.
@@ -439,12 +572,7 @@ pub(crate) async fn frame(
     from: i64,
     to: i64,
 ) -> Result<DataFrame> {
-    let config = SessionConfig::new()
-        .with_target_partitions(2)
-        .with_batch_size(8192)
-        .with_collect_statistics(false)
-        .with_parquet_pruning(true);
-    let context = SessionContext::new_with_config_rt(config, core.query_runtime.clone());
+    let context = session(core);
     let paths: Vec<String> = snapshot
         .series_files
         .iter()
@@ -474,6 +602,16 @@ pub(crate) async fn frame(
         frame = frame.union(parquet)?;
     }
     Ok(frame)
+}
+
+/// Контекст чтения серий: мало партиций и общий пул памяти core.
+fn session(core: &Core) -> SessionContext {
+    let config = SessionConfig::new()
+        .with_target_partitions(2)
+        .with_batch_size(8192)
+        .with_collect_statistics(false)
+        .with_parquet_pruning(true);
+    SessionContext::new_with_config_rt(config, core.query_runtime.clone())
 }
 
 /// Значения по split-ключу и bucket: приращения для кумулятивных, иначе агрегат по строкам.

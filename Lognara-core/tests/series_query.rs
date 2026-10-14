@@ -13,9 +13,11 @@ use lognara_core::{
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
+    fs,
     path::Path,
     time::{Duration, Instant},
 };
+use time::{Date, OffsetDateTime, format_description::well_known::Rfc3339};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -25,6 +27,9 @@ const LIST: &str = "/v1/series";
 const QUERY: &str = "/v1/series/query";
 const FROM: &str = "2026-10-13T10:00:00Z";
 const TO: &str = "2026-10-13T10:01:00Z";
+const HOURLY: u32 = 3600;
+const HALF_DAY: u32 = 43_200;
+const WEEK: i64 = 604_800;
 
 fn config(path: &Path, segment_rows: usize) -> Config {
     let mut cfg = Config::from_lookup(|key| match key {
@@ -750,5 +755,503 @@ async fn query_routes_need_the_query_token() {
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "POST {token:?}");
     }
+    core.shutdown().unwrap();
+}
+
+/// Дата UTC, которая была days дней назад.
+fn day_ago(days: i64) -> Date {
+    (OffsetDateTime::now_utc() - time::Duration::days(days)).date()
+}
+
+/// Время RFC3339: полночь UTC даты плюс секунды.
+fn stamp(day: Date, seconds: i64) -> String {
+    (day.midnight().assume_utc() + time::Duration::seconds(seconds))
+        .format(&Rfc3339)
+        .unwrap()
+}
+
+/// Секунды эпохи в полночь UTC даты.
+fn epoch(day: Date) -> i64 {
+    day.midnight().assume_utc().unix_timestamp()
+}
+
+/// Конфигурация с агрегатами: сутки строятся сразу после запуска или запечатывания.
+fn rollup_config(path: &Path, segment_rows: usize) -> Config {
+    let mut cfg = config(path, segment_rows);
+    cfg.series_rollup_pause = Duration::from_millis(1);
+    cfg
+}
+
+/// Идентификатор опубликованного агрегата суток нужной корзины.
+fn rollup_id(core: &Core, day: Date, resolution: u32) -> Option<String> {
+    core.rollups
+        .read()
+        .unwrap()
+        .iter()
+        .find(|file| file.meta.day == day.to_string() && file.meta.resolution == resolution)
+        .map(|file| file.meta.id.clone())
+}
+
+/// Значения корзин: null, кроме указанных позиций.
+fn sparse(len: usize, points: &[(usize, f64)]) -> Value {
+    let mut values = vec![Value::Null; len];
+    for &(index, value) in points {
+        values[index] = json!(value);
+    }
+    Value::Array(values)
+}
+
+/// Строка серии с подписью.
+fn line(label: &str, values: Value) -> Value {
+    json!({"label": label, "values": values})
+}
+
+/// Тело запроса с дополнительными полями (split, environment).
+fn query_with(name: &str, from: &str, to: &str, step: u64, extra: Value) -> Value {
+    let mut body = query_body(name, from, to, step);
+    body.as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    body
+}
+
+/// Создаёт определение; статус проверяется.
+async fn define(router: &Router, body: Value) {
+    let (status, _) = send(router, "POST", DEFINITIONS, Some("admin"), Some(body)).await;
+    assert_eq!(status, StatusCode::CREATED);
+}
+
+/// Пачка счётчика runs одной группы: событие на точку.
+fn runs_batch(first_id: u128, points: &[(String, u64)]) -> Vec<u8> {
+    let events = points
+        .iter()
+        .enumerate()
+        .map(|(index, (time, runs))| {
+            report(
+                first_id + index as u128,
+                time,
+                json!({"runs": runs}),
+                json!({}),
+            )
+        })
+        .collect();
+    batch(vec![(source("api", Some("eu-1")), events)])
+}
+
+/// Точки двух суток: новый день (почасовые агрегаты) и старый (12-часовые). Очередь пишется четырьмя gauge.
+fn rolled_batch(new: Date, old: Date) -> Vec<u8> {
+    let queue = |depth: f64| json!({"queue_avg": depth, "queue_min": depth, "queue_max": depth, "queue_last": depth});
+    let staging = Source {
+        environment: Some("staging".into()),
+        ..source("api", Some("eu-1"))
+    };
+    batch(vec![
+        (
+            source("api", Some("eu-1")),
+            vec![
+                report(1, &stamp(new, 4_200), json!({"runs": 1}), queue(4.0)),
+                report(2, &stamp(new, 4_800), json!({"runs": 3}), queue(10.0)),
+                report(3, &stamp(new, 19_800), json!({"runs": 2}), queue(6.0)),
+                report(6, &stamp(old, 1_800), json!({"runs": 5}), queue(2.0)),
+            ],
+        ),
+        (
+            source("api", Some("eu-2")),
+            vec![
+                report(4, &stamp(new, 4_500), json!({"runs": 4}), queue(6.0)),
+                report(7, &stamp(old, 46_800), json!({"runs": 7}), queue(3.0)),
+            ],
+        ),
+        (
+            staging,
+            vec![
+                report(5, &stamp(new, 5_400), json!({"runs": 10}), queue(8.0)),
+                report(8, &stamp(old, 48_600), json!({"runs": 11}), queue(5.0)),
+            ],
+        ),
+    ])
+}
+
+/// Запрос и ожидаемые серии; окна с одними сутками читаются агрегатами, mixed - частично сырые.
+type Case = (&'static str, Value, Value);
+
+fn cases(new: Date, old: Date) -> (Vec<Case>, Vec<Case>) {
+    let (nf, nt) = (stamp(new, 0), stamp(new, 86_400));
+    let (of, ot) = (stamp(old, 0), stamp(old, 86_400));
+    let day = vec![
+        (
+            "runs hourly",
+            query_with("runs", &nf, &nt, 3_600, json!({})),
+            json!([line("", sparse(24, &[(1, 18.0), (5, 2.0)]))]),
+        ),
+        (
+            "runs hourly staging",
+            query_with("runs", &nf, &nt, 3_600, json!({"environment": "staging"})),
+            json!([line("", sparse(24, &[(1, 10.0)]))]),
+        ),
+        (
+            "runs hourly production",
+            query_with(
+                "runs",
+                &nf,
+                &nt,
+                3_600,
+                json!({"environment": "production"}),
+            ),
+            json!([line("", sparse(24, &[(1, 8.0), (5, 2.0)]))]),
+        ),
+        (
+            "runs hourly by instance",
+            query_with("runs", &nf, &nt, 3_600, json!({"split": "instance"})),
+            json!([
+                line("eu-1", sparse(24, &[(1, 14.0), (5, 2.0)])),
+                line("eu-2", sparse(24, &[(1, 4.0)]))
+            ]),
+        ),
+        (
+            "runs 12-hour",
+            query_with("runs", &of, &ot, 43_200, json!({})),
+            json!([line("", sparse(2, &[(0, 5.0), (1, 18.0)]))]),
+        ),
+        (
+            "runs 12-hour by instance",
+            query_with("runs", &of, &ot, 43_200, json!({"split": "instance"})),
+            json!([
+                line("eu-1", sparse(2, &[(0, 5.0), (1, 11.0)])),
+                line("eu-2", sparse(2, &[(1, 7.0)]))
+            ]),
+        ),
+        (
+            "queue avg hourly",
+            query_with("queue_avg", &nf, &nt, 3_600, json!({})),
+            json!([line("", sparse(24, &[(1, 7.0), (5, 6.0)]))]),
+        ),
+        (
+            "queue min hourly",
+            query_with("queue_min", &nf, &nt, 3_600, json!({})),
+            json!([line("", sparse(24, &[(1, 4.0), (5, 6.0)]))]),
+        ),
+        (
+            "queue max hourly",
+            query_with("queue_max", &nf, &nt, 3_600, json!({})),
+            json!([line("", sparse(24, &[(1, 10.0), (5, 6.0)]))]),
+        ),
+        // Последние значения складываются по сериям: 10 + 6 + 8 и 10 + 6.
+        (
+            "queue last hourly",
+            query_with("queue_last", &nf, &nt, 3_600, json!({})),
+            json!([line("", sparse(24, &[(1, 24.0), (5, 6.0)]))]),
+        ),
+        (
+            "queue last hourly production",
+            query_with(
+                "queue_last",
+                &nf,
+                &nt,
+                3_600,
+                json!({"environment": "production"}),
+            ),
+            json!([line("", sparse(24, &[(1, 16.0), (5, 6.0)]))]),
+        ),
+        (
+            "queue avg 12-hour",
+            query_with("queue_avg", &of, &ot, 43_200, json!({})),
+            json!([line("", sparse(2, &[(0, 2.0), (1, 4.0)]))]),
+        ),
+        (
+            "queue min 12-hour",
+            query_with("queue_min", &of, &ot, 43_200, json!({})),
+            json!([line("", sparse(2, &[(0, 2.0), (1, 3.0)]))]),
+        ),
+        (
+            "queue max 12-hour",
+            query_with("queue_max", &of, &ot, 43_200, json!({})),
+            json!([line("", sparse(2, &[(0, 2.0), (1, 5.0)]))]),
+        ),
+        (
+            "queue last 12-hour",
+            query_with("queue_last", &of, &ot, 43_200, json!({})),
+            json!([line("", sparse(2, &[(0, 2.0), (1, 8.0)]))]),
+        ),
+    ];
+    let mixed = vec![
+        (
+            "runs daily over rolled and empty days",
+            query_with("runs", &of, &nt, 86_400, json!({})),
+            json!([line("", sparse(31, &[(0, 23.0), (30, 20.0)]))]),
+        ),
+        (
+            "runs 10-minute buckets on a rolled day",
+            query_with("runs", &of, &stamp(old, 3_600), 600, json!({})),
+            json!([line("", sparse(6, &[(3, 5.0)]))]),
+        ),
+        // Окно кончается в 13:00: сутки неполные, 13:00 и 13:30 в ответ не входят.
+        (
+            "runs 12-hour over a partial day",
+            query_with("runs", &of, &stamp(old, 46_800), 43_200, json!({})),
+            json!([line("", sparse(2, &[(0, 5.0)]))]),
+        ),
+    ];
+    (day, mixed)
+}
+
+#[tokio::test]
+async fn rollups_answer_day_queries_like_raw_points() {
+    let (new, old) = (day_ago(10), day_ago(40));
+    let dir = tempfile::tempdir().unwrap();
+    // Точки запечатываются остановкой; агрегаты строятся на запуске по одному файлу.
+    let core = Core::open(rollup_config(dir.path(), 1000)).unwrap();
+    core.journal.accept(&rolled_batch(new, old)).unwrap();
+    wait(|| core.snapshot().watermark >= 8);
+    core.shutdown().unwrap();
+    drop(core);
+    let core = Core::open(rollup_config(dir.path(), 1000)).unwrap();
+    wait(|| rollup_id(&core, new, HOURLY).is_some() && rollup_id(&core, old, HALF_DAY).is_some());
+    assert_eq!(core.snapshot().series_files.len(), 1);
+    let router = api::router(core.clone());
+
+    // Те же точки без агрегатов: открытый сегмент, сырые точки.
+    let open_dir = tempfile::tempdir().unwrap();
+    let open = Core::open(config(open_dir.path(), 1000)).unwrap();
+    open.journal.accept(&rolled_batch(new, old)).unwrap();
+    wait(|| open.snapshot().watermark >= 8);
+    assert!(open.snapshot().series_files.is_empty());
+    let open_router = api::router(open.clone());
+    for router in [&router, &open_router] {
+        for (name, aggregation) in [
+            ("queue_min", "min"),
+            ("queue_max", "max"),
+            ("queue_last", "last"),
+        ] {
+            define(
+                router,
+                json!({"service": "api", "name": name, "kind": "gauge", "aggregation": aggregation}),
+            )
+            .await;
+        }
+    }
+
+    let (day, mixed) = cases(new, old);
+    for (label, body, expected) in day.iter().chain(&mixed) {
+        assert_eq!(series_of(&router, body.clone()).await, *expected, "{label}");
+        assert_eq!(
+            series_of(&open_router, body.clone()).await,
+            *expected,
+            "open {label}"
+        );
+    }
+    // Суточные окна обходятся без точек: файл запечатанных точек удалён, ответы те же.
+    fs::remove_file(&core.snapshot().series_files[0].path).unwrap();
+    for (label, body, expected) in &day {
+        assert_eq!(
+            series_of(&router, body.clone()).await,
+            *expected,
+            "without points {label}"
+        );
+    }
+    drop(router);
+    drop(open_router);
+    core.shutdown().unwrap();
+    open.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn cumulative_increases_cross_from_rolled_up_days_into_raw_days() {
+    let ago: Vec<Date> = (0..=10).map(day_ago).collect();
+    let dir = tempfile::tempdir().unwrap();
+    let core = Core::open(rollup_config(dir.path(), 1000)).unwrap();
+    // Сутки 9 и 8 уходят в агрегаты, сутки 7, 6 и 5 остаются сырыми.
+    let points = [
+        (9, 21_600, 90),
+        (9, 43_200, 100),
+        (8, 10_800, 120),
+        (8, 82_800, 150),
+        (7, 43_200, 160),
+        (6, 43_200, 200),
+        (5, 43_200, 205),
+    ];
+    let events = points
+        .iter()
+        .enumerate()
+        .map(|(index, &(days, seconds, value))| {
+            report(
+                index as u128 + 1,
+                &stamp(ago[days], seconds),
+                json!({"bytes_sent": value}),
+                json!({}),
+            )
+        })
+        .collect();
+    core.journal
+        .accept(&batch(vec![(source("api", Some("eu-1")), events)]))
+        .unwrap();
+    wait(|| core.snapshot().watermark >= 7);
+    core.shutdown().unwrap();
+    drop(core);
+    let core = Core::open(rollup_config(dir.path(), 1000)).unwrap();
+    wait(|| {
+        rollup_id(&core, ago[9], HOURLY).is_some() && rollup_id(&core, ago[8], HOURLY).is_some()
+    });
+    let router = api::router(core.clone());
+    define(
+        &router,
+        json!({"service": "api", "name": "bytes_sent", "kind": "cumulative", "unit": "B"}),
+    )
+    .await;
+    // Последние значения суток: 100, 150, 160, 205 (сутки 9, 8, 7, 5); первое приращение без предыдущих.
+    let body = query_body("bytes_sent", &stamp(ago[9], 0), &stamp(ago[4], 0), 86_400);
+    assert_eq!(
+        series_of(&router, body).await,
+        json!([line("", json!([null, 50.0, 10.0, 40.0, 5.0]))])
+    );
+    drop(router);
+    core.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn weekly_buckets_merge_rolled_up_days_with_raw_days() {
+    let ago: Vec<Date> = (0..=10).map(day_ago).collect();
+    let dir = tempfile::tempdir().unwrap();
+    let core = Core::open(rollup_config(dir.path(), 1000)).unwrap();
+    // Точка в полдень каждых суток с 10 по 4 назад; значение равно числу суток назад.
+    let events = (4..=10)
+        .map(|days| {
+            report(
+                days as u128,
+                &stamp(ago[days], 43_200),
+                json!({"runs": days}),
+                json!({}),
+            )
+        })
+        .collect();
+    core.journal
+        .accept(&batch(vec![(source("api", Some("eu-1")), events)]))
+        .unwrap();
+    wait(|| core.snapshot().watermark >= 7);
+    core.shutdown().unwrap();
+    drop(core);
+    let core = Core::open(rollup_config(dir.path(), 1000)).unwrap();
+    wait(|| (8..=10).all(|days| rollup_id(&core, ago[days], HOURLY).is_some()));
+    let router = api::router(core.clone());
+
+    let seen: Vec<(i64, f64)> = (4..=10)
+        .map(|days| (epoch(ago[days]) + 43_200, days as f64))
+        .collect();
+    let first = epoch(ago[10]).div_euclid(WEEK) * WEEK;
+    let last = (epoch(ago[3]) - 1).div_euclid(WEEK) * WEEK;
+    let expected: Vec<Option<f64>> = (first..=last)
+        .step_by(WEEK as usize)
+        .map(|bucket| {
+            let hits: Vec<f64> = seen
+                .iter()
+                .filter(|(time, _)| time.div_euclid(WEEK) * WEEK == bucket)
+                .map(|(_, value)| *value)
+                .collect();
+            (!hits.is_empty()).then(|| hits.iter().sum::<f64>())
+        })
+        .collect();
+    let body = query_body("runs", &stamp(ago[10], 0), &stamp(ago[3], 0), 604_800);
+    assert_eq!(
+        series_of(&router, body).await,
+        json!([line("", json!(expected))])
+    );
+    drop(router);
+    core.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn stale_rollup_is_not_used_until_its_day_is_rebuilt() {
+    let (new, old) = (day_ago(10), day_ago(40));
+    let dir = tempfile::tempdir().unwrap();
+    let core = Core::open(rollup_config(dir.path(), 1000)).unwrap();
+    core.journal
+        .accept(&runs_batch(
+            1,
+            &[(stamp(new, 3_600), 1), (stamp(old, 1_800), 5)],
+        ))
+        .unwrap();
+    wait(|| core.snapshot().watermark >= 2);
+    core.shutdown().unwrap();
+    drop(core);
+    let core = Core::open(rollup_config(dir.path(), 1000)).unwrap();
+    wait(|| rollup_id(&core, new, HOURLY).is_some() && rollup_id(&core, old, HALF_DAY).is_some());
+    let new_id = rollup_id(&core, new, HOURLY).unwrap();
+    let old_id = rollup_id(&core, old, HALF_DAY).unwrap();
+    core.shutdown().unwrap();
+    drop(core);
+
+    // Поздние точки обоих суток запечатываются остановкой; пауза час держит поток после первой пересборки.
+    let core = Core::open(config(dir.path(), 1000)).unwrap();
+    core.journal
+        .accept(&runs_batch(
+            3,
+            &[(stamp(new, 7_200), 10), (stamp(old, 3_600), 7)],
+        ))
+        .unwrap();
+    wait(|| {
+        core.snapshot()
+            .active
+            .as_ref()
+            .is_some_and(|active| active.meta.rows == 2)
+    });
+    core.shutdown().unwrap();
+    drop(core);
+    let mut cfg = config(dir.path(), 1000);
+    cfg.series_rollup_pause = Duration::from_secs(3600);
+    let core = Core::open(cfg).unwrap();
+    wait(|| rollup_id(&core, old, HALF_DAY).is_some_and(|id| id != old_id));
+    assert_eq!(rollup_id(&core, new, HOURLY), Some(new_id));
+    let router = api::router(core.clone());
+    // Устаревшие сутки читаются сырыми точками, поэтому видна и поздняя точка.
+    let (nf, nt) = (stamp(new, 0), stamp(new, 86_400));
+    let (of, ot) = (stamp(old, 0), stamp(old, 86_400));
+    assert_eq!(
+        series_of(&router, query_body("runs", &nf, &nt, 3600)).await,
+        json!([line("", sparse(24, &[(1, 1.0), (2, 10.0)]))])
+    );
+    assert_eq!(
+        series_of(&router, query_body("runs", &of, &ot, 43_200)).await,
+        json!([line("", sparse(2, &[(0, 12.0)]))])
+    );
+    drop(router);
+    core.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn open_points_of_a_rolled_up_day_are_read_from_raw_points() {
+    let new = day_ago(10);
+    let dir = tempfile::tempdir().unwrap();
+    let core = Core::open(rollup_config(dir.path(), 1000)).unwrap();
+    core.journal
+        .accept(&runs_batch(1, &[(stamp(new, 3_600), 1)]))
+        .unwrap();
+    wait(|| core.snapshot().watermark >= 1);
+    core.shutdown().unwrap();
+    drop(core);
+    let core = Core::open(rollup_config(dir.path(), 1000)).unwrap();
+    wait(|| rollup_id(&core, new, HOURLY).is_some());
+    core.shutdown().unwrap();
+    drop(core);
+
+    // Агрегат суток актуален, но новая точка лежит в открытом сегменте и агрегатом не покрыта.
+    let core = Core::open(config(dir.path(), 1000)).unwrap();
+    wait(|| rollup_id(&core, new, HOURLY).is_some());
+    core.journal
+        .accept(&runs_batch(2, &[(stamp(new, 7_200), 10)]))
+        .unwrap();
+    wait(|| {
+        core.snapshot()
+            .active
+            .as_ref()
+            .is_some_and(|active| active.meta.rows == 1)
+    });
+    assert_eq!(core.snapshot().series_files.len(), 1);
+    let router = api::router(core.clone());
+    let (nf, nt) = (stamp(new, 0), stamp(new, 86_400));
+    assert_eq!(
+        series_of(&router, query_body("runs", &nf, &nt, 3600)).await,
+        json!([line("", sparse(24, &[(1, 1.0), (2, 10.0)]))])
+    );
+    drop(router);
     core.shutdown().unwrap();
 }
