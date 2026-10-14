@@ -406,14 +406,21 @@ async fn heartbeat_reports_source_spool_and_delivery() {
 
     send_log(&agent, "text/plain", "counted").await;
     next_batch(&mut relay).await;
-    timeout(WAIT, async {
-        while latest(&relay).is_none_or(|body| body["last_delivery_ms_ago"].is_null()) {
+    let busy = timeout(WAIT, async {
+        loop {
+            // Ответ relay отмечается до асинхронного удаления из spool.
+            // Ждём отчёт после обоих шагов, а не только после сетевого ACK.
+            if let Some(body) = latest(&relay)
+                && !body["last_delivery_ms_ago"].is_null()
+                && body["spool"]["records"] == 0
+            {
+                break body;
+            }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .unwrap();
-    let busy = latest(&relay).unwrap();
+    .expect("heartbeat did not report delivery and drained spool");
     assert!(busy["last_record_ms_ago"].as_u64().unwrap() < 5000);
     assert_eq!(busy["delivery_failures"], 1);
     assert!(busy["last_failure_ms_ago"].as_u64().is_some());
