@@ -7,6 +7,8 @@ pub mod catalog;
 pub mod columns;
 pub mod config;
 pub mod index;
+pub mod issue_identity;
+pub mod issues;
 pub mod journal;
 pub mod metrics;
 pub mod model;

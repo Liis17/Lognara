@@ -2,6 +2,7 @@
 use crate::{
     analytics::raw_frame,
     config::Config,
+    issue_identity::{Exception, fingerprint, is_error},
     pattern_identity::{Part, identify},
     query::{self, QueryError},
     storage::{Core, Snapshot},
@@ -36,6 +37,39 @@ pub(crate) struct Known {
     pub last: i64,
 }
 
+/// Lifetime-метаданные проблемы; template/parts — сообщение первого обработанного события.
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct KnownIssue {
+    pub id: String,
+    pub environment: Option<String>,
+    pub service: String,
+    pub action: Option<String>,
+    pub exception_type: Option<String>,
+    pub frames: Vec<String>,
+    pub pattern_id: String,
+    pub template: String,
+    pub parts: Vec<Part>,
+    pub exact: bool,
+    pub first: i64,
+    pub last: i64,
+}
+
+pub(crate) trait Lifetime: Clone + Serialize {
+    fn span(&mut self) -> (&mut i64, &mut i64);
+}
+
+impl Lifetime for Known {
+    fn span(&mut self) -> (&mut i64, &mut i64) {
+        (&mut self.first, &mut self.last)
+    }
+}
+
+impl Lifetime for KnownIssue {
+    fn span(&mut self) -> (&mut i64, &mut i64) {
+        (&mut self.first, &mut self.last)
+    }
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct State {
     pub ready: bool,
@@ -46,6 +80,7 @@ pub(crate) struct State {
     pub complete: bool,
     /// Copy-on-write: публикация копирует только узлы дерева, не метаданные.
     pub known: Arc<BTreeMap<String, Arc<Known>>>,
+    pub issues: Arc<BTreeMap<String, Arc<KnownIssue>>>,
     pub bytes: usize,
 }
 
@@ -127,7 +162,7 @@ impl PatternCatalog {
 }
 
 /// Первый сегмент после checkpoint; watermark ограничен его последней строкой.
-fn next_chunk(snapshot: &Snapshot, checkpoint: u64) -> Option<Snapshot> {
+pub(crate) fn next_chunk(snapshot: &Snapshot, checkpoint: u64) -> Option<Snapshot> {
     let closed = snapshot
         .closed
         .iter()
@@ -167,7 +202,12 @@ impl DiskCatalog {
         let connection = Connection::open(path)?;
         connection.busy_timeout(Duration::from_secs(1))?;
         let version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        ensure!(version <= 1, "unsupported patterns schema");
+        ensure!(version <= 2, "unsupported patterns schema");
+        if version < 2 {
+            // Производные данные v1 без проблем пересобираются из сохранённых raw событий.
+            connection
+                .execute_batch("DROP TABLE IF EXISTS progress; DROP TABLE IF EXISTS patterns;")?;
+        }
         let page_size: usize = connection.query_row("PRAGMA page_size", [], |row| row.get(0))?;
         let page_count: usize = connection.query_row("PRAGMA page_count", [], |row| row.get(0))?;
         ensure!(
@@ -184,7 +224,8 @@ impl DiskCatalog {
             CREATE TABLE IF NOT EXISTS progress(singleton INTEGER PRIMARY KEY CHECK(singleton=1), checkpoint INTEGER NOT NULL, as_of INTEGER NOT NULL, history_from INTEGER, complete INTEGER NOT NULL);
             INSERT OR IGNORE INTO progress VALUES(1,0,0,NULL,1);
             CREATE TABLE IF NOT EXISTS patterns(id TEXT PRIMARY KEY, metadata TEXT NOT NULL);
-            PRAGMA user_version=1;",
+            CREATE TABLE IF NOT EXISTS issues(id TEXT PRIMARY KEY, metadata TEXT NOT NULL);
+            PRAGMA user_version=2;",
         )?;
         let mut state = connection.query_row(
             "SELECT checkpoint,as_of,history_from,complete FROM progress WHERE singleton=1",
@@ -199,25 +240,10 @@ impl DiskCatalog {
                 })
             },
         )?;
-        let mut known = BTreeMap::new();
-        {
-            let mut statement = connection.prepare("SELECT id,metadata FROM patterns")?;
-            let mut rows = statement.query([])?;
-            while let Some(row) = rows.next()? {
-                let id: String = row.get(0)?;
-                let json: String = row.get(1)?;
-                state.bytes = state.bytes.saturating_add(json.len() + id.len() + 256);
-                ensure!(
-                    known.len() < config.pattern_max_entries
-                        && state.bytes <= config.pattern_catalog_bytes,
-                    "pattern catalog exceeds configured limits"
-                );
-                let entry: Known = serde_json::from_str(&json)?;
-                ensure!(entry.id == id, "pattern metadata id mismatch");
-                known.insert(id, Arc::new(entry));
-            }
-        }
+        let known = load(&connection, "patterns", &mut state.bytes, 0, config)?;
+        let issues = load(&connection, "issues", &mut state.bytes, known.len(), config)?;
         state.known = Arc::new(known);
+        state.issues = Arc::new(issues);
         Ok(Self { connection, state })
     }
 
@@ -233,12 +259,21 @@ impl DiskCatalog {
         let config = &core.journal.config;
         let mut next = self.state.clone();
         let mut known = (*next.known).clone();
-        let mut changed = BTreeSet::new();
+        let mut issues = (*next.issues).clone();
+        let (mut changed, mut changed_issues) = (BTreeSet::new(), BTreeSet::new());
         let mut rows = 0_u64;
         let mut stream = raw_frame(core, snapshot, None)
             .await?
             .filter(col("sequence").gt(lit(next.checkpoint)))?
-            .select_columns(&["environment", "service", "level", "message", "timestamp"])?
+            .select_columns(&[
+                "environment",
+                "service",
+                "action",
+                "level",
+                "message",
+                "attributes",
+                "timestamp",
+            ])?
             .execute_stream()
             .await?;
         while let Some(batch) = stream.try_next().await? {
@@ -252,49 +287,67 @@ impl DiskCatalog {
             for row in 0..batch.num_rows() {
                 let environment = optional_string(&batch, "environment", row)?;
                 let service = string(&batch, "service", row)?;
-                let level = LogLevel::from_code(column::<UInt8Array>(&batch, "level")?.value(row))?
-                    .as_str();
+                let action = optional_string(&batch, "action", row)?;
+                let level = LogLevel::from_code(column::<UInt8Array>(&batch, "level")?.value(row))?;
                 let message = string(&batch, "message", row)?;
                 let timestamp = column::<TimestampNanosecondArray>(&batch, "timestamp")?.value(row);
-                let identity = identify(environment, service, level, message);
+                let identity = identify(environment, service, level.as_str(), message);
                 next.history_from = Some(
                     next.history_from
                         .map_or(timestamp, |old| old.min(timestamp)),
                 );
-                if let Some(entry) = known.get_mut(&identity.id) {
-                    if timestamp < entry.first || timestamp > entry.last {
-                        let entry = Arc::make_mut(entry);
-                        entry.first = entry.first.min(timestamp);
-                        entry.last = entry.last.max(timestamp);
-                        changed.insert(identity.id);
-                    }
-                    continue;
-                }
-                let entry = Known {
-                    id: identity.id.clone(),
-                    environment: environment.map(str::to_owned),
-                    service: service.into(),
-                    level: level.into(),
-                    template: identity.template,
-                    parts: identity.parts,
-                    exact: identity.exact,
-                    first: timestamp,
-                    last: timestamp,
+                let issue = if is_error(level) {
+                    let exception = Exception::parse(string(&batch, "attributes", row)?);
+                    fingerprint(environment, service, action, level, &identity, &exception)
+                } else {
+                    None
                 };
-                next.bytes = next.bytes.saturating_add(
-                    serde_json::to_vec(&entry)
-                        .map_err(anyhow::Error::from)?
-                        .len()
-                        + entry.id.len()
-                        + 256,
-                );
-                if known.len() >= config.pattern_max_entries
+                if let Some(issue) = issue {
+                    observe(
+                        &mut issues,
+                        &mut changed_issues,
+                        &mut next.bytes,
+                        timestamp,
+                        issue.id.clone(),
+                        || KnownIssue {
+                            id: issue.id,
+                            environment: environment.map(str::to_owned),
+                            service: service.into(),
+                            action: action.map(str::to_owned),
+                            exception_type: issue.exception_type,
+                            frames: issue.frames,
+                            pattern_id: identity.id.clone(),
+                            template: identity.template.clone(),
+                            parts: identity.parts.clone(),
+                            exact: identity.exact,
+                            first: timestamp,
+                            last: timestamp,
+                        },
+                    )?;
+                }
+                observe(
+                    &mut known,
+                    &mut changed,
+                    &mut next.bytes,
+                    timestamp,
+                    identity.id.clone(),
+                    || Known {
+                        id: identity.id,
+                        environment: environment.map(str::to_owned),
+                        service: service.into(),
+                        level: level.as_str().into(),
+                        template: identity.template,
+                        parts: identity.parts,
+                        exact: identity.exact,
+                        first: timestamp,
+                        last: timestamp,
+                    },
+                )?;
+                if known.len() + issues.len() > config.pattern_max_entries
                     || next.bytes > config.pattern_catalog_bytes
                 {
                     return Err(anyhow::anyhow!("pattern catalog capacity exhausted").into());
                 }
-                known.insert(identity.id.clone(), Arc::new(entry));
-                changed.insert(identity.id);
             }
         }
         // Sequence непрерывны при приёме: недостающие строки означают удаление retention.
@@ -306,14 +359,8 @@ impl DiskCatalog {
         next.ready = true;
         query::check_deadline(deadline)?;
         let transaction = self.connection.transaction().map_err(anyhow::Error::from)?;
-        for id in &changed {
-            transaction
-                .execute(
-                    "INSERT INTO patterns VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET metadata=excluded.metadata",
-                    params![id, serde_json::to_string(&*known[id]).map_err(anyhow::Error::from)?],
-                )
-                .map_err(anyhow::Error::from)?;
-        }
+        store(&transaction, "patterns", &changed, &known)?;
+        store(&transaction, "issues", &changed_issues, &issues)?;
         transaction
             .execute(
                 "UPDATE progress SET checkpoint=?1,as_of=?2,history_from=?3,complete=?4 WHERE singleton=1",
@@ -322,9 +369,84 @@ impl DiskCatalog {
             .map_err(anyhow::Error::from)?;
         transaction.commit().map_err(anyhow::Error::from)?;
         next.known = Arc::new(known);
+        next.issues = Arc::new(issues);
         self.state = next.clone();
         Ok(next)
     }
+}
+
+/// Обновляет lifetime-границы или добавляет запись с учётом её размера.
+fn observe<T: Lifetime>(
+    map: &mut BTreeMap<String, Arc<T>>,
+    changed: &mut BTreeSet<String>,
+    bytes: &mut usize,
+    timestamp: i64,
+    id: String,
+    create: impl FnOnce() -> T,
+) -> Result<(), QueryError> {
+    if let Some(entry) = map.get_mut(&id) {
+        let (first, last) = Arc::make_mut(entry).span();
+        if timestamp < *first || timestamp > *last {
+            *first = (*first).min(timestamp);
+            *last = (*last).max(timestamp);
+            changed.insert(id);
+        }
+        return Ok(());
+    }
+    let entry = create();
+    *bytes = bytes.saturating_add(
+        serde_json::to_vec(&entry)
+            .map_err(anyhow::Error::from)?
+            .len()
+            + id.len()
+            + 256,
+    );
+    map.insert(id.clone(), Arc::new(entry));
+    changed.insert(id);
+    Ok(())
+}
+
+fn load<T: for<'de> Deserialize<'de>>(
+    connection: &Connection,
+    table: &str,
+    bytes: &mut usize,
+    loaded: usize,
+    config: &Config,
+) -> Result<BTreeMap<String, Arc<T>>> {
+    let mut entries = BTreeMap::new();
+    let mut statement = connection.prepare(&format!("SELECT id,metadata FROM {table}"))?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let id: String = row.get(0)?;
+        let json: String = row.get(1)?;
+        *bytes = bytes.saturating_add(json.len() + id.len() + 256);
+        ensure!(
+            loaded + entries.len() < config.pattern_max_entries
+                && *bytes <= config.pattern_catalog_bytes,
+            "pattern catalog exceeds configured limits"
+        );
+        let value: serde_json::Value = serde_json::from_str(&json)?;
+        ensure!(value["id"] == id, "catalog metadata id mismatch");
+        entries.insert(id, Arc::new(serde_json::from_value(value)?));
+    }
+    Ok(entries)
+}
+
+fn store<T: Serialize>(
+    transaction: &rusqlite::Transaction<'_>,
+    table: &str,
+    changed: &BTreeSet<String>,
+    entries: &BTreeMap<String, Arc<T>>,
+) -> Result<(), QueryError> {
+    for id in changed {
+        transaction
+            .execute(
+                &format!("INSERT INTO {table} VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET metadata=excluded.metadata"),
+                params![id, serde_json::to_string(&*entries[id]).map_err(anyhow::Error::from)?],
+            )
+            .map_err(anyhow::Error::from)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn column<'a, T: 'static>(batch: &'a RecordBatch, name: &str) -> Result<&'a T> {

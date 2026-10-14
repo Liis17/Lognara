@@ -29,7 +29,7 @@ use std::{
     time::Instant,
 };
 
-fn interval() -> u64 {
+pub(crate) fn interval() -> u64 {
     300
 }
 
@@ -189,9 +189,9 @@ pub fn id_expr() -> Expr {
     ])
 }
 
-struct Window {
-    filter: PreparedFilter,
-    previous_from: i64,
+pub(crate) struct Window {
+    pub filter: PreparedFilter,
+    pub previous_from: i64,
     text: Option<PreparedText>,
     first: i128,
     last: i128,
@@ -199,7 +199,7 @@ struct Window {
 }
 
 impl Window {
-    fn new(
+    pub(crate) fn new(
         from: &str,
         to: &str,
         filters: &Filters,
@@ -225,7 +225,7 @@ impl Window {
         ((timestamp as i128 - self.first).div_euclid(self.step)) as u32
     }
 
-    fn buckets(&self, counts: &BTreeMap<u32, u64>) -> Vec<Bucket> {
+    pub(crate) fn buckets(&self, counts: &BTreeMap<u32, u64>) -> Vec<Bucket> {
         (self.first..=self.last)
             .step_by(self.step as usize)
             .enumerate()
@@ -236,22 +236,22 @@ impl Window {
             .collect()
     }
 
-    fn bucket_count(&self) -> usize {
+    pub(crate) fn bucket_count(&self) -> usize {
         ((self.last - self.first) / self.step + 1) as usize
     }
 }
 
 #[derive(Default)]
-struct Totals {
-    count: u64,
-    previous: u64,
-    last: i64,
-    buckets: BTreeMap<u32, u64>,
+pub(crate) struct Totals {
+    pub count: u64,
+    pub previous: u64,
+    pub last: i64,
+    pub buckets: BTreeMap<u32, u64>,
 }
 
 impl Totals {
     /// Возвращает true, если появилась новая корзина.
-    fn add(&mut self, window: &Window, timestamp: i64) -> bool {
+    pub(crate) fn add(&mut self, window: &Window, timestamp: i64) -> bool {
         if timestamp < window.filter.from {
             self.previous += 1;
             return false;
@@ -269,14 +269,14 @@ impl Totals {
 }
 
 /// Строка обработанного снимка в границах текущего и прошлого окна.
-struct Row<'a> {
-    batch: &'a RecordBatch,
-    row: usize,
-    timestamp: i64,
-    identity: Identity,
+pub(crate) struct Row<'a> {
+    pub batch: &'a RecordBatch,
+    pub row: usize,
+    pub timestamp: i64,
+    pub identity: Identity,
 }
 
-async fn scan(
+pub(crate) async fn scan(
     core: &Core,
     state: &State,
     window: &Window,
@@ -479,6 +479,28 @@ pub async fn search(core: &Core, request: PatternRequest) -> Result<PatternRespo
     })
 }
 
+/// До трёх новейших примеров по (timestamp, sequence) DESC.
+pub(crate) fn remember(
+    examples: &mut Vec<(i64, u64, StoredEvent)>,
+    row: &Row<'_>,
+) -> Result<(), QueryError> {
+    let sequence = column::<UInt64Array>(row.batch, "sequence")?.value(row.row);
+    let key = (row.timestamp, sequence);
+    if examples.len() < 3
+        || examples
+            .last()
+            .is_some_and(|(timestamp, sequence, _)| key > (*timestamp, *sequence))
+    {
+        let event = columns::decode(&row.batch.slice(row.row, 1))?
+            .pop()
+            .ok_or_else(|| anyhow::anyhow!("missing example row"))?;
+        examples.push((row.timestamp, sequence, event));
+        examples.sort_by_key(|example| std::cmp::Reverse((example.0, example.1)));
+        examples.truncate(3);
+    }
+    Ok(())
+}
+
 pub async fn details(
     core: &Core,
     pattern_id: &str,
@@ -522,7 +544,7 @@ pub async fn details(
                 .collect();
             values = vec![HashMap::new(); names.len()];
         }
-        for (index, variable) in row.identity.variables.into_iter().enumerate() {
+        for (index, variable) in row.identity.variables.iter().enumerate() {
             let counts = values
                 .get_mut(index)
                 .ok_or_else(|| anyhow::anyhow!("pattern variables disagree"))?;
@@ -535,23 +557,9 @@ pub async fn details(
             if distinct > config.pattern_variable_values || bytes > config.pattern_query_bytes {
                 return Err(QueryError::Busy);
             }
-            counts.insert(variable.value, 1);
+            counts.insert(variable.value.clone(), 1);
         }
-        let sequence = column::<UInt64Array>(row.batch, "sequence")?.value(row.row);
-        let key = (row.timestamp, sequence);
-        if examples.len() < 3
-            || examples
-                .last()
-                .is_some_and(|(timestamp, sequence, _)| key > (*timestamp, *sequence))
-        {
-            let event = columns::decode(&row.batch.slice(row.row, 1))?
-                .pop()
-                .ok_or_else(|| anyhow::anyhow!("missing example row"))?;
-            examples.push((row.timestamp, sequence, event));
-            examples.sort_by_key(|example| std::cmp::Reverse((example.0, example.1)));
-            examples.truncate(3);
-        }
-        Ok(())
+        remember(&mut examples, &row)
     })
     .await?;
     if totals.count == 0 {

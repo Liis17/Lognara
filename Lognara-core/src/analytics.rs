@@ -261,10 +261,10 @@ pub(crate) async fn frame(
                 })
             })
             .collect();
-        let column = if field == "pattern_id" {
-            crate::patterns::id_expr()
-        } else {
-            col(field)
+        let column = match field.as_str() {
+            "pattern_id" => crate::patterns::id_expr(),
+            "fingerprint" => crate::issues::id_expr(),
+            _ => col(field),
         };
         predicate = predicate.and(column.in_list(literals?, false));
     }

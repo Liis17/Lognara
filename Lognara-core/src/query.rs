@@ -107,7 +107,7 @@ pub enum QueryError {
     Busy,
     #[error("pattern index is not ready")]
     NotReady,
-    #[error("pattern not found in range")]
+    #[error("not found in range")]
     NotFound,
     #[error("storage query failed")]
     Storage(#[from] anyhow::Error),
@@ -165,6 +165,12 @@ impl PreparedFilter {
                         value.make_ascii_lowercase();
                         if !crate::pattern_identity::valid_id(value) {
                             return Err(QueryError::Invalid("invalid pattern_id".into()));
+                        }
+                    }
+                    "fingerprint" => {
+                        value.make_ascii_lowercase();
+                        if !crate::issue_identity::valid_id(value) {
+                            return Err(QueryError::Invalid("invalid fingerprint".into()));
                         }
                     }
                     "level" => {

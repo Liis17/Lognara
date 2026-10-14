@@ -28,6 +28,7 @@ pub const EXACT_FIELDS: &[&str] = &[
     "parent_span_id",
     "request_id",
     "pattern_id",
+    "fingerprint",
 ];
 
 pub fn schema() -> Schema {
@@ -136,6 +137,17 @@ impl ActiveIndex {
             row.event.level.as_str(),
             &row.event.message,
         );
+        let exception = crate::issue_identity::Exception::from_map(&row.event.attributes);
+        if let Some(issue) = crate::issue_identity::fingerprint(
+            row.source.environment.as_deref(),
+            &row.source.service,
+            row.event.action.as_deref(),
+            row.event.level,
+            &identity,
+            &exception,
+        ) {
+            doc.add_text(field("fingerprint"), issue.id);
+        }
         doc.add_text(field("pattern_id"), identity.id);
         self.writer.add_document(doc)?;
         Ok(())

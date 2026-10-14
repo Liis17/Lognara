@@ -19,6 +19,7 @@ use subtle::ConstantTimeEq;
 use crate::{
     access::{Access, AccessError},
     analytics::{self, GroupRequest, HistogramRequest},
+    issues::{self, IssueDetailsRequest, IssueRequest, RecurrenceRequest},
     journal::{IngestError, Journal},
     patterns::{self, DetailsRequest, PatternRequest},
     query::{self, QueryError, SearchRequest},
@@ -36,6 +37,9 @@ pub fn router(core: Arc<Core>) -> Router {
         .route("/v1/stats/summary", post(summary))
         .route("/v1/patterns/search", post(pattern_search))
         .route("/v1/patterns/{pattern_id}/details", post(pattern_details))
+        .route("/v1/issues/search", post(issue_search))
+        .route("/v1/issues/recurrences", post(issue_recurrences))
+        .route("/v1/issues/{fingerprint}/details", post(issue_details))
         .route_layer(middleware::from_fn_with_state(
             token_hash(&core.journal.config.query_token),
             authorize,
@@ -95,6 +99,39 @@ async fn pattern_details(
         Ok(Json(request)) => {
             run_analytics(&core, patterns::details(&core, &pattern_id, request)).await
         }
+        Err(error) => QueryError::Invalid(error.body_text()).into_response(),
+    }
+}
+
+async fn issue_search(
+    State(core): State<Arc<Core>>,
+    request: Result<Json<IssueRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    match request {
+        Ok(Json(request)) => run_analytics(&core, issues::search(&core, request)).await,
+        Err(error) => QueryError::Invalid(error.body_text()).into_response(),
+    }
+}
+
+async fn issue_details(
+    State(core): State<Arc<Core>>,
+    Path(fingerprint): Path<String>,
+    request: Result<Json<IssueDetailsRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    match request {
+        Ok(Json(request)) => {
+            run_analytics(&core, issues::details(&core, &fingerprint, request)).await
+        }
+        Err(error) => QueryError::Invalid(error.body_text()).into_response(),
+    }
+}
+
+async fn issue_recurrences(
+    State(core): State<Arc<Core>>,
+    request: Result<Json<RecurrenceRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    match request {
+        Ok(Json(request)) => run_analytics(&core, issues::recurrences(&core, request)).await,
         Err(error) => QueryError::Invalid(error.body_text()).into_response(),
     }
 }
