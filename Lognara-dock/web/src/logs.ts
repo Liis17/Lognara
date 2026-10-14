@@ -4,7 +4,7 @@ export const MAX_LIVE_ROWS = 2000;
 export const LOG_LEVELS = ["trace", "debug", "info", "warn", "error", "fatal", "unknown"] as const;
 const EXACT_FIELDS = new Set([
   "id", "environment", "server", "backend", "service", "service_instance", "action",
-  "trace_id", "span_id", "parent_span_id", "request_id", "level", "pattern_id",
+  "trace_id", "span_id", "parent_span_id", "request_id", "level", "pattern_id", "fingerprint",
 ]);
 
 export interface ParsedQuery {
@@ -125,6 +125,10 @@ export function parseQuery(query: string): ParsedQuery {
             if (!/^p1_[a-f0-9]{64}$/iu.test(value)) throw new Error("Некорректный pattern_id: ожидается p1_ и 64 шестнадцатеричных символа.");
             value = value.toLowerCase();
           }
+          if (field === "fingerprint") {
+            if (!/^f1_[a-f0-9]{64}$/iu.test(value)) throw new Error("Некорректный fingerprint: ожидается f1_ и 64 шестнадцатеричных символа.");
+            value = value.toLowerCase();
+          }
           if (["trace_id", "span_id", "parent_span_id"].includes(field)) {
             const length = field === "trace_id" ? 32 : 16;
             if (!new RegExp(`^[a-fA-F0-9]{${length}}$`).test(value)) throw new Error(`Некорректный ${field}.`);
@@ -228,11 +232,15 @@ export function eventsToCsv(events: LogEvent[]): string {
     CSV_FIELDS.map((field) => cell(event[field])).join(","))].join("\r\n") + "\r\n";
 }
 
-/** Сохраняет смысл запроса и заменяет точный фильтр, включая OR-список старых ID. */
 export function withPatternFilter(query: string, patternId: string): string {
+  return withFilter(query, "pattern_id", patternId);
+}
+
+/** Сохраняет смысл запроса и заменяет точный фильтр, включая OR-список старых ID. */
+export function withFilter(query: string, field: "pattern_id" | "fingerprint", id: string): string {
   const parsed = parseQuery(query);
-  const validated = parseQuery(`pattern_id:${patternId}`).filters.pattern_id;
-  const filters = { ...parsed.filters, pattern_id: validated };
+  const validated = parseQuery(`${field}:${id}`).filters[field];
+  const filters = { ...parsed.filters, [field]: validated };
   const clauses = Object.entries(filters).map(([field, values]) => values.length === 1
     ? `${field}:${JSON.stringify(values[0])}`
     : `${field}:(${values.map((value) => JSON.stringify(value)).join(" OR ")})`);

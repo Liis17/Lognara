@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { appendHistory, contextBounds, eventBounds, eventsToCsv, matchesQuery, parseQuery, prependLive, sourceQuery,
-  withPatternFilter } from "./logs.ts";
+  withFilter, withPatternFilter } from "./logs.ts";
 import type { LogEvent } from "./types.ts";
 
 const event = (overrides: Partial<LogEvent> = {}): LogEvent => ({
@@ -142,5 +142,14 @@ test("pattern_id is validated, lowercased and replaces only the pattern filter i
   });
   assert.deepEqual(parseQuery(withPatternFilter("payment failed", id)), {
     filters: { pattern_id: [id] }, text: { query: "payment failed", mode: "all" },
+  });
+});
+
+test("fingerprint is validated, lowercased and replaces only its own filter", () => {
+  const id = `f1_${"ab".repeat(32)}`;
+  assert.deepEqual(parseQuery(`fingerprint:${id.toUpperCase().replace("F1_", "f1_")}`), { filters: { fingerprint: [id] } });
+  assert.throws(() => parseQuery("fingerprint:p1_123"), /fingerprint/);
+  assert.deepEqual(parseQuery(withFilter(`service:api AND fingerprint:f1_${"0".repeat(64)}`, "fingerprint", id)), {
+    filters: { service: ["api"], fingerprint: [id] },
   });
 });

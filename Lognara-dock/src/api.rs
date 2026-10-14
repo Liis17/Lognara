@@ -22,6 +22,7 @@ use crate::auth::{self, LoginLimiter};
 use crate::config::Config;
 use crate::core_client::CoreClient;
 use crate::htpasswd::Htpasswd;
+use crate::issues;
 use crate::live::{self, Live};
 use crate::passkey::{self, Challenges};
 use crate::patterns;
@@ -85,6 +86,8 @@ pub enum ApiError {
     QueryTimeout,
     PatternNotFound,
     PatternsNotReady,
+    IssueNotFound,
+    IssuesNotReady,
 }
 
 impl From<StoreError> for ApiError {
@@ -116,6 +119,8 @@ impl IntoResponse for ApiError {
             Self::QueryTimeout => (StatusCode::GATEWAY_TIMEOUT, "query_timeout"),
             Self::PatternNotFound => (StatusCode::NOT_FOUND, "pattern_not_found"),
             Self::PatternsNotReady => (StatusCode::SERVICE_UNAVAILABLE, "patterns_not_ready"),
+            Self::IssueNotFound => (StatusCode::NOT_FOUND, "issue_not_found"),
+            Self::IssuesNotReady => (StatusCode::SERVICE_UNAVAILABLE, "issues_not_ready"),
         };
         (status, Json(json!({ "error": code }))).into_response()
     }
@@ -146,6 +151,10 @@ pub fn router(app: AppState) -> Router {
             "/patterns/{id}/hide",
             post(patterns::hide).delete(patterns::show),
         )
+        .route("/issues/search", post(issues::search))
+        .route("/issues/{id}/details", post(issues::details))
+        .route("/issues/{id}/resolve", post(issues::resolve))
+        .route("/issues/{id}/reopen", post(issues::reopen))
         .route(
             "/relays",
             get(access::list_relays).post(access::create_relay),

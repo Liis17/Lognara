@@ -1,4 +1,5 @@
-//! SQLite в каталоге данных: сессии и passkey. Каталог блокируется одним процессом.
+//! SQLite в каталоге данных: сессии, passkey, скрытые паттерны и статусы проблем.
+//! Каталог блокируется одним процессом.
 
 use std::fs::{self, File};
 use std::io;
@@ -7,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 const MIGRATIONS: &[&str] = &[
     "
@@ -43,7 +44,55 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (username, pattern_id)
     );
 ",
+    "
+    CREATE TABLE issue_states (
+        fingerprint TEXT PRIMARY KEY,
+        status TEXT NOT NULL CHECK (status IN ('open', 'resolved', 'regressed')),
+        resolved_at INTEGER,
+        resolved_by TEXT,
+        resolved_checkpoint INTEGER,
+        updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE issue_history (
+        id INTEGER PRIMARY KEY,
+        fingerprint TEXT NOT NULL,
+        action TEXT NOT NULL CHECK (action IN ('resolved', 'reopened', 'regressed')),
+        actor TEXT,
+        at INTEGER NOT NULL,
+        event_at TEXT
+    );
+    CREATE INDEX issue_history_fingerprint ON issue_history(fingerprint, id);
+    CREATE TABLE issue_watch (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        checkpoint INTEGER NOT NULL
+    );
+",
 ];
+
+/// Предел строк статусов: Dock передаёт решённые и вернувшиеся fingerprint в core.
+pub const MAX_ISSUE_STATES: i64 = 10_000;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueState {
+    pub status: String,
+    pub resolved_at: Option<i64>,
+    pub resolved_by: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueAction {
+    pub action: String,
+    pub actor: Option<String>,
+    pub at: i64,
+    pub event_at: Option<String>,
+}
+
+/// Совпадение после checkpoint: fingerprint, время первого случая в мс и RFC3339.
+pub struct Recurrence {
+    pub fingerprint: String,
+    pub first_ms: i64,
+    pub first_seen: String,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -113,6 +162,202 @@ impl Store {
                 (username, pattern_id),
             )?;
             Ok(())
+        })
+        .await
+    }
+
+    pub async fn issue_states(
+        &self,
+    ) -> Result<std::collections::HashMap<String, IssueState>, StoreError> {
+        self.call(|conn| {
+            let mut statement = conn.prepare(
+                "SELECT fingerprint, status, resolved_at, resolved_by FROM issue_states",
+            )?;
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get(0)?,
+                        IssueState {
+                            status: row.get(1)?,
+                            resolved_at: row.get(2)?,
+                            resolved_by: row.get(3)?,
+                        },
+                    ))
+                })?
+                .collect()
+        })
+        .await
+    }
+
+    /// Статус и последние 50 действий, новые первыми.
+    pub async fn issue(
+        &self,
+        fingerprint: String,
+    ) -> Result<(Option<IssueState>, Vec<IssueAction>), StoreError> {
+        self.call(move |conn| {
+            let state = conn
+                .query_row(
+                    "SELECT status, resolved_at, resolved_by FROM issue_states WHERE fingerprint = ?1",
+                    [&fingerprint],
+                    |row| {
+                        Ok(IssueState {
+                            status: row.get(0)?,
+                            resolved_at: row.get(1)?,
+                            resolved_by: row.get(2)?,
+                        })
+                    },
+                )
+                .optional()?;
+            let mut statement = conn.prepare(
+                "SELECT action, actor, at, event_at FROM issue_history WHERE fingerprint = ?1 ORDER BY id DESC LIMIT 50",
+            )?;
+            let history = statement
+                .query_map([&fingerprint], |row| {
+                    Ok(IssueAction {
+                        action: row.get(0)?,
+                        actor: row.get(1)?,
+                        at: row.get(2)?,
+                        event_at: row.get(3)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok((state, history))
+        })
+        .await
+    }
+
+    /// Возврат учитывает только публикации после checkpoint наблюдателя на момент решения.
+    /// Повторное решение уже решённой проблемы ничего не меняет; false — лимит строк.
+    pub async fn resolve_issue(
+        &self,
+        fingerprint: String,
+        username: String,
+    ) -> Result<bool, StoreError> {
+        self.call(move |conn| {
+            let tx = conn.transaction()?;
+            let status: Option<String> = tx
+                .query_row(
+                    "SELECT status FROM issue_states WHERE fingerprint = ?1",
+                    [&fingerprint],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            match status.as_deref() {
+                Some("resolved") => return Ok(true),
+                None => {
+                    let count: i64 =
+                        tx.query_row("SELECT count(*) FROM issue_states", [], |row| row.get(0))?;
+                    if count >= MAX_ISSUE_STATES {
+                        return Ok(false);
+                    }
+                }
+                Some(_) => {}
+            }
+            let checkpoint: i64 = tx
+                .query_row("SELECT checkpoint FROM issue_watch", [], |row| row.get(0))
+                .optional()?
+                .unwrap_or(0);
+            let now = now_ms();
+            tx.execute(
+                "INSERT INTO issue_states(fingerprint, status, resolved_at, resolved_by, resolved_checkpoint, updated_at)
+                 VALUES (?1, 'resolved', ?2, ?3, ?4, ?2)
+                 ON CONFLICT(fingerprint) DO UPDATE SET status = 'resolved', resolved_at = ?2,
+                 resolved_by = ?3, resolved_checkpoint = ?4, updated_at = ?2",
+                (&fingerprint, now, &username, checkpoint),
+            )?;
+            tx.execute(
+                "INSERT INTO issue_history(fingerprint, action, actor, at) VALUES (?1, 'resolved', ?2, ?3)",
+                (&fingerprint, &username, now),
+            )?;
+            tx.commit()?;
+            Ok(true)
+        })
+        .await
+    }
+
+    /// Открывает решённую проблему; для остальных статусов ничего не меняет.
+    pub async fn reopen_issue(
+        &self,
+        fingerprint: String,
+        username: String,
+    ) -> Result<(), StoreError> {
+        self.call(move |conn| {
+            let tx = conn.transaction()?;
+            let now = now_ms();
+            let changed = tx.execute(
+                "UPDATE issue_states SET status = 'open', resolved_at = NULL, resolved_by = NULL,
+                 resolved_checkpoint = NULL, updated_at = ?2 WHERE fingerprint = ?1 AND status = 'resolved'",
+                (&fingerprint, now),
+            )?;
+            if changed > 0 {
+                tx.execute(
+                    "INSERT INTO issue_history(fingerprint, action, actor, at) VALUES (?1, 'reopened', ?2, ?3)",
+                    (&fingerprint, &username, now),
+                )?;
+            }
+            tx.commit()
+        })
+        .await
+    }
+
+    /// Checkpoint наблюдателя и решённые проблемы с моментом решения в мс.
+    pub async fn issue_watch(&self) -> Result<(Option<u64>, Vec<(String, i64)>), StoreError> {
+        self.call(|conn| {
+            let checkpoint: Option<i64> = conn
+                .query_row("SELECT checkpoint FROM issue_watch", [], |row| row.get(0))
+                .optional()?;
+            let mut statement = conn.prepare(
+                "SELECT fingerprint, resolved_at FROM issue_states WHERE status = 'resolved' ORDER BY fingerprint",
+            )?;
+            let resolved = statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok((checkpoint.map(|checkpoint| checkpoint as u64), resolved))
+        })
+        .await
+    }
+
+    /// Переводит решённые в «возвращается» и сдвигает checkpoint одной транзакцией.
+    /// Проблема, решённая позже `after` или позже случая, не меняется.
+    pub async fn record_recurrences(
+        &self,
+        after: u64,
+        watermark: u64,
+        found: Vec<Recurrence>,
+    ) -> Result<Vec<String>, StoreError> {
+        self.call(move |conn| {
+            let tx = conn.transaction()?;
+            let now = now_ms();
+            let mut regressed = vec![];
+            for item in found {
+                let changed = tx.execute(
+                    "UPDATE issue_states SET status = 'regressed', updated_at = ?4
+                     WHERE fingerprint = ?1 AND status = 'resolved'
+                     AND resolved_checkpoint <= ?2 AND resolved_at <= ?3",
+                    (&item.fingerprint, after as i64, item.first_ms, now),
+                )?;
+                if changed > 0 {
+                    tx.execute(
+                        "INSERT INTO issue_history(fingerprint, action, at, event_at) VALUES (?1, 'regressed', ?2, ?3)",
+                        (&item.fingerprint, now, &item.first_seen),
+                    )?;
+                    regressed.push(item.fingerprint);
+                }
+            }
+            if watermark < after {
+                // Core начал хранилище заново: прежние sequence больше не сравнимы.
+                tx.execute(
+                    "UPDATE issue_states SET resolved_checkpoint = ?1 WHERE resolved_checkpoint > ?1",
+                    [watermark as i64],
+                )?;
+            }
+            tx.execute(
+                "INSERT INTO issue_watch(singleton, checkpoint) VALUES (1, ?1)
+                 ON CONFLICT(singleton) DO UPDATE SET checkpoint = ?1",
+                [watermark as i64],
+            )?;
+            tx.commit()?;
+            Ok(regressed)
         })
         .await
     }

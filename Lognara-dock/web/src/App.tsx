@@ -3,6 +3,7 @@ import { Navigate, NavLink, Route, Routes, useNavigate } from "react-router";
 import { api, type Me } from "./api";
 import Access from "./pages/Access";
 import Analytics from "./pages/Analytics";
+import Errors from "./pages/Errors";
 import Login from "./pages/Login";
 import Logs from "./pages/Logs";
 import Settings from "./pages/Settings";
@@ -48,6 +49,7 @@ export default function App() {
         </NavLink>
         <nav aria-label="Разделы">
           <NavLink to="/logs">Логи</NavLink>
+          <NavLink to="/errors">Ошибки</NavLink>
           <NavLink to="/analytics">Аналитика</NavLink>
           <NavLink to="/access">Подключения</NavLink>
           <NavLink to="/settings">Настройки</NavLink>
@@ -58,6 +60,7 @@ export default function App() {
       <main>
         <Routes>
           <Route path="/logs" element={<Logs onUnauthorized={() => setMe(null)} />} />
+          <Route path="/errors" element={<Errors onUnauthorized={() => setMe(null)} />} />
           <Route path="/analytics" element={<Analytics onUnauthorized={() => setMe(null)} />} />
           <Route path="/access" element={<Access onUnauthorized={() => setMe(null)} />} />
           <Route path="/settings" element={<Settings onChange={refresh} />} />

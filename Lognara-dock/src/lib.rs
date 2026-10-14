@@ -8,6 +8,7 @@ pub mod auth;
 pub mod config;
 pub mod core_client;
 pub mod htpasswd;
+pub mod issues;
 pub mod live;
 pub mod passkey;
 pub mod patterns;
@@ -29,6 +30,7 @@ pub async fn run(
     shutdown: CancellationToken,
 ) -> io::Result<()> {
     let stop = app.shutdown.clone();
+    tokio::spawn(issues::watch(app.clone()));
     axum::serve(listener, api::router(app))
         .with_graceful_shutdown(async move {
             shutdown.cancelled().await;

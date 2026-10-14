@@ -100,3 +100,26 @@ export interface PatternDetailsResponse {
     values: { value: string; count: number }[]; other_count: number }[];
   examples: LogEvent[];
 }
+
+export type IssueStatus = "open" | "new" | "regressed" | "resolved";
+export interface IssueState {
+  status: "open" | "resolved" | "regressed"; resolved_at: string | null; resolved_by: string | null;
+}
+export interface Issue {
+  fingerprint: string; environment: string | null; service: string; action: string | null;
+  exception_type: string | null; frames: string[]; pattern_id: string;
+  template: string; parts: PatternPart[]; exact: boolean;
+  count: number; servers: number; is_new: boolean | null; first_seen: string; last_seen: string;
+  buckets: HistogramBucket[]; state: IssueState;
+}
+export interface IssueResponse {
+  algorithm_version: 1; as_of: string; watermark: number; core_watermark: number;
+  history_from: string | null; history_complete: boolean;
+  counts: { open: number; new: number | null; regressed: number; resolved: number };
+  status_events: number; issues: Issue[];
+}
+export interface IssueDetailsResponse {
+  as_of: string; issue: Omit<Issue, "state">; servers: { value: string; count: number }[]; other_servers: number;
+  examples: LogEvent[]; state: IssueState;
+  history: { action: "resolved" | "reopened" | "regressed"; actor: string | null; at: string; event_at: string | null }[];
+}

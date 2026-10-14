@@ -156,7 +156,7 @@ pub struct VariableValue {
     pub count: u64,
 }
 
-fn required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+pub(crate) fn required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: Deserialize<'de>,

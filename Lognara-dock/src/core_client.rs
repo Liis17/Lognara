@@ -11,6 +11,10 @@ use time::format_description::well_known::Rfc3339;
 use url::Url;
 
 use crate::config::Config;
+use crate::issues::{
+    CoreSearchRequest, DetailsRequest as IssueDetailsRequest, IssueDetails, IssueResponse,
+    RecurrenceRequest, RecurrenceResponse,
+};
 use crate::patterns::{DetailsRequest, DetailsResponse, PatternRequest, PatternResponse};
 use crate::query::{
     DurationStats, GroupRequest, GroupResponse, HistogramRequest, HistogramResponse, SearchRequest,
@@ -33,7 +37,7 @@ pub enum CoreQueryError {
     Timeout,
     #[error("unexpected core response")]
     Unexpected,
-    #[error("pattern not found in range")]
+    #[error("not found in range")]
     NotFound,
     #[error("pattern index is not ready")]
     NotReady,
@@ -268,6 +272,56 @@ impl CoreClient {
             .push("details");
         let reply: DetailsResponse = self.query(self.http.post(url).json(request)).await?;
         if !reply.valid(pattern_id) {
+            return Err(CoreQueryError::Unexpected);
+        }
+        Ok(reply)
+    }
+
+    /// Проблемы выбранного статуса; core получает статусы Dock в запросе.
+    pub async fn issues(
+        &self,
+        request: &CoreSearchRequest,
+    ) -> Result<IssueResponse, CoreQueryError> {
+        let url = self
+            .query_url
+            .join("issues/search")
+            .expect("core url joins path");
+        let reply: IssueResponse = self.query(self.http.post(url).json(request)).await?;
+        if !reply.valid(request) {
+            return Err(CoreQueryError::Unexpected);
+        }
+        Ok(reply)
+    }
+
+    pub async fn issue_details(
+        &self,
+        fingerprint: &str,
+        request: &IssueDetailsRequest,
+    ) -> Result<IssueDetails, CoreQueryError> {
+        let mut url = self.query_url.join("issues/").expect("core url joins path");
+        url.path_segments_mut()
+            .expect("core url has path segments")
+            .pop_if_empty()
+            .push(fingerprint)
+            .push("details");
+        let reply: IssueDetails = self.query(self.http.post(url).json(request)).await?;
+        if !reply.valid(fingerprint) {
+            return Err(CoreQueryError::Unexpected);
+        }
+        Ok(reply)
+    }
+
+    /// Случаи решённых проблем после checkpoint наблюдателя, по одному сегменту core.
+    pub async fn issue_recurrences(
+        &self,
+        request: &RecurrenceRequest,
+    ) -> Result<RecurrenceResponse, CoreQueryError> {
+        let url = self
+            .query_url
+            .join("issues/recurrences")
+            .expect("core url joins path");
+        let reply: RecurrenceResponse = self.query(self.http.post(url).json(request)).await?;
+        if !reply.valid(request) {
             return Err(CoreQueryError::Unexpected);
         }
         Ok(reply)

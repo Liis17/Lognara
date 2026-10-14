@@ -3,7 +3,7 @@ import { Link, useSearchParams } from "react-router";
 import { api, ApiError, errorText } from "../api";
 import { withPatternFilter } from "../logs";
 import type { ParsedQuery } from "../logs";
-import type { MessagePattern, PatternDetailsResponse, PatternRequest, PatternResponse, PatternSort } from "../types";
+import type { HistogramBucket, MessagePattern, PatternDetailsResponse, PatternPart, PatternRequest, PatternResponse, PatternSort } from "../types";
 
 const number = new Intl.NumberFormat("ru-RU");
 const percent = new Intl.NumberFormat("ru-RU", { style: "percent", maximumFractionDigits: 1 });
@@ -12,19 +12,20 @@ const stamp = (value: string) => date.format(new Date(value));
 const growth = (pattern: MessagePattern) => pattern.previous_count === 0 ? "Нет в прошлом окне" :
   `${(pattern.growth_percent ?? 0) > 0 ? "+" : ""}${number.format(pattern.growth_percent ?? 0)}%`;
 
-function Template({ pattern }: { pattern: MessagePattern }) {
-  return <code className="pattern-template">{pattern.parts.map((part, index) => part.kind === "literal"
+export function Template({ parts }: { parts: PatternPart[] }) {
+  return <code className="pattern-template">{parts.map((part, index) => part.kind === "literal"
     ? <Fragment key={index}>{part.text}</Fragment>
     : <var key={index} className="pattern-variable" title={part.variable_type}>{`<${part.name}>`}</var>)}</code>;
 }
 
-function Sparkline({ pattern }: { pattern: MessagePattern }) {
-  const peak = Math.max(1, ...pattern.buckets.map((bucket) => bucket.count));
-  const points = pattern.buckets.map((bucket, index) => `${pattern.buckets.length > 1 ? index / (pattern.buckets.length - 1) * 120 : 60},${27 - bucket.count / peak * 25}`).join(" ");
-  return <svg className={`pattern-spark level-${pattern.level}`} viewBox="0 0 120 28" role="img"
-    aria-label={`Динамика: ${number.format(pattern.count)} событий, ${pattern.buckets.length} корзин`}>
-    <title>{pattern.buckets.map((bucket) => `${bucket.timestamp}: ${bucket.count}`).join("; ")}</title>
-    {pattern.buckets.length === 1 ? <circle cx="60" cy={27 - pattern.buckets[0].count / peak * 25} r="2" /> :
+/** tone — класс уровня, задающий цвет линии. */
+export function Sparkline({ buckets, count, tone }: { buckets: HistogramBucket[]; count: number; tone: string }) {
+  const peak = Math.max(1, ...buckets.map((bucket) => bucket.count));
+  const points = buckets.map((bucket, index) => `${buckets.length > 1 ? index / (buckets.length - 1) * 120 : 60},${27 - bucket.count / peak * 25}`).join(" ");
+  return <svg className={`pattern-spark level-${tone}`} viewBox="0 0 120 28" role="img"
+    aria-label={`Динамика: ${number.format(count)} событий, ${buckets.length} корзин`}>
+    <title>{buckets.map((bucket) => `${bucket.timestamp}: ${bucket.count}`).join("; ")}</title>
+    {buckets.length === 1 ? <circle cx="60" cy={27 - buckets[0].count / peak * 25} r="2" /> :
       <polyline points={points} fill="none" strokeWidth="2" strokeLinejoin="round" />}
   </svg>;
 }
@@ -166,12 +167,12 @@ export default function Patterns({ from, to, range, q, query, error, intervalSec
             <td><span className={`level level-${pattern.level}`}>{pattern.level.toUpperCase()}</span></td>
             <td className="pattern-message"><button type="button" className="row-button" aria-expanded={selected === pattern.pattern_id}
               onClick={() => setSelected((current) => current === pattern.pattern_id ? null : pattern.pattern_id)}>
-              <span className="caret" aria-hidden="true">{selected === pattern.pattern_id ? "▾" : "▸"}</span><Template pattern={pattern} />
+              <span className="caret" aria-hidden="true">{selected === pattern.pattern_id ? "▾" : "▸"}</span><Template parts={pattern.parts} />
             </button><div className="pattern-source">{pattern.service}{hidden.includes(pattern.pattern_id) && <span className="chip">Скрыт</span>}
               {pattern.is_new === true && <span className="pattern-new">Новый</span>}{pattern.is_new === null && <span className="muted">Новизна неизвестна</span>}</div></td>
             <td className="pattern-number">{number.format(pattern.count)}</td>
             <td className="pattern-secondary"><div className="pattern-share"><span className="pattern-track" aria-hidden="true"><i style={{ width: `${pattern.share * 100}%` }} /></span><span>{percent.format(pattern.share)}</span></div></td>
-            <td className="pattern-secondary pattern-growth">{growth(pattern)}</td><td className="pattern-secondary"><Sparkline pattern={pattern} /></td>
+            <td className="pattern-secondary pattern-growth">{growth(pattern)}</td><td className="pattern-secondary"><Sparkline buckets={pattern.buckets} count={pattern.count} tone={pattern.level} /></td>
           </tr>
           {selected === pattern.pattern_id && <tr className="pattern-details"><td colSpan={6}>
             {detailsLoading && <p role="status">Загружаем детали паттерна…</p>}
