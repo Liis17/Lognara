@@ -150,7 +150,7 @@ curl -X POST http://127.0.0.1:7402/v1/logs/search \
 |--------|-------------------|--------------|------------------------|
 | agent | `127.0.0.1:7400` | `LOGNARA_SERVICE`, `LOGNARA_SERVER`, `LOGNARA_BACKEND`, `LOGNARA_RELAY_TOKEN` | `LOGNARA_RELAY_URL`, `LOGNARA_BATCH_SIZE` (1000), `LOGNARA_FLUSH_INTERVAL_MS` (5000) |
 | relay | `127.0.0.1:7401` | `LOGNARA_CORE_URL`, `LOGNARA_CORE_TOKEN`, `LOGNARA_RELAY_TOKEN` | `LOGNARA_SPOOL_DIR`, `LOGNARA_SPOOL_MAX_MB` (1024), `LOGNARA_FLUSH_INTERVAL_MS` (60000), `LOGNARA_BATCH_SIZE` (10000) |
-| core | `127.0.0.1:7402` | `LOGNARA_INGEST_TOKEN`, `LOGNARA_QUERY_TOKEN` | `LOGNARA_DATA_DIR`, `LOGNARA_RETENTION_SECONDS` (604800), `LOGNARA_ADMIN_TOKEN` (не задан), `LOGNARA_SERIES_COMPACT_QUIET_SECONDS` (3600) |
+| core | `127.0.0.1:7402` | `LOGNARA_INGEST_TOKEN`, `LOGNARA_QUERY_TOKEN` | `LOGNARA_DATA_DIR`, `LOGNARA_RETENTION_SECONDS` (604800), `LOGNARA_ADMIN_TOKEN` (не задан), `LOGNARA_SERIES_COMPACT_QUIET_SECONDS` (3600), `LOGNARA_SERIES_RAW_DAYS` (7), `LOGNARA_SERIES_HOURLY_DAYS` (35), `LOGNARA_SERIES_ROLLUP_HOUR_UTC` (0), `LOGNARA_SERIES_ROLLUP_PAUSE_MS` (1000) |
 | dock | `127.0.0.1:7403` | `LOGNARA_DOCK_PUBLIC_URL`, `LOGNARA_DOCK_CORE_URL`, `LOGNARA_DOCK_CORE_TOKEN` | `LOGNARA_DOCK_HTPASSWD_FILE`, `LOGNARA_DOCK_DATA_DIR`, `LOGNARA_DOCK_SESSION_TTL_SECONDS` (43200), `LOGNARA_DOCK_CORE_ADMIN_TOKEN` (не задан) |
 
 <details>
@@ -300,9 +300,27 @@ volumes:
 - Точки правил сворачиваются только при совпавшем id события. Если приложение повторяет запрос и агент присваивает новые id, такая точка учитывается дважды.
 - Ответ содержит не больше 20 серий (остальные не возвращаются, признака в ответе нет) и не больше 10000 корзин; шаг от 1 секунды до 7 дней.
 
-**Ограничение: годовые графики медленные.** Свёрток по минуте, часу и суткам нет, каждый график считается по сырым точкам. На синтетическом стенде [`examples/series_bench.rs`](Lognara-core/examples/series_bench.rs) (3 сервиса, по 3 счётчика на 2 экземпляра, точка каждые 10 секунд, год: 56,8 млн точек, 27,1 MiB в `metrics/`) год с шагом 1 день считался 15-16 секунд, 30 дней с шагом 1 час около 0,36 секунды, сутки с шагом 1 минута около 12 миллисекунд. Измерения сделаны на хосте разработки (macOS, release).
+**Суточные агрегаты.** Фоновый поток core `lognara-rollups` строит агрегаты по суткам UTC из файлов `metrics/` и пишет их в `rollups/1h/` (корзины по часу) и `rollups/12h/` (корзины по 12 часов). Сырые точки остаются источником истины и не удаляются. Сутки, закончившиеся менее 7 суток назад, агрегата не имеют и читаются сырыми точками. Более старые сутки имеют агрегат:
 
-Подробности и счётчики `lognara_core_series_*`: [эксплуатация core](Lognara-core/docs/operations.md).
+- сутки, закончившиеся 7-35 суток назад (`LOGNARA_SERIES_HOURLY_DAYS`, по умолчанию 35), - почасовые агрегаты;
+- сутки старше 35 суток - агрегаты по 12 часов.
+
+Запрос берёт агрегат вместо точек, если сутки целиком внутри окна, шаг кратен корзине агрегата, агрегат актуален (отпечаток файлов точек суток совпадает) и в открытом сегменте нет точек этих суток. Остальное читается из сырых точек, результаты складываются. Поздние точки или слияние файлов делают сутки устаревшими, и они пересобираются фоном. Ночная перепроверка: раз в сутки в 03:00 по Москве (`LOGNARA_SERIES_ROLLUP_HOUR_UTC`, по умолчанию 0 UTC) все существующие агрегаты пересобираются заново, по одним суткам за проход с паузой `LOGNARA_SERIES_ROLLUP_PAUSE_MS`.
+
+Изменение определения метрики (вид, агрегация, единица измерения) не требует пересчёта: агрегаты хранят сумму, количество, минимум, максимум и последнее значение по корзинам, а вид и агрегация применяются при запросе.
+
+Замер на синтетическом стенде [`examples/series_bench.rs`](Lognara-core/examples/series_bench.rs) (release, macOS, 3 сервиса по 3 счётчика, 2 экземпляра, точка каждые 10 секунд, 365 дней: 56 764 800 точек, 365 файлов, 27,1 MiB в `metrics/`). Замер вызывает `series_query::query` напрямую, без HTTP и dock:
+
+| Запрос | Только сырые точки | С агрегатами |
+|--------|--------------------|--------------|
+| 1 год, шаг 1 день | 15,1 с | около 55 мс |
+| 1 год, шаг 1 день, `split: instance` | 15,7 с | около 54 мс |
+| 30 дней, шаг 1 час | 340 мс | около 48 мс |
+| 24 часа, шаг 1 минута | около 11 мс | без изменений |
+
+Построение агрегатов для 359 суток заняло 18,3 с, `rollups/` занимает 1,7 MiB. Dock для года выбирает шаг 12 часов (730 корзин); такой запрос на стенде не измерялся. Измерения сделаны на хосте разработки.
+
+Подробности, счётчики `lognara_core_series_rollups_built_total` и `lognara_core_series_rollup_errors_total`, параметры: [эксплуатация core](Lognara-core/docs/operations.md).
 
 ## HTTP API core
 
@@ -313,8 +331,8 @@ volumes:
 | `GET /v1/traces/{trace_id}` | query | события trace по возрастанию времени |
 | `POST /v1/stats/histogram` | query | число событий по временным корзинам |
 | `POST /v1/stats/group-by` | query | число событий по 1-2 полям |
-| `GET /v1/series` | query | список метрик с датами первой и последней точки |
-| `POST /v1/series/query` | query | значения серии по корзинам времени |
+| `GET /v1/series` | query | список метрик с датами первой и последней точки и окружениями (`environments`) |
+| `POST /v1/series/query` | query | значения серии по корзинам времени; необязательные `origin` и `environment` (без него сумма по всем окружениям) |
 | `/v1/admin/series/*` | admin | определения метрик и предпросмотр правила; без `LOGNARA_ADMIN_TOKEN` отвечают 404 |
 | `GET /metrics` | query | метрики Prometheus |
 | `GET /health/live`, `GET /health/ready` | нет | живость и готовность |
@@ -325,8 +343,8 @@ volumes:
 
 | Метод и путь | Доступ | Назначение |
 |--------------|--------|------------|
-| `GET /api/series` | сессия | список метрик core |
-| `POST /api/series/query` | сессия | значения серии по корзинам |
+| `GET /api/series` | сессия | список метрик core с окружениями |
+| `POST /api/series/query` | сессия | значения серии по корзинам; тело передаётся core, включая `environment` |
 | `GET`, `POST /api/series/definitions`; `PUT`, `DELETE /api/series/definitions/{id}`; `POST /api/series/preview` | сессия и `LOGNARA_DOCK_CORE_ADMIN_TOKEN` | определения и предпросмотр; без токена отвечают `404 admin_disabled` |
 
 Коды ошибок dock для метрик (JSON `{"error": "<код>"}`):

@@ -38,7 +38,7 @@ Lognara-dock/
     src/App.tsx               проверка /api/me, маршруты /login, /logs, /metrics, /settings
     src/pages/Login.tsx       пароль и кнопка passkey
     src/pages/Logs.tsx        EventSource, 2000 строк, пауза, раскрытие события
-    src/pages/Metrics.tsx     список метрик, диапазон и разбиение, график, кнопки редактора при series_admin
+    src/pages/Metrics.tsx     список метрик, диапазон, разбиение и окружение, график, кнопки редактора при series_admin
     src/pages/MetricEditor.tsx форма определения, предпросмотр правила, сохранение и удаление
     src/components/Chart.tsx  график uPlot: восемь категориальных цветов, остальные серые
     src/pages/Settings.tsx    смена пароля, список и добавление passkey
