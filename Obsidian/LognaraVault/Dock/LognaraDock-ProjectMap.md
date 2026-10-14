@@ -23,7 +23,7 @@ Lognara-dock/
     account.rs                /api/me, смена пароля, check_current_password
     passkey.rs                Webauthn, Challenges, вход и регистрация, список, удаление
     core_client.rs            query история/Trace/аналитика и admin CRUD relay/агентов
-    query.rs                  typed DTO и авторизованные proxy search/trace/histogram/group-by
+    query.rs                  typed DTO и авторизованные proxy search/trace/histogram/group-by/summary
     live.rs                   Live (poller + broadcast), SSE stream
   tests/
     common/mod.rs             TestApp, запросы, htpasswd с cost 4
@@ -46,7 +46,7 @@ Lognara-dock/
     src/App.tsx               проверка /api/me, маршруты /login, /logs, /analytics, /access, /settings
     src/pages/Login.tsx       пароль и кнопка passkey
     src/pages/Logs.tsx        история/cursor/Trace, URL, отдельный Live, детали, экспорт
-    src/pages/Analytics.tsx   периоды/сервисы, count/ERROR/сравнение, переход в логи
+    src/pages/Analytics.tsx   единая сводка, stacked levels, p95/coverage/actions, сравнение и переход в логи
     src/pages/Access.tsx      профили relay/агентов, создание, одноразовый токен, удаление
     src/pages/Settings.tsx    смена пароля, список и добавление passkey
     playwright.config.ts     Chromium, Vite webServer и сценарии tests/dock.spec.ts

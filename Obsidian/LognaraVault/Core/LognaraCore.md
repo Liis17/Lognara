@@ -80,7 +80,7 @@ WAL хранит одну версионированную запись на ф�
 
 ## Аналитика и retention
 
-DataFusion объединяет только выбранные по времени Parquet-файлы и Arrow-батчи одного снимка. Общий GreedyMemoryPool — 1 GiB, два запроса одновременно, timeout 30 секунд. SQL извне не принимается. Histogram — 1..86400 секунд, не больше 10000 корзин, UTC floor, нули заполнены; диапазон [from,to). Group-by — одно/два разных измерения инфраструктуры, action или level, count DESC и стабильные ключи, limit 1..1000. Фильтры общие с поиском, текст и attributes не допускаются.
+DataFusion объединяет только выбранные по времени Parquet-файлы и Arrow-батчи одного снимка. Общий GreedyMemoryPool — 1 GiB, два запроса одновременно, timeout 30 секунд. SQL извне не принимается. Histogram — 1..86400 секунд, не больше 10000 корзин, UTC floor, нули заполнены; диапазон [from,to). Group-by — одно/два разных измерения инфраструктуры, action или level, count DESC и стабильные ключи, limit 1..1000. У старых histogram/group-by фильтры общие с поиском, текст и attributes не допускаются. Новый summary принимает text и читает числовой duration_ms из JSON без миграции сегментов.
 
 Retention смотрит max core_received_at, исключает expired сегменты из новых снимков, повышает поколение курсоров, затем ждёт Arc-ссылки текущих читателей и удаляет файлы через состояние deleting. При старте незавершённое удаление продолжается. Receipts живут минимум 7 суток и пока живут строки.
 
@@ -88,6 +88,12 @@ Retention смотрит max core_received_at, исключает expired сег
 |---|---|
 | `analytics::histogram(core, request): Result<HistogramResponse>` | Считает временные корзины через типизированные выражения DataFusion. |
 | `analytics::group_by(core, request): Result<GroupResponse>` | Считает группы по разрешённым измерениям. |
+| `PreparedText::new(text: &TextQuery): Result<PreparedText>` | Проверяет и токенизирует общее текстовое условие поиска/аналитики. |
+| `PreparedText::matches(message: &str): bool` | Сопоставляет all/phrase с тем же tokenizer, что у Tantivy. |
+| `query::search_snapshot(core, snapshot, request, ascending, deadline): Result<SearchResponse>` | Получает страницу из заданного снимка; обычный search использует тот же метод. |
+| `summary::summary(core: Arc<Core>, request: SummaryRequest): Result<SummaryResponse>` | Считает согласованную сводку и необязательную первую страницу. |
+
+`POST /v1/stats/summary`: общий Snapshot для total, stacked buckets (семь уровней), levels, top-5 ERROR services, p95 duration_ms/coverage, top-20 action groups и первой страницы DESC. Cursor страницы фиксирует тот же watermark; новый запрос создаёт новый снимок. `duration_ms` читается из старых attributes как конечное неотрицательное JSON-число; строки и отсутствие не измерены, null p95 при measured=0. Метод приблизительный t-digest с линейным масштабированием экстремальных чисел против переполнения центроидов; count action означает события. Данные сканируются потоково, агрегаты выполняются последовательно в общем DataFusion memory pool. Summary сам удерживает analytics permit; при отмене HTTP blocking-поиск удерживает свою Arc-копию permit до завершения. Контракт: [DockSummaryContract](../../../docs/DockSummaryContract.md).
 
 ## Эксплуатация и проверки
 

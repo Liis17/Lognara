@@ -311,6 +311,7 @@ CI входит в GHCR с автоматически выданным `GITHUB_T
 | `GET /v1/traces/{trace_id}` | query | события trace по возрастанию времени |
 | `POST /v1/stats/histogram` | query | число событий по временным корзинам |
 | `POST /v1/stats/group-by` | query | число событий по 1-2 полям |
+| `POST /v1/stats/summary` | query | total, график по уровням, текстовые условия, p95 duration_ms и первая страница в одном снимке |
 | `GET /metrics` | query | метрики Prometheus |
 | `GET /health/live`, `GET /health/ready` | нет | живость и готовность |
 

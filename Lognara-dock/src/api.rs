@@ -133,6 +133,7 @@ pub fn router(app: AppState) -> Router {
         .route("/traces/{trace_id}", get(query::trace))
         .route("/stats/histogram", post(query::histogram))
         .route("/stats/group-by", post(query::group_by))
+        .route("/stats/summary", post(query::summary))
         .route(
             "/relays",
             get(access::list_relays).post(access::create_relay),

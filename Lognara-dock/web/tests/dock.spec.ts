@@ -37,17 +37,44 @@ async function fixture(page: Page, initiallyAuthenticated = true, dataset = even
     if (path === '/api/account/password') return reply({});
     if (path === '/api/relays') return reply({ relays: [{ id: 1, name: 'relay-eu', created_at: new Date(now).toISOString() }] });
     if (path === '/api/agents') return reply({ agents: [] });
-    if (path === '/api/logs/search') {
+    function matchingRows() {
       let rows = dataset;
       for (const [field, values] of Object.entries(body.filters ?? {})) {
         rows = rows.filter((event) => (values as string[]).includes(String(event[field as keyof typeof event])));
       }
       if (body.text) rows = rows.filter((event) => event.message.toLowerCase().includes(body.text.query.toLowerCase()));
       if (body.filters?.id && body.limit === 1000) rows = rows.filter(event => event.timestamp === body.from);
+      return rows;
+    }
+    if (path === '/api/logs/search') {
+      const rows = matchingRows();
       const offset = body.cursor === 'page-2' ? 50 : 0;
       return reply({ events: rows.slice(offset, offset + body.limit), next_cursor: offset + body.limit < rows.length ? 'page-2' : null, as_of: new Date(now).toISOString() });
     }
     if (path.startsWith('/api/traces/')) return reply({ events: dataset.slice(0, 4).reverse(), next_cursor: null, as_of: new Date(now).toISOString() });
+    if (path === '/api/stats/summary') {
+      const rows = matchingRows();
+      const levelNames = ['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'unknown'];
+      const levels = body.search_limit
+        ? Object.fromEntries(levelNames.map(level => [level, rows.filter(event => event.level === level).length]))
+        : { info: 697, warn: 210, error: 70, fatal: 20, debug: 1, trace: 1, unknown: 1 };
+      const total = Object.values(levels).reduce((sum, value) => sum + value, 0);
+      const measuredDuration = (count: number) => {
+        const measured = Math.floor(count * 0.8);
+        return { p95_ms: measured ? 5012 : null, measured, coverage: count ? measured / count : 0, method: 'tdigest' };
+      };
+      const duration = measuredDuration(total);
+      const buckets = Array.from({ length: 12 }, (_, index) => {
+        const counts = Object.fromEntries(levelNames.map(level => [level, Math.floor(levels[level] / 12) + (index < levels[level] % 12 ? 1 : 0)]));
+        return { timestamp: new Date(Date.parse(body.from) + index * body.interval_seconds * 1000).toISOString(),
+          count: Object.values(counts).reduce((sum, value) => sum + value, 0), levels: counts };
+      });
+      return reply({ as_of: new Date(now).toISOString(), total, buckets, levels, duration,
+        error_services: [{ service: 'billing', count: 70 }, { service: 'worker', count: 12 }],
+        actions: [{ action: 'charge.create', count: Math.max(0, total - 10), duration: measuredDuration(Math.max(0, total - 10)) },
+          { action: null, count: Math.min(10, total), duration: { p95_ms: null, measured: 0, coverage: 0, method: 'tdigest' } }],
+        page: body.search_limit ? { events: rows.slice(0, body.search_limit), next_cursor: rows.length > body.search_limit ? 'page-2' : null, as_of: new Date(now).toISOString() } : null });
+    }
     if (path === '/api/stats/histogram') {
       const start = Date.parse(body.from);
       const step = body.interval_seconds * 1000;
@@ -87,16 +114,22 @@ test('history filter uses typed core query, cursor and text-scoped counts', asyn
   await expect(page.getByRole('button', { name: /Database connection refused/ })).toBeVisible();
   await page.getByLabel('Поисковый запрос', { exact: true }).fill('service:billing AND level:(ERROR OR WARN)');
   await page.getByRole('button', { name: 'Найти', exact: true }).click();
-  await expect.poll(() => calls.filter((call) => call.path === '/api/logs/search').at(-1)?.body.filters)
+  await expect.poll(() => calls.filter((call) => call.path === '/api/stats/summary').at(-1)?.body.filters)
     .toEqual({ service: ['billing'], level: ['error', 'warn'] });
   await page.getByRole('button', { name: /Загрузить ещё/ }).click();
   await expect.poll(() => calls.filter((call) => call.path === '/api/logs/search').at(-1)?.body.cursor).toBe('page-2');
   await expect(page.getByRole('button', { name: /Payment retry 69/ })).toBeVisible();
+  await expect(page.getByText('В диапазоне 70', { exact: true })).toBeVisible();
   await page.getByLabel('Поисковый запрос', { exact: true }).fill('"connection refused"');
   await page.getByRole('button', { name: 'Найти', exact: true }).click();
-  await expect.poll(() => calls.filter((call) => call.path === '/api/logs/search').at(-1)?.body.text)
+  await expect.poll(() => calls.filter((call) => call.path === '/api/stats/summary').at(-1)?.body.text)
     .toEqual({ query: 'connection refused', mode: 'phrase' });
-  await expect(page.getByText(/текст.*(подсчёт|гистограмм)|гистограмм.*текст/i)).toBeVisible();
+  await expect(page.getByText('В диапазоне 1', { exact: true })).toBeVisible();
+  await expect(page.locator('.row-button')).toHaveCount(1);
+  await expect(page.getByText(/Общий снимок сводки и первой страницы/)).toBeVisible();
+  expect(calls.filter(call => call.path === '/api/stats/histogram')).toHaveLength(0);
+  expect(calls.filter(call => call.path === '/api/logs/search')).toHaveLength(1); // Только курсор, не первая страница.
+  expect(calls.filter(call => call.path === '/api/stats/summary').at(-1)?.body.search_limit).toBe(50);
 });
 
 test('event details open correlated trace and preserve shared link state', async ({ page }) => {
@@ -125,10 +158,10 @@ test('analytics shows real aggregates and drills down to level filter', async ({
   await expect(page.locator('.metric').filter({ hasText: 'Доля ERROR' })).toContainText('7%');
   await expect(page.getByRole('button', { name: /ERROR.*70.*7%/ })).toBeVisible();
   await page.getByRole('button', { name: 'Сравнить с прошлым окном' }).click();
-  await expect.poll(() => calls.filter((call) => call.path === '/api/stats/histogram').length).toBeGreaterThanOrEqual(3);
+  await expect.poll(() => calls.filter((call) => call.path === '/api/stats/summary').length).toBeGreaterThanOrEqual(3);
   await page.locator('.metric').filter({ hasText: 'Доля ERROR' }).getByRole('button').click();
   await expect(page).toHaveURL(/\/logs\?/);
-  await expect.poll(() => calls.filter((call) => call.path === '/api/logs/search').at(-1)?.body.filters)
+  await expect.poll(() => calls.filter((call) => call.path === '/api/stats/summary').at(-1)?.body.filters)
     .toEqual({ level: ['error'] });
 });
 
@@ -141,6 +174,10 @@ test('mobile layout keeps controls and expanded event fields visible', async ({ 
   const overflows = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
   expect(overflows).toBe(false);
   await page.screenshot({ path: test.info().outputPath('logs-mobile.png'), fullPage: true });
+  await page.goto('/analytics');
+  await expect(page.getByRole('button', { name: 'charge.create', exact: true })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
+  await page.screenshot({ path: test.info().outputPath('analytics-mobile.png'), fullPage: true });
 });
 
 test('desktop screenshots preserve actual template composition', async ({ page }) => {
@@ -235,4 +272,97 @@ test('invalid URL dates show a recoverable error instead of crashing', async ({ 
   await expect(page.getByRole('alert')).toContainText('Диапазон времени в ссылке некорректен');
   await page.getByLabel('Период', { exact: true }).selectOption('1h');
   await expect(page.getByRole('button', { name: /Database connection refused/ })).toBeVisible();
+});
+
+
+test('summary renders seven stacked levels, duration coverage and event action drilldown', async ({ page }) => {
+  const calls = await fixture(page);
+  await page.goto('/analytics');
+  await expect(page.locator('.metric').filter({ hasText: 'p95 duration_ms' })).toContainText(/5\s012 мс/);
+  await expect(page.locator('.metric').filter({ hasText: 'p95 duration_ms' })).toContainText('Покрытие 80% · 800 измерений · приблизительно t-digest');
+  for (const level of ['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'unknown']) {
+    await expect(page.locator(`.histogram-bar[data-level=${level}]`)).toHaveCount(12);
+  }
+  await expect(page.locator('.histogram-bucket').first()).toHaveAttribute('aria-label', /TRACE 1.*DEBUG 1.*INFO 59.*WARN 18.*ERROR 6.*FATAL 2.*UNKNOWN 1/);
+  await page.getByText('Числа диаграммы', { exact: true }).click();
+  await expect(page.locator('.histogram-data th')).toHaveCount(9);
+  await expect(page.locator('.actions-table')).toContainText('Нет измерений');
+  await page.getByRole('button', { name: 'charge.create', exact: true }).click();
+  await expect.poll(() => calls.filter(call => call.path === '/api/stats/summary').at(-1)?.body.filters).toEqual({ action: ['charge.create'] });
+  expect(calls.filter(call => call.path === '/api/stats/histogram')).toHaveLength(0);
+});
+
+test('empty summary uses zeros and no duration measurements; failed refresh clears old values', async ({ page }) => {
+  await fixture(page);
+  let failed = false;
+  await page.route('**/api/stats/summary', route => route.fulfill(failed
+    ? { status: 503, json: { error: 'query_unavailable' } }
+    : { json: { as_of: new Date(now).toISOString(), total: 0, buckets: [], levels: Object.fromEntries(['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'unknown'].map(level => [level, 0])),
+      error_services: [], duration: { p95_ms: null, measured: 0, coverage: 0, method: 'tdigest' }, actions: [], page: null } }));
+  await page.goto('/analytics');
+  await expect(page.locator('.metric').filter({ hasText: 'Всего событий' }).getByRole('button')).toHaveText('0');
+  await expect(page.locator('.metric').filter({ hasText: 'p95 duration_ms' })).toContainText('Нет измерений');
+  await expect(page.locator('.metric').filter({ hasText: 'p95 duration_ms' })).toContainText('Покрытие 0%');
+  await expect(page.getByText('Нет данных для диаграммы.', { exact: true })).toBeVisible();
+  failed = true;
+  await page.getByRole('button', { name: 'Обновить', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('Поиск временно недоступен');
+  await expect(page.locator('.metric').filter({ hasText: 'Всего событий' })).toContainText('Нет данных');
+  await expect(page.locator('.metric').filter({ hasText: 'p95 duration_ms' })).not.toContainText('Покрытие 0%');
+});
+
+test('obsolete summary cannot replace a newer text result and its coupled count', async ({ page }) => {
+  await fixture(page);
+  let resolveOld: (() => void) | undefined;
+  await page.route('**/api/stats/summary', async route => {
+    const body = route.request().postDataJSON();
+    if (body.text?.query !== 'slow') return route.fallback();
+    await new Promise<void>(resolve => { resolveOld = resolve; });
+    await route.fulfill({ json: { as_of: new Date(now).toISOString(), total: 999, buckets: [], levels: {}, duration: {}, error_services: [], actions: [],
+      page: { events: [{ ...events[0], message: 'Obsolete result' }], next_cursor: null, as_of: new Date(now).toISOString() } } }).catch(() => {});
+  });
+  await page.goto('/logs');
+  await expect(page.locator('.row-button')).toHaveCount(50);
+  await page.getByLabel('Поисковый запрос', { exact: true }).fill('slow');
+  await page.getByRole('button', { name: 'Найти', exact: true }).click();
+  await expect.poll(() => Boolean(resolveOld)).toBe(true);
+  await page.getByLabel('Поисковый запрос', { exact: true }).fill('"connection refused"');
+  await page.getByRole('button', { name: 'Найти', exact: true }).click();
+  await expect(page.getByText('В диапазоне 1', { exact: true })).toBeVisible();
+  resolveOld!();
+  await expect(page.getByRole('button', { name: /Database connection refused/ })).toBeVisible();
+  await expect(page.getByText('В диапазоне 999', { exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Obsolete result', exact: true })).toHaveCount(0);
+});
+
+
+test('90-day history clamps summary interval to one day', async ({ page }) => {
+  const calls = await fixture(page);
+  const to = '2026-10-14T00:00:00.000Z';
+  const from = new Date(Date.parse(to) - 90 * 86400000).toISOString();
+  await page.goto(`/logs?${new URLSearchParams({ from, to })}`);
+  await expect(page.locator('.row-button')).toHaveCount(50);
+  expect(calls.filter(call => call.path === '/api/stats/summary').at(-1)?.body.interval_seconds).toBe(86400);
+  expect(calls.filter(call => call.path === '/api/logs/search')).toHaveLength(0);
+  await expect(page.getByText('В диапазоне 70', { exact: true })).toBeVisible();
+});
+
+test('history beyond the UTC bucket cap keeps cursor search without inventing totals or a chart', async ({ page }) => {
+  const calls = await fixture(page);
+  // 10000 days plus one nanosecond needs 10001 UTC buckets despite Date.parse truncation.
+  const from = '2000-01-01T00:00:00.000Z';
+  const to = new Date(Date.parse(from) + 10000 * 86400000).toISOString().replace('.000Z', '.000000001Z');
+  await page.goto(`/logs?${new URLSearchParams({ from, to })}`);
+  await expect(page.locator('.row-button')).toHaveCount(50);
+  await expect(page.getByText(/Сводка недоступна для такого длинного диапазона/)).toBeVisible();
+  expect(calls.filter(call => call.path === '/api/stats/summary')).toHaveLength(0);
+  await expect(page.getByText(/^В диапазоне /)).toHaveCount(0);
+  await expect(page.locator('.histogram')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Загрузить ещё 50', exact: true }).click();
+  await expect(page.locator('.row-button')).toHaveCount(70);
+  expect(calls.filter(call => call.path === '/api/logs/search').at(-1)?.body.cursor).toBe('page-2');
+  // The exact exclusive bound still fits, so the summary becomes available again.
+  await page.goto(`/logs?${new URLSearchParams({ from, to: to.replace('.000000001Z', '.000Z') })}`);
+  await expect(page.getByText('В диапазоне 70', { exact: true })).toBeVisible();
+  expect(calls.filter(call => call.path === '/api/stats/summary').at(-1)?.body.interval_seconds).toBe(86400);
 });

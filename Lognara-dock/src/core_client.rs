@@ -12,8 +12,8 @@ use url::Url;
 
 use crate::config::Config;
 use crate::query::{
-    GroupRequest, GroupResponse, HistogramRequest, HistogramResponse, SearchRequest,
-    SearchResponse, TraceParams,
+    DurationStats, GroupRequest, GroupResponse, HistogramRequest, HistogramResponse, SearchRequest,
+    SearchResponse, SummaryRequest, SummaryResponse, TraceParams,
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -183,6 +183,49 @@ impl CoreClient {
         Ok(reply)
     }
 
+    /// Агрегаты и необязательная первая страница одного снимка core.
+    pub async fn summary(
+        &self,
+        request: &SummaryRequest,
+    ) -> Result<SummaryResponse, CoreQueryError> {
+        let url = self
+            .query_url
+            .join("stats/summary")
+            .expect("core url joins path");
+        let reply: SummaryResponse = self.query(self.http.post(url).json(request)).await?;
+        let valid_page = match (request.search_limit, &reply.page) {
+            (Some(limit), Some(page)) => page.events.len() <= limit && page.as_of == reply.as_of,
+            (None, None) => true,
+            _ => false,
+        };
+        let bucket_total = reply
+            .buckets
+            .iter()
+            .try_fold(0_u64, |total, bucket| total.checked_add(bucket.count));
+        if reply.buckets.len() > 10_000
+            || reply.error_services.len() > 5
+            || reply.actions.len() > 20
+            || !valid_page
+            || reply.levels.total() != Some(reply.total)
+            || bucket_total != Some(reply.total)
+            || reply
+                .buckets
+                .iter()
+                .any(|bucket| bucket.levels.total() != Some(bucket.count))
+            || !valid_duration(&reply.duration, reply.total)
+            || reply
+                .error_services
+                .iter()
+                .any(|service| service.count > reply.levels.error)
+            || reply.actions.iter().any(|action| {
+                action.count > reply.total || !valid_duration(&action.duration, action.count)
+            })
+        {
+            return Err(CoreQueryError::Unexpected);
+        }
+        Ok(reply)
+    }
+
     /// Передаёт только типизированный успешный ответ и статическую классификацию ошибок.
     async fn query<T: DeserializeOwned>(
         &self,
@@ -262,4 +305,17 @@ impl CoreClient {
         }
         Ok(response.json().await?)
     }
+}
+
+fn valid_duration(duration: &DurationStats, total: u64) -> bool {
+    duration.measured <= total
+        && duration.coverage.is_finite()
+        && (0.0..=1.0).contains(&duration.coverage)
+        && if duration.measured == 0 {
+            duration.p95_ms.is_none() && duration.coverage == 0.0
+        } else {
+            duration
+                .p95_ms
+                .is_some_and(|value| value.is_finite() && value >= 0.0)
+        }
 }

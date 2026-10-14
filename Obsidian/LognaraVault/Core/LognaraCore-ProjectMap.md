@@ -16,7 +16,8 @@ Parent: [[Core/LognaraCore]]
 | storage | Материализация, снимки, seal, retention |
 | index | Индексация и ограниченный кеш читателей |
 | query | Проверка фильтров, top-k, чтение строк, HMAC-курсоры |
-| analytics | Типизированные агрегаты DataFusion, общий memory pool |
+| analytics | Типизированные агрегаты DataFusion, общий memory pool, общий фильтр Arrow/Parquet |
+| summary | Единый Snapshot, text-aware count/stacked histogram, p95 duration_ms/coverage, action groups и первая страница |
 | metrics | Счётчики и gauges Prometheus |
 | tests | access.rs: CRUD, изоляция и отзыв токенов; контракт, HTTP, WAL, Parquet, поиск, аналитика, retention, аварийные subprocess и настоящие agent/relay и восстановление всей цепочки после недоступности core |
 | examples/relay_fixture | Fixture через настоящий encoder relay; запись без происхождения (`origin: None`) сохраняет прежний контракт |

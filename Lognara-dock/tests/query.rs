@@ -94,6 +94,21 @@ fn page() -> Value {
     })
 }
 
+fn levels(error: u64) -> Value {
+    json!({"trace": 0, "debug": 0, "info": 0, "warn": 0, "error": error, "fatal": 0, "unknown": 0})
+}
+
+fn summary(with_page: bool) -> Value {
+    json!({
+        "as_of": page()["as_of"], "total": 1,
+        "buckets": [{"timestamp": FROM, "count": 1, "levels": levels(1)}],
+        "levels": levels(1), "error_services": [{"service": null, "count": 1}],
+        "duration": {"p95_ms": 2.5, "measured": 1, "coverage": 1.0, "method": "tdigest"},
+        "actions": [{"action": null, "count": 1, "duration": {"p95_ms": null, "measured": 0, "coverage": 0.0, "method": "tdigest"}}],
+        "page": if with_page { page() } else { Value::Null }
+    })
+}
+
 fn endpoints() -> Vec<(Method, String, Option<Value>)> {
     vec![
         (Method::POST, "/api/logs/search".into(), Some(range())),
@@ -103,6 +118,7 @@ fn endpoints() -> Vec<(Method, String, Option<Value>)> {
             None,
         ),
         (Method::POST, "/api/stats/histogram".into(), Some(range())),
+        (Method::POST, "/api/stats/summary".into(), Some(range())),
         (
             Method::POST,
             "/api/stats/group-by".into(),
@@ -256,6 +272,235 @@ async fn analytics_preserves_counts_null_groups_and_defaults() {
 }
 
 #[tokio::test]
+async fn summary_forwards_text_search_limit_and_one_snapshot_with_safe_defaults() {
+    let (t, session, core) = setup().await;
+    let expected = summary(true);
+    core.reply(StatusCode::OK, expected.clone());
+    let body = json!({
+        "from": FROM, "to": TO, "filters": {"service": ["billing"]},
+        "text": {"query": "Ошибка платежа", "mode": "phrase"},
+        "interval_seconds": 120, "search_limit": 50
+    });
+    let reply = send(
+        &t.router,
+        request(
+            Method::POST,
+            "/api/stats/summary",
+            Some(&session),
+            Some(body.clone()),
+        ),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.body, expected);
+    assert_eq!(reply.headers[header::CACHE_CONTROL], "no-store");
+    let recorded = core.taken().pop().unwrap();
+    assert_eq!(recorded.method, Method::POST);
+    assert_eq!(recorded.uri.path(), "/v1/stats/summary");
+    assert_eq!(recorded.authorization, "Bearer query-secret");
+    assert_eq!(recorded.body, body);
+
+    core.reply(StatusCode::OK, summary(false));
+    let reply = send(
+        &t.router,
+        request(
+            Method::POST,
+            "/api/stats/summary",
+            Some(&session),
+            Some(range()),
+        ),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.body, summary(false));
+    assert_eq!(
+        core.taken()[0].body,
+        json!({
+            "from": FROM, "to": TO, "filters": {}, "text": null,
+            "interval_seconds": 60, "search_limit": null
+        })
+    );
+
+    let empty = json!({
+        "as_of": TO, "total": 0, "buckets": [], "levels": levels(0), "error_services": [],
+        "duration": {"p95_ms": null, "measured": 0, "coverage": 0.0, "method": "tdigest"},
+        "actions": [], "page": {"events": [], "next_cursor": null, "as_of": TO}
+    });
+    core.reply(StatusCode::OK, empty.clone());
+    let reply = send(
+        &t.router,
+        request(
+            Method::POST,
+            "/api/stats/summary",
+            Some(&session),
+            Some(json!({"from": FROM, "to": TO, "search_limit": 1})),
+        ),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.body, empty);
+}
+
+#[tokio::test]
+async fn summary_rejects_missing_required_nullable_fields_and_unknown_fields() {
+    let (t, session, core) = setup().await;
+    for field in [
+        "as_of",
+        "total",
+        "buckets",
+        "levels",
+        "error_services",
+        "duration",
+        "actions",
+        "page",
+    ] {
+        let mut malformed = summary(false);
+        malformed.as_object_mut().unwrap().remove(field);
+        core.reply(StatusCode::OK, malformed);
+        let reply = send(
+            &t.router,
+            request(
+                Method::POST,
+                "/api/stats/summary",
+                Some(&session),
+                Some(range()),
+            ),
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::BAD_GATEWAY, "missing {field}");
+        assert_eq!(reply.body, json!({"error": "core_unavailable"}));
+    }
+    for (parent, field) in [
+        ("/duration", "p95_ms"),
+        ("/duration", "method"),
+        ("/error_services/0", "service"),
+        ("/actions/0", "action"),
+        ("/actions/0/duration", "p95_ms"),
+        ("/levels", "unknown"),
+        ("/buckets/0/levels", "unknown"),
+    ] {
+        let mut malformed = summary(false);
+        malformed
+            .pointer_mut(parent)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        core.reply(StatusCode::OK, malformed);
+        let reply = send(
+            &t.router,
+            request(
+                Method::POST,
+                "/api/stats/summary",
+                Some(&session),
+                Some(range()),
+            ),
+        )
+        .await;
+        assert_eq!(
+            reply.status,
+            StatusCode::BAD_GATEWAY,
+            "missing {parent}/{field}"
+        );
+        assert_eq!(reply.body, json!({"error": "core_unavailable"}));
+    }
+    for parent in [
+        "",
+        "/duration",
+        "/error_services/0",
+        "/actions/0",
+        "/actions/0/duration",
+        "/levels",
+        "/buckets/0",
+        "/buckets/0/levels",
+    ] {
+        let mut malformed = summary(false);
+        malformed
+            .pointer_mut(parent)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert("token".into(), json!("query-secret"));
+        core.reply(StatusCode::OK, malformed);
+        let reply = send(
+            &t.router,
+            request(
+                Method::POST,
+                "/api/stats/summary",
+                Some(&session),
+                Some(range()),
+            ),
+        )
+        .await;
+        assert_eq!(
+            reply.status,
+            StatusCode::BAD_GATEWAY,
+            "extra field at {parent}"
+        );
+        assert_eq!(reply.body, json!({"error": "core_unavailable"}));
+    }
+}
+
+#[tokio::test]
+async fn summary_rejects_oversized_inconsistent_or_invalid_upstream_results() {
+    let (t, session, core) = setup().await;
+    let mut invalid = Vec::new();
+    for (pointer, value) in [
+        ("/duration/method", json!("exact")),
+        ("/duration/p95_ms", json!(-1)),
+        ("/duration/p95_ms", Value::Null),
+        ("/duration/measured", json!(2)),
+        ("/duration/coverage", json!(1.5)),
+        ("/actions/0/duration/coverage", json!(0.5)),
+        ("/actions/0/duration/p95_ms", json!(0)),
+        ("/actions/0/count", json!(2)),
+        ("/error_services/0/count", json!(2)),
+        ("/buckets/0/count", json!(0)),
+        ("/levels/error", json!(2)),
+        ("/buckets/0/levels/error", json!(2)),
+        ("/total", json!(-1)),
+    ] {
+        let mut malformed = summary(false);
+        *malformed.pointer_mut(pointer).unwrap() = value;
+        invalid.push((pointer.to_owned(), range(), malformed));
+    }
+    for (field, limit) in [("buckets", 10_000), ("error_services", 5), ("actions", 20)] {
+        let mut malformed = summary(false);
+        malformed[field] = Value::Array(vec![malformed[field][0].clone(); limit + 1]);
+        invalid.push((format!("oversized {field}"), range(), malformed));
+    }
+    invalid.push(("unexpected page".into(), range(), summary(true)));
+    let request_page = json!({"from": FROM, "to": TO, "search_limit": 1});
+    invalid.push(("missing page".into(), request_page.clone(), summary(false)));
+    let mut mismatch = summary(true);
+    mismatch["page"]["as_of"] = json!(TO);
+    invalid.push((
+        "mismatched page snapshot".into(),
+        request_page.clone(),
+        mismatch,
+    ));
+    let mut too_many_events = summary(true);
+    too_many_events["page"]["events"] = json!([page()["events"][0], page()["events"][0]]);
+    invalid.push(("oversized page".into(), request_page, too_many_events));
+    for (case, body, response) in invalid {
+        core.reply(StatusCode::OK, response);
+        let reply = send(
+            &t.router,
+            request(
+                Method::POST,
+                "/api/stats/summary",
+                Some(&session),
+                Some(body),
+            ),
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::BAD_GATEWAY, "{case}");
+        assert_eq!(reply.body, json!({"error": "core_unavailable"}));
+        assert_eq!(reply.headers[header::CACHE_CONTROL], "no-store");
+    }
+}
+
+#[tokio::test]
 async fn all_queries_require_a_current_session_and_posts_require_origin() {
     let (t, session, core) = setup().await;
     for (method, path, body) in endpoints() {
@@ -299,6 +544,18 @@ async fn all_queries_require_a_current_session_and_posts_require_origin() {
 async fn invalid_request_shapes_never_reach_core() {
     let (t, session, core) = setup().await;
     for (path, body) in [
+        (
+            "/api/stats/summary",
+            json!({"from": FROM, "to": TO, "cursor": "x"}),
+        ),
+        (
+            "/api/stats/summary",
+            json!({"from": FROM, "to": TO, "text": {"query": "x", "mode": "regex"}}),
+        ),
+        (
+            "/api/stats/summary",
+            json!({"from": FROM, "to": TO, "search_limit": -1}),
+        ),
         (
             "/api/logs/search",
             json!({"from": FROM, "to": TO, "sql": "select secret"}),

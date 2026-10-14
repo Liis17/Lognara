@@ -87,6 +87,111 @@ pub struct GroupRequest {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct SummaryRequest {
+    pub from: String,
+    pub to: String,
+    #[serde(default)]
+    pub filters: Filters,
+    pub text: Option<TextQuery>,
+    #[serde(default = "minute")]
+    pub interval_seconds: u64,
+    pub search_limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SummaryResponse {
+    pub as_of: String,
+    pub total: u64,
+    pub buckets: Vec<SummaryBucket>,
+    pub levels: LevelCounts,
+    pub error_services: Vec<ErrorService>,
+    pub duration: DurationStats,
+    pub actions: Vec<ActionStats>,
+    #[serde(deserialize_with = "required_nullable")]
+    pub page: Option<SearchResponse>,
+}
+
+fn required_nullable<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
+/// Семь уровней обязательны, включая нулевые счётчики.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LevelCounts {
+    pub trace: u64,
+    pub debug: u64,
+    pub info: u64,
+    pub warn: u64,
+    pub error: u64,
+    pub fatal: u64,
+    pub unknown: u64,
+}
+
+impl LevelCounts {
+    pub fn total(&self) -> Option<u64> {
+        [
+            self.trace,
+            self.debug,
+            self.info,
+            self.warn,
+            self.error,
+            self.fatal,
+            self.unknown,
+        ]
+        .into_iter()
+        .try_fold(0_u64, u64::checked_add)
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SummaryBucket {
+    pub timestamp: String,
+    pub count: u64,
+    pub levels: LevelCounts,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ErrorService {
+    #[serde(deserialize_with = "required_nullable")]
+    pub service: Option<String>,
+    pub count: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DurationStats {
+    #[serde(deserialize_with = "required_nullable")]
+    pub p95_ms: Option<f64>,
+    pub measured: u64,
+    pub coverage: f64,
+    pub method: DurationMethod,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DurationMethod {
+    Tdigest,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActionStats {
+    #[serde(deserialize_with = "required_nullable")]
+    pub action: Option<String>,
+    pub count: u64,
+    pub duration: DurationStats,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SearchResponse {
     pub events: Vec<LogEvent>,
     #[serde(deserialize_with = "required_option")]
@@ -210,4 +315,13 @@ pub async fn group_by(
 ) -> Result<Response, ApiError> {
     let Json(request) = body.map_err(|_| ApiError::BadRequest("invalid_request"))?;
     Ok(Json(app.core.group_by(&request).await?).into_response())
+}
+
+pub async fn summary(
+    State(app): State<AppState>,
+    _user: AuthUser,
+    body: Result<Json<SummaryRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Json(request) = body.map_err(|_| ApiError::BadRequest("invalid_request"))?;
+    Ok(Json(app.core.summary(&request).await?).into_response())
 }

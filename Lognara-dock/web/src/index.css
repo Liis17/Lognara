@@ -159,6 +159,14 @@ pre.json, .event-details pre, tr.details pre { margin: 0; padding: 12px; backgro
 .histogram svg { display: block; width: 100%; height: 180px; overflow: visible; }
 .histogram-grid { stroke: var(--line); }
 .histogram svg .histogram-bar { fill: var(--info); }
+.histogram svg .histogram-bar.level-trace { fill: var(--accent); }
+.histogram svg .histogram-bar.level-debug { fill: #b29bd3; }
+.histogram svg .histogram-bar.level-info { fill: var(--info); }
+.histogram svg .histogram-bar.level-warn { fill: var(--warn); }
+.histogram svg .histogram-bar.level-error { fill: var(--err); }
+.histogram svg .histogram-bar.level-fatal { fill: #d95d96; }
+.histogram svg .histogram-bar.level-unknown { fill: var(--ink3); }
+.histogram-legend { padding: 0 0 12px !important; font: 10px var(--mono); }
 .histogram-comparison { stroke: var(--ink3); }
 .histogram-scale { display: flex; justify-content: space-between; margin-top: 6px; color: var(--ink3); font: 11px var(--mono); }
 .histogram-bucket.interactive { cursor: pointer; }
@@ -187,7 +195,9 @@ pre.json, .event-details pre, tr.details pre { margin: 0; padding: 12px; backgro
 .levels-stack .level-dot { height: 100%; border-radius: 0; }
 .level-dot.level-info { background: var(--info); }
 .level-dot.level-warn { background: var(--warn); }
-.level-dot.level-error, .level-dot.level-fatal { background: var(--err); }
+.level-dot.level-error { background: var(--err); }
+.level-dot.level-fatal { background: #d95d96; }
+.level-dot.level-debug { background: #b29bd3; }
 .level-dot.level-trace { background: var(--accent); }
 .levels .level-row { grid-template-columns: 9px minmax(0,1fr) auto auto; align-items: center; font: 12px var(--mono); margin: 8px 0; }
 .top-services .service-row { grid-template-columns: minmax(80px,1fr) minmax(30px,1.2fr) auto; align-items: center; font: 12px var(--mono); margin: 10px 0; }
@@ -258,3 +268,5 @@ pre.json, .event-details pre, tr.details pre { margin: 0; padding: 12px; backgro
   .passkeys li .muted, .access li .muted { flex-basis: 100%; }
   .passkeys li button, .access li button { margin-left: 0; }
 }
+
+.actions-table td:first-child { overflow-wrap: anywhere; max-width: 280px; }

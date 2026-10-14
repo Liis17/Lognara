@@ -1,8 +1,8 @@
 # Dock: инвентаризация API core и dock для интеграции шести дизайнов
 
-Дата проверки: 2026-10-14. Текущее состояние после первого выпуска этапов 0–3A плана интеграции; серверные контракты проверены по `Lognara-dock/src/query.rs`, `core_client.rs` и исходникам core. Проверка API основана на чтении кода. Проверки реализации описаны в [README dock](../Lognara-dock/README.md).
+Дата проверки: 2026-10-14. Текущее состояние после реализации этапов 0–3B плана интеграции; серверные контракты проверены по `Lognara-dock/src/query.rs`, `core_client.rs` и исходникам core. Проверка API основана на чтении кода. Проверки реализации описаны в [README dock](../Lognara-dock/README.md).
 
-Dock проксирует поиск, trace, histogram и group-by с полным envelope и query timeout 35 секунд. Live и admin используют timeout 10 секунд. Эталоны сохранены в `docs/design-references/dock/` с контрольными суммами; оригиналы находятся в `/Users/liis/Projects/Lognara/docs/страницы дизайна/`.
+Dock проксирует поиск, trace, histogram, group-by и summary с полным envelope и query timeout 35 секунд. Live и admin используют timeout 10 секунд. Эталоны сохранены в `docs/design-references/dock/` с контрольными суммами; оригиналы находятся в `/Users/liis/Projects/Lognara/docs/страницы дизайна/`.
 
 ## Источники
 
@@ -16,7 +16,7 @@ Relay и agent: `Lognara-relay/src/ingest.rs`, `agents.rs`; `Lognara-agent/src/i
 
 ## Краткий вывод
 
-Core уже даёт исторический поиск с курсором, trace, одну серию гистограммы и группировку по счётчику. Core не даёт `total`, текстовых агрегатов, числовых статистик, атрибутов как измерений, паттернов, проблем, узлов с heartbeat и правил алертов. Dock проксирует уже существующие core-эндпоинты и управляет учётными данными relay и agent. События, корреляция Trace и базовая count-аналитика уже используют эти API. Полные паттерны, текстовые агрегаты и p95 требуют расширений core. Экраны «Ошибки», «Инфраструктура» и «Алерты» требуют новых серверных моделей. В Dock SQLite сейчас есть таблицы только для сессий, пользователей и passkeys (`Lognara-dock/src/store.rs:14-30`); таблиц правил, паттернов, проблем и узлов нет нигде.
+Core уже даёт исторический поиск с курсором, trace, одну серию гистограммы и группировку по счётчику. Summary core даёт точный total, текстовые агрегаты, stacked histogram, приблизительный p95/coverage по duration_ms и action-группы в одном снимке. Произвольных числовых агрегатов, атрибутов как измерений, паттернов, проблем, узлов с heartbeat и правил алертов нет. Dock проксирует уже существующие core-эндпоинты и управляет учётными данными relay и agent. События, корреляция Trace и базовая count-аналитика уже используют эти API. Паттерны требуют дальнейшего расширения core; text-aware summary и p95 уже реализованы (см. [контракт](DockSummaryContract.md)). Экраны «Ошибки», «Инфраструктура» и «Алерты» требуют новых серверных моделей. В Dock SQLite сейчас есть таблицы только для сессий, пользователей и passkeys (`Lognara-dock/src/store.rs:14-30`); таблиц правил, паттернов, проблем и узлов нет нигде.
 
 ## Матрица возможностей
 
@@ -31,15 +31,15 @@ Core уже даёт исторический поиск с курсором, tr
 | Числовые фильтры и сравнения | нет | только `in`-списки строк | диапазоны и NOT, если нужны | `query.rs:98-111`, `analytics.rs:292` |
 | Пагинация «дальше» по курсору | есть | `next_cursor`, `limit` 1..1000, default 100 | — | `query.rs:188`, `query.rs:248-262` |
 | Переход назад / номер страницы | нет | курсор только вперёд; стек курсоров на клиенте | — | `query.rs:259-262` |
-| `total` у поиска | нет | в envelope только `events`, `next_cursor`, `as_of` | exact count с тем же snapshot | `query.rs:57-62` |
-| `total` для структурных фильтров | есть | сумма `buckets[].count` или сумма `group-by level` | для text-фильтра нет | `analytics.rs:26-37`, `analytics.rs:133-203` |
+| `total` у поиска | есть через summary | summary.total и summary.page используют один Snapshot; старый search envelope не менялся | — | `Lognara-core/src/summary.rs` |
+| `total` через legacy агрегаты | есть | сумма `buckets[].count` или сумма `group-by level` | text-фильтр поддерживает summary | `analytics.rs:26-37`, `analytics.rs:133-203` |
 | Порядок выдачи | частично | `timestamp, sequence` DESC; trace ASC; произвольной сортировки нет | сортировка по другим полям, если нужна | `query.rs:181-185` |
 | Live-лента | частично | polling окна `[now-300s, now+60s)`, до 1000 самых свежих за опрос, без фильтров | потоковый tail с фильтрами и полнотой | `live.rs:28-34`, `live.rs:129-133`, `config.rs:184-188` |
 | Trace | частично | логи trace по возрастанию, без модели spans | spans с длительностями | `api.rs:148-166`, `Dock query.rs:186` |
-| Гистограмма объёма | есть | одна серия count, интервал 1..86400 с, до 10 000 корзин | серии по level/service, p95 | `analytics.rs:71-131` |
+| Гистограмма объёма | есть | summary: count и семь level-серий; legacy histogram: одна серия, до 10 000 корзин | серии по service, если нужны | `analytics.rs:71-131` |
 | Группировка (top-k по count) | частично | 1–2 поля из `environment, server, backend, service, service_instance, action, level`; limit 1..1000 | distinct, другие поля, сумма/средние | `analytics.rs:133-203` |
 | Facets (значения с счётчиками) | частично | `group-by` с limit; нет `other`, `has_more`, prefix, distinct-total | своя семантика исключения собственного фильтра | `analytics.rs:135-158`, `analytics.rs:193` |
-| `stats` (sum/avg/min/max/p95) | нет | только count | числовые атрибуты и квантили | `analytics.rs:133-203` |
+| `stats` (sum/avg/min/max/p95) | частично | summary: p95 t-digest по duration_ms, measured/coverage, по action; другие агрегаты отсутствуют | sum/avg/min/max, если нужны | `Lognara-core/src/summary.rs` |
 | Distinct trace/request/span | нет | count — число строк событий | distinct-агрегаты | `analytics.rs:133-203` |
 | Произвольный SQL | нет | DataFusion внутри core, наружу не выставлен | не требуется шаблонами | `storage.rs:64-68` |
 | Группировка ошибок (fingerprint) | нет | `fingerprint` в core — хеш параметров курсора, не сигнатура ошибки | сигнатура, нормализация, история | `query.rs:204-205` |
@@ -56,11 +56,15 @@ Core уже даёт исторический поиск с курсором, tr
 | Авторизация пользователей | есть | сессии в cookie, passkeys, Origin-проверка небезопасных методов | — | `session.rs:156-196`, `api.rs:151-154` |
 | Выдача токенов core пользователям | нет | query и admin токены только в env dock | — | `Lognara-dock/src/config.rs:131-137` |
 
+## Summary (этап 3B)
+
+`POST /v1/stats/summary` и dock `/api/stats/summary`: filters/text с общим PreparedText поиска, interval_seconds и необязательный search_limit. Единый Snapshot даёт total, stacked buckets/levels, top-5 ERROR services, duration p95 t-digest/measured/coverage, top-20 action groups и первую страницу DESC. Курсор страницы фиксирует тот же watermark. Источник duration — существующий JSON, только конечные неотрицательные числа; строка не измерена. Сканирование потоковое, агрегаты последовательно в общем memory pool; summary занимает один analytics slot. Полный контракт и проверки: [DockSummaryContract](DockSummaryContract.md). Старые histogram/group-by сохраняют ограничения, описанные ниже.
+
 ## Core: инвентаризация
 
 Маршруты (`Lognara-core/src/api.rs:28-51`):
 
-- `POST /v1/logs/search`, `GET /v1/traces/{trace_id}`, `POST /v1/stats/histogram`, `POST /v1/stats/group-by`: query-токен (`api.rs:29-38`).
+- `POST /v1/logs/search`, `GET /v1/traces/{trace_id}`, `POST /v1/stats/histogram`, `POST /v1/stats/group-by`, `POST /v1/stats/summary`: query-токен (`api.rs:29-38`).
 - `GET|POST /v1/admin/relays`, `DELETE /v1/admin/relays/{id}`, `GET|POST /v1/admin/agents`, `DELETE /v1/admin/agents/{id}`: admin-токен (`api.rs:39-48`).
 - `POST /v1/batches` (relay, по токену relay), `GET /v1/agents` (relay получает хеши агентов) (`api.rs:105-112`, `api.rs:474`).
 - `GET /metrics` с query-токеном, text Prometheus (`api.rs:113-118`, `api.rs:333-339`).
@@ -72,7 +76,7 @@ Core уже даёт исторический поиск с курсором, tr
 
 Модель события (`model.rs:17-31`, `wire.rs:41-57`): `id`, `timestamp`, `ingested_at`, `environment`, `server`, `backend`, `service`, `service_instance`, `action`, `level`, `message`, `trace_id`, `span_id`, `parent_span_id`, `request_id`, `attributes` (объект JSON). Значения `trace_id` 32 hex, `span_id` и `parent_span_id` 16 hex (`query.rs:137-143`). Уровни `trace, debug, info, warn, error, fatal, unknown` (`wire.rs:59-70`).
 
-Схема хранения (`columns.rs:44-60`, `index.rs:18-29`): `attributes` хранится как JSON-строка, но в индексе отсутствует, поэтому фильтр и группировка по атрибутам невозможны. Для числовых атрибутов (например `duration_ms`) сейчас нет ни статистики, ни квантиля.
+Схема хранения (`columns.rs:44-60`, `index.rs:18-29`): `attributes` хранится как JSON-строка, но в индексе отсутствует, поэтому фильтр и группировка по атрибутам невозможны. Summary читает duration_ms из существующего JSON и считает p95; материализация и миграция raw-схемы не требуются.
 
 Реестр (`access.rs:38-56`, `access.rs:160-189`): relay — `id, name, created_at`; agent — `id, name, relay_id, created_at`. Полей здоровья, версии, времени последнего контакта нет. Хеш токена хранится в SQLite (`access.rs:73-75`), токен возвращается один раз (`access.rs:108-118`, `access.rs:145-156`). Префиксы: `lnr_` для relay, `lna_` для agent. Ограничения: имя до 64 символов без управляющих (`access.rs:233-239`); удалить relay с агентами нельзя (`access.rs:191-208`, ошибка `relay_has_agents`).
 
@@ -110,7 +114,7 @@ Retention по умолчанию 7 суток (`config.rs:70`: `LOGNARA_RETENTI
 Маршруты (`Lognara-dock/src/api.rs:119-150`), все под `/api`:
 
 - Вход и аккаунт: `POST /auth/login`, `POST /auth/logout`, `POST /auth/passkey/start|finish`, `GET /me`, `POST /account/password`, `GET /account/passkeys`, `POST /account/passkeys/start|finish`, `DELETE /account/passkeys/{id}`.
-- Логи: `GET /logs/stream` (SSE), `POST /logs/search`, `GET /traces/{trace_id}`, `POST /stats/histogram`, `POST /stats/group-by`.
+- Логи: `GET /logs/stream` (SSE), `POST /logs/search`, `GET /traces/{trace_id}`, `POST /stats/histogram`, `POST /stats/group-by`, `POST /stats/summary`.
 - Учётные данные: `GET|POST /relays`, `DELETE /relays/{id}`, `GET|POST /agents`, `DELETE /agents/{id}`.
 - Здоровье: `GET /health/live`, `GET /health/ready` (вне `/api`, `api.rs:158-161`).
 
@@ -128,15 +132,15 @@ Live (`Lognara-dock/src/live.rs`): один опрос core на всех под
 
 Хранилище dock (`store.rs:14-30`): таблицы `sessions`, `users`, `passkeys`. Ничего для правил, каналов или состояний не предусмотрено.
 
-Клиент: `Lognara-dock/web/src/api.ts` отправляет `credentials: "same-origin"`. Страница «Аналитика» (`Analytics.tsx:91-127`) выбирает интервал так, чтобы корзин было не больше 72 (`Analytics.tsx:67-68`). Запросы выполняются последовательно (`Analytics.tsx:88-89`). Страница «Логи» (`Logs.tsx:139-214`) использует поиск, trace, гистограмму и `EventSource("/api/logs/stream")`.
+Клиент использует summary для Events/Analytics; первая страница и график Events согласованы, прошлое окно Analytics запрашивается последовательно отдельной summary. Каталог сервисов — отдельный group-by. `Lognara-dock/web/src/api.ts` отправляет `credentials: "same-origin"`. Страница «Аналитика» (`Analytics.tsx:91-127`) выбирает интервал так, чтобы корзин было не больше 72 (`Analytics.tsx:67-68`). Запросы выполняются последовательно (`Analytics.tsx:88-89`). Страница «Логи» (`Logs.tsx:139-214`) использует поиск, trace, гистограмму и `EventSource("/api/logs/stream")`.
 
 ## Соответствие экранам
 
 | Шаблон | Что доступно сейчас | Что требуется новое |
 |---|---|---|
-| `Main.dc.html` (события) | поиск с фильтрами, курсор, trace, гистограмма; строка `service:billing AND level:(ERROR OR WARN)` (`Main.dc.html:103`) разбирается клиентом | exact total для текстового поиска; live с полнотой и фильтрами |
+| `Main.dc.html` (события) | поиск с фильтрами, курсор, trace, гистограмма; строка `service:billing AND level:(ERROR OR WARN)` (`Main.dc.html:103`) разбирается клиентом | summary уже даёт exact text total; полнота Live требует нового потока |
 | `variant-f.dc.html` (паттерны) | исходные `message` и `attributes` | шаблонизация сообщений, идентичность паттерна, first/last seen, доля, рост за час (`variant-f.dc.html:101-108`), действия «алерт по паттерну» и «скрыть» |
-| `analytics.dc.html` (аналитика) | count-гистограмма, group-by по level и service, сравнение периода клиентом | p95 `duration_ms` по действию (`analytics.dc.html:100`, `:154-156`), числовые атрибуты, distinct вызовов, сводка в одном снимке |
+| `analytics.dc.html` (аналитика) | count-гистограмма, group-by по level и service, сравнение периода клиентом | summary уже даёт p95 duration_ms по action и общий снимок; distinct вызовов и паттерны пока отсутствуют |
 | `errors.dc.html` (проблемы) | `level` и `trace_id`, сырые атрибуты | группировка по fingerprint, сущность проблемы, статус, повторы, серверы, история (`errors.dc.html:98-105`), stack trace |
 | `infra.dc.html` (инфраструктура) | `/metrics` core (Prometheus, query-токен), реестр relay и agent | heartbeat, последнее событие, версия, спул и здоровье каждого узла (`infra.dc.html:129-135`); заполнение диска по сегментам (`infra.dc.html:143-160`); задержка p95 (`infra.dc.html:89`) |
 | `alerts.dc.html` (алерты) | count-гистограмма как предпросмотр условия | CRUD правил, фоновый evaluator, состояния, история срабатываний, каналы Telegram и Discord (согласовано пользователем, см. `Dock/DesignIntegration.md`), повтор не чаще cooldown, тихие часы, сообщение о восстановлении (`alerts.dc.html:117-136`) |
@@ -155,8 +159,8 @@ Live (`Lognara-dock/src/live.rs`): один опрос core на всех под
 
 ## Пробелы и риски (по убыванию важности)
 
-1. **Нет exact total и согласованного снимка.** Поиск не возвращает `total`. Несколько запросов аналитики используют разные снимки (`analytics.rs:89`, `:163`). Экран «52 574 события» и таблица паттернов не могут быть точными без нового серверного ответа с общим снимком.
-2. **Атрибуты не участвуют в агрегатах.** Нет индекса, фильтра, квантилей и распределений по `attributes` (`columns.rs:92`, `analytics.rs:135-152`). Для p95 нужен числовой контракт duration и новый агрегат. Его можно считать чтением утверждённого JSON-атрибута; отдельная материализованная колонка потребует решения о чтении/миграции старых сегментов. Stack trace можно оформить из существующих message/attributes без миграции. Fingerprint и паттерны требуют нового алгоритма, API и состояния, но не обязательно изменения сырых событий.
+1. **Согласованность ограничена одной summary.** Summary возвращает exact total, stacked histogram, duration/actions и первую страницу из одного Snapshot. Старые отдельные endpoints и сравниваемые окна не используют общий снимок. Паттерны пока не реализованы.
+2. **Произвольные атрибуты не являются измерениями.** Нет произвольного индекса, фильтра и распределений по `attributes` (`columns.rs:92`, `analytics.rs:135-152`). P95 реализован чтением утверждённого JSON-атрибута duration_ms; отдельная материализованная колонка при подтверждённой необходимости потребует решения о чтении/миграции старых сегментов. Stack trace можно оформить из существующих message/attributes без миграции. Fingerprint и паттерны требуют нового алгоритма, API и состояния, но не обязательно изменения сырых событий.
 3. **Нет устойчивого идентификатора паттерна и ошибки.** Сигнатуры не существуют. Версионирование шаблона и миграция потребуют отдельной модели и пересчёта.
 4. **Инфраструктура без состояния узлов.** Ни relay, ни agent не отправляют heartbeat или версию. Таблица «Узел / Heartbeat / Спул» невозможна без нового протокола и хранения.
 5. **Alerts без backend.** Нужны таблицы правил, evaluator с идемпотентными состояниями, cooldown, история, отдельный пул для фоновых запросов и хранение секретов каналов. Пункт затрагивает безопасность.
@@ -174,14 +178,14 @@ Live (`Lognara-dock/src/live.rs`): один опрос core на всех под
 
 - Поиск, курсор, trace, live с текущими ограничениями, гистограмма объёма, group-by по level и service, count по уровням и топ сервисов по ERROR.
 - Управление relay и agent, включая выдачу токена один раз.
-- Доля ERROR по `group-by level` с учётом всех семи уровней в знаменателе (`Analytics.tsx:94-96`).
-- Сравнение с предыдущим периодом двумя запросами, как уже сделано в `Analytics.tsx:115-122`.
+- Доля ERROR по summary.levels с учётом всех семи уровней в знаменателе; legacy group-by level тоже доступен.
+- Сравнение с предыдущим периодом двумя последовательными summary.
 - Точный count на клиенте в пределах одного ответа гистограммы и сумма по `group-by level`. Для структурных фильтров без текста.
 
 ## Что нужно добавить (в порядке зависимостей)
 
-1. Серверный ответ «сводка» с общим снимком: `total`, гистограмма по level, топ-k и `as_of` в одном вызове. Либо явный snapshot token между запросами.
-2. Числовой контракт `duration_ms` и типизированные агрегаты; материализация/индекс — по подтверждённой необходимости. Stack trace отображается из существующих полей при согласованном формате.
+1. Реализовано: summary с общим снимком для total, гистограммы по level, top-k, duration/actions и первой страницы, общий as_of.
+2. Реализовано: числовой duration_ms и приблизительный p95 t-digest/coverage. Материализация/индекс — только по подтверждённой необходимости; stack trace требует согласованного формата.
 3. Модель паттернов: шаблон, версия, first/last seen, счётчики по окнам.
 4. Модель проблем: fingerprint, статус, история, связь с паттерном.
 5. Heartbeat и состояние узлов: протокол агента и relay, хранение последнего контакта, версии, спула, потерь по источнику.

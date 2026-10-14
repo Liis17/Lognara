@@ -125,9 +125,12 @@ docker compose up -d
 | `GET /api/traces/{trace_id}` | сессия | связанные логи ASC; from/to/limit/cursor в query |
 | `POST /api/stats/histogram` | сессия + Origin | from/to/filters/interval_seconds; buckets count и as_of |
 | `POST /api/stats/group-by` | сессия + Origin | from/to/filters/group_by/limit; groups count и as_of |
+| `POST /api/stats/summary` | сессия + Origin | from/to/filters/text/interval_seconds/search_limit; согласованные total/buckets/levels/error_services/duration/actions/page/as_of |
 | `GET /*` | открыт | SPA, неизвестный путь отдаёт `index.html` |
 
 Ошибки возвращаются как JSON `{"error": "<код>"}`: `unauthorized`, `forbidden`, `too_many_attempts`, `invalid_current_password`, `password_too_short`, `password_too_long`, `invalid_name`, `challenge_expired`, `passkey_rejected`, `passkey_exists`, `not_found`.
+
+Страница событий получает первую страницу, общий подсчёт и stacked-график одним summary, включая текстовые фильтры. Аналитика использует одну сводку на окно, показывает приблизительный p95 `duration_ms`, покрытие измерений и до 20 action-групп по числу событий. Прошлое окно получает отдельную сводку. [Контракт summary](../docs/DockSummaryContract.md).
 
 Query API сохраняет безопасную классификацию ошибок: `invalid_request`/`invalid_query` (400), `cursor_expired` (410), `query_unavailable` (503), `query_timeout` (504); недоступный/неожиданный core — `core_unavailable` (502). Query timeout 35 секунд, Live/admin 10 секунд. Все ответы `/api/*` имеют `Cache-Control: no-store`.
 

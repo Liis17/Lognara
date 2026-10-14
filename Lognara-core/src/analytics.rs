@@ -73,19 +73,7 @@ pub async fn histogram(
     request: HistogramRequest,
 ) -> Result<HistogramResponse, QueryError> {
     let filter = PreparedFilter::new(&request.from, &request.to, &request.filters)?;
-    if !(1..=86400).contains(&request.interval_seconds) {
-        return Err(QueryError::Invalid(
-            "interval_seconds must be 1..86400".into(),
-        ));
-    }
-    let step = request.interval_seconds as i128 * 1_000_000_000;
-    let first = (filter.from as i128).div_euclid(step) * step;
-    let last = (filter.to as i128 - 1).div_euclid(step) * step;
-    if first < i64::MIN as i128 || (last - first) / step + 1 > 10_000 {
-        return Err(QueryError::Invalid(
-            "histogram exceeds 10000 buckets or timestamp range".into(),
-        ));
-    }
+    let (first, last, step) = bucket_bounds(&filter, request.interval_seconds)?;
     let snapshot = core.snapshot();
     let frame = frame(core, &snapshot, &filter).await?;
     let bucket = date_bin(
@@ -128,6 +116,26 @@ pub async fn histogram(
         buckets,
         as_of: format_timestamp(snapshot.published_at),
     })
+}
+
+pub(crate) fn bucket_bounds(
+    filter: &PreparedFilter,
+    interval_seconds: u64,
+) -> Result<(i128, i128, i128), QueryError> {
+    if !(1..=86400).contains(&interval_seconds) {
+        return Err(QueryError::Invalid(
+            "interval_seconds must be 1..86400".into(),
+        ));
+    }
+    let step = interval_seconds as i128 * 1_000_000_000;
+    let first = (filter.from as i128).div_euclid(step) * step;
+    let last = (filter.to as i128 - 1).div_euclid(step) * step;
+    if first < i64::MIN as i128 || (last - first) / step + 1 > 10_000 {
+        return Err(QueryError::Invalid(
+            "histogram exceeds 10000 buckets or timestamp range".into(),
+        ));
+    }
+    Ok((first, last, step))
 }
 
 pub async fn group_by(core: &Core, request: GroupRequest) -> Result<GroupResponse, QueryError> {
@@ -209,7 +217,7 @@ pub async fn group_by(core: &Core, request: GroupRequest) -> Result<GroupRespons
     })
 }
 
-fn count_value(batch: &RecordBatch, column: usize, row: usize) -> Result<u64> {
+pub(crate) fn count_value(batch: &RecordBatch, column: usize, row: usize) -> Result<u64> {
     match ScalarValue::try_from_array(batch.column(column), row)? {
         ScalarValue::Int64(Some(value)) => Ok(value.try_into()?),
         ScalarValue::UInt64(Some(value)) => Ok(value),
@@ -217,14 +225,18 @@ fn count_value(batch: &RecordBatch, column: usize, row: usize) -> Result<u64> {
     }
 }
 
-fn timestamp(value: i64) -> Expr {
+pub(crate) fn timestamp(value: i64) -> Expr {
     lit(ScalarValue::TimestampNanosecond(
         Some(value),
         Some("UTC".into()),
     ))
 }
 
-async fn frame(core: &Core, snapshot: &Snapshot, filter: &PreparedFilter) -> Result<DataFrame> {
+pub(crate) async fn frame(
+    core: &Core,
+    snapshot: &Snapshot,
+    filter: &PreparedFilter,
+) -> Result<DataFrame> {
     let config = SessionConfig::new()
         .with_target_partitions(2)
         .with_batch_size(8192)

@@ -41,6 +41,7 @@ export interface SearchResponse {
 export interface HistogramBucket {
   timestamp: string;
   count: number;
+  levels?: Record<LogLevel, number>;
 }
 export interface HistogramResponse {
   buckets: HistogramBucket[];
@@ -53,4 +54,21 @@ export interface Group {
 export interface GroupResponse {
   groups: Group[];
   as_of: string;
+}
+
+export interface Duration {
+  p95_ms: number | null;
+  measured: number;
+  coverage: number;
+  method: "tdigest";
+}
+export interface SummaryResponse {
+  as_of: string;
+  total: number;
+  buckets: (HistogramBucket & { levels: Record<LogLevel, number> })[];
+  levels: Record<LogLevel, number>;
+  error_services: { service: string | null; count: number }[];
+  duration: Duration;
+  actions: { action: string | null; count: number; duration: Duration }[];
+  page: SearchResponse | null;
 }

@@ -5,7 +5,7 @@ import Histogram from "../components/Histogram";
 import { appendHistory, contextBounds, eventBounds, eventsToCsv, LOG_LEVELS, matchesQuery, MAX_LIVE_ROWS,
   parseQuery, prependLive, sourceQuery } from "../logs";
 import type { ParsedQuery } from "../logs";
-import type { HistogramResponse, LogEvent, SearchRequest, SearchResponse } from "../types";
+import type { HistogramResponse, LogEvent, SearchRequest, SearchResponse, SummaryResponse } from "../types";
 
 const RANGES = { "1h": 3_600_000, "24h": 86_400_000, "7d": 604_800_000 };
 type Range = keyof typeof RANGES;
@@ -90,6 +90,7 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
   const [searchError, setSearchError] = useState("");
   const [expired, setExpired] = useState(false);
   const [revision, setRevision] = useState(0);
+  const [summary, setSummary] = useState<SummaryResponse | null>(null);
   const [histogram, setHistogram] = useState<HistogramResponse | null>(null);
   const [histogramLoading, setHistogramLoading] = useState(false);
   const [histogramError, setHistogramError] = useState("");
@@ -109,7 +110,13 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
   const pagingAbort = useRef<AbortController | null>(null);
   const unauthorized = useRef(onUnauthorized);
   unauthorized.current = onUnauthorized;
-  const intervalSeconds = Math.max(1, Math.ceil((Date.parse(location.to) - Date.parse(location.from)) / 1000 / 60));
+  const intervalSeconds = Math.min(86400, Math.max(1, Math.ceil((Date.parse(location.to) - Date.parse(location.from)) / 1000 / 60)));
+  const intervalMillis = intervalSeconds * 1000;
+  // Date.parse отбрасывает наносекунды: верхнюю границу округляем вверх для безопасной проверки лимита.
+  const toFraction = location.to.match(/\.(\d+)/)?.[1] ?? "";
+  const upperMillis = Date.parse(location.to) + (/[1-9]/.test(toFraction.slice(3)) ? 1 : 0);
+  const bucketCount = Math.ceil(upperMillis / intervalMillis) - Math.floor(Date.parse(location.from) / intervalMillis);
+  const summaryUnavailable = location.view === "events" && bucketCount > 10000;
   const rows = liveEnabled ? liveRows : page.events;
   const selectedIndex = rows.reduce<number[]>((indices, event, index) => {
     if (event.id === location.selected && (!location.selectedTimestamp || event.timestamp === location.selectedTimestamp)) indices.push(index);
@@ -155,18 +162,30 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
     const current = ++generation.current;
     const controller = new AbortController();
     pagingAbort.current?.abort();
-    setPage(emptyPage); setSearchError(""); setExpired(false); setPaging(false); setLoading(!parsed.error);
-    if (!parsed.error) requestPage(controller.signal).then((response) => {
-      if (current === generation.current) setPage(response);
-    }).catch((error) => {
-      if (!controller.signal.aborted && current === generation.current) handleError(error);
-    }).finally(() => { if (current === generation.current) setLoading(false); });
+    setPage(emptyPage); setSummary(null); setSearchError(""); setExpired(false); setPaging(false); setLoading(!parsed.error);
+    if (!parsed.error) {
+      const request = location.view === "events" && !summaryUnavailable
+        ? api<SummaryResponse>("POST", "/api/stats/summary", {
+          from: location.from, to: location.to, ...parsed.query,
+          interval_seconds: intervalSeconds, search_limit: 50,
+        }, { signal: controller.signal }).then((response) => {
+          if (!controller.signal.aborted && current === generation.current) {
+            setSummary(response); setPage(response.page ?? emptyPage);
+          }
+        })
+        : requestPage(controller.signal).then((response) => {
+          if (!controller.signal.aborted && current === generation.current) setPage(response);
+        });
+      request.catch((error) => {
+        if (!controller.signal.aborted && current === generation.current) handleError(error);
+      }).finally(() => { if (!controller.signal.aborted && current === generation.current) setLoading(false); });
+    }
     return () => { controller.abort(); pagingAbort.current?.abort(); };
   }, [queryKey, revision]);
   useEffect(() => {
     const controller = new AbortController();
     setHistogram(null); setHistogramError("");
-    const enabled = !parsed.error && !parsed.query.text;
+    const enabled = !parsed.error && location.view === "trace";
     setHistogramLoading(enabled);
     if (enabled) api<HistogramResponse>("POST", "/api/stats/histogram", {
       from: location.from, to: location.to, filters: parsed.query.filters, interval_seconds: intervalSeconds,
@@ -322,7 +341,8 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
     setTimeout(() => URL.revokeObjectURL(url), 1000); setExportsOpen(false);
   };
   const details = (event: LogEvent) => <EventDetails event={event} onContext={openContext} onTrace={openTrace} onCopy={copyLink} />;
-  const total = histogram?.buckets.reduce((sum, bucket) => sum + bucket.count, 0);
+  const total = location.view === "events" ? summary?.total : histogram?.buckets.reduce((sum, bucket) => sum + bucket.count, 0);
+  const chart = location.view === "events" ? summary : histogram;
 
   return <section className="logs-page">
     <div className="filter-bar">
@@ -387,21 +407,24 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
     {(parsed.error || searchError) && <div className="error" role="alert">{parsed.error || searchError}
       {expired && <button type="button" className="button" onClick={restart}>Начать поиск заново</button>}
     </div>}
-    {!liveEnabled && !parsed.error && (parsed.query.text ?
-      <p className="page-note">Общий подсчёт и гистограмма для текстового запроса появятся на следующем этапе. Сейчас показаны загруженные строки.</p> :
-      <section className="panel" aria-label="События по времени">
+    {!liveEnabled && !parsed.error && summaryUnavailable && <p className="page-note" role="status">
+      Сводка недоступна для такого длинного диапазона, сузьте период. Показаны только загруженные строки.
+    </p>}
+    {!liveEnabled && !parsed.error && !summaryUnavailable && <section className="panel" aria-label="События по времени">
         <div className="panel-head"><h2>События по времени</h2><span className="muted">Шаг {Math.round(intervalSeconds / 60 * 10) / 10} мин</span></div>
-        <Histogram buckets={histogram?.buckets ?? []} label="События по времени" loading={histogramLoading}
-          intervalSeconds={intervalSeconds} caption={histogram ? `Независимый снимок аналитики ${histogram.as_of}. Подписи времени локальные.` : undefined}
+        <Histogram buckets={chart?.buckets ?? []} label="События по времени" loading={location.view === "events" ? loading : histogramLoading}
+          intervalSeconds={intervalSeconds} caption={chart ? location.view === "events"
+            ? `Общий снимок сводки и первой страницы ${chart.as_of}. Подписи времени локальные.`
+            : `Независимый снимок аналитики ${chart.as_of}. Подписи времени локальные.` : undefined}
           onBucket={(timestamp) => {
             const from = Math.max(Date.parse(location.from), Date.parse(timestamp));
             const to = Math.min(Date.parse(location.to), Date.parse(timestamp) + intervalSeconds * 1000);
             updateLocation({ from: new Date(from).toISOString(), to: new Date(to).toISOString(), selected: null });
           }} />
         {histogramError && <p className="error" role="status">Гистограмма: {histogramError}</p>}
-      </section>)}
+      </section>}
     {location.view === "trace" && <p className="page-note">Логи упорядочены от ранних к поздним. Это корреляция по trace_id;
-      spans и длительности появятся отдельным этапом.</p>}
+      spans и их длительности появятся отдельным этапом.</p>}
     {copyNote && <p className="page-note" role="status">{copyNote}</p>}
     {location.selected && rows.filter((event) => event.id === location.selected && (!location.selectedTimestamp || event.timestamp === location.selectedTimestamp)).length > 1 &&
       <p className="page-note" role="status">Несколько строк имеют одинаковые признаки записи. Выбор в ссылке зависит от их порядка; для точной идентичности нужен уникальный ID события.</p>}

@@ -22,6 +22,7 @@ use crate::{
     journal::{IngestError, Journal},
     query::{self, QueryError, SearchRequest},
     storage::Core,
+    summary::{self, SummaryRequest},
     wire::DecodeError,
 };
 
@@ -31,6 +32,7 @@ pub fn router(core: Arc<Core>) -> Router {
         .route("/v1/traces/{trace_id}", get(trace))
         .route("/v1/stats/histogram", post(histogram))
         .route("/v1/stats/group-by", post(group_by))
+        .route("/v1/stats/summary", post(summary))
         .route_layer(middleware::from_fn_with_state(
             token_hash(&core.journal.config.query_token),
             authorize,
@@ -61,6 +63,16 @@ async fn histogram(
     }
 }
 
+async fn summary(
+    State(core): State<Arc<Core>>,
+    request: Result<Json<SummaryRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    match request {
+        Ok(Json(request)) => run_query(&core, summary::summary(core.clone(), request)).await,
+        Err(error) => QueryError::Invalid(error.body_text()).into_response(),
+    }
+}
+
 async fn group_by(
     State(core): State<Arc<Core>>,
     request: Result<Json<GroupRequest>, axum::extract::rejection::JsonRejection>,
@@ -81,6 +93,16 @@ async fn run_analytics<T: serde::Serialize>(
     let Ok(_permit) = core.analytics_slots.clone().try_acquire_owned() else {
         return QueryError::Busy.into_response();
     };
+    run_query(core, future).await
+}
+
+async fn run_query<T: serde::Serialize>(
+    core: &Core,
+    future: impl std::future::Future<Output = Result<T, QueryError>>,
+) -> Response {
+    if !core.journal.ready() {
+        return unavailable();
+    }
     let started = Instant::now();
     core.journal.metrics.queries.fetch_add(1, Ordering::Relaxed);
     let result = tokio::time::timeout(core.journal.config.query_timeout, future)

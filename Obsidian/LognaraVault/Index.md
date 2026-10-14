@@ -31,9 +31,9 @@ Lognara — система сбора логов: агент в контейне
 
 | Файл | Компонент | Описание |
 |------|-----------|----------|
-| [[Dock/LognaraDock]] | lognara-dock | Веб-интерфейс за nginx: вход/passkey, подключения, история/cursor/Trace, отдельный Live и базовая аналитика; параметры `LOGNARA_DOCK_*`. |
+| [[Dock/LognaraDock]] | lognara-dock | Веб-интерфейс за nginx: вход/passkey, подключения, история/cursor/Trace, отдельный Live, согласованная аналитика и p95; параметры `LOGNARA_DOCK_*`. |
 | [[Dock/LognaraDock-ProjectMap]] | lognara-dock | Дерево файлов Rust и React, связи модулей и тесты. |
-| [[Dock/DesignIntegration]] | развитие dock | Полный план шести HTML-дизайнов; первый выпуск 0–3A реализован, дальнейшие backend-этапы и решения пользователя. |
+| [[Dock/DesignIntegration]] | развитие dock | Полный план шести HTML-дизайнов; этапы 0–3B реализованы, дальнейшие backend-этапы и решения пользователя. |
 
 ### Delivery
 

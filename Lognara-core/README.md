@@ -78,6 +78,10 @@ Core запускается с обязательными разными `LOGNAR
 
 Ответ: `groups: [{values: {service: "api", level: "error"}, count}]`, `as_of`. Разрешены 1–2 разных поля: environment, server, backend, service, service_instance, level, action. Отсутствующее значение — JSON null. Сортировка count DESC, затем ключи группы. Limit 1..1000, по умолчанию 100. Фильтры совпадают с поиском; `text`, `attributes` и SQL отклоняются.
 
+`POST /v1/stats/summary` принимает те же `from/to/filters/text`, `interval_seconds` и необязательный `search_limit` 1..1000. Возвращает `total`, stacked `buckets` по семи уровням, `levels`, до 5 `error_services`, `duration`, до 20 `actions`, `page` и общий `as_of`. Все части используют один Snapshot; первая страница и её cursor сохраняют тот же watermark. Догрузка страниц не обновляет сводку.
+
+`duration` содержит приблизительный `p95_ms` (t-digest), `measured`, `coverage` (0..1) и `method: "tdigest"`. Из существующих `attributes.duration_ms` принимаются только конечные неотрицательные JSON-числа; нет измерений — `p95_ms: null`. `actions[].count` означает события, не вызовы. Raw-сегменты не мигрируются. Summary занимает один analytics slot и использует общий memory pool; данные не собираются целиком в память. Полный wire-контракт: [DockSummaryContract](../docs/DockSummaryContract.md).
+
 ## Запуск и проверка
 
 Настройка, HTTPS-прокси, graceful shutdown, восстановление и метрики: [эксплуатация](docs/operations.md).

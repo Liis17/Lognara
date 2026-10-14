@@ -1,4 +1,5 @@
 import { useId } from "react";
+import { LOG_LEVELS } from "../logs";
 import type { HistogramBucket } from "../types";
 
 export interface HistogramProps {
@@ -22,7 +23,7 @@ function bucketLabel(bucket: HistogramBucket, intervalSeconds?: number): string 
   const end = intervalSeconds
     ? ` – ${time.format(new Date(Date.parse(bucket.timestamp) + intervalSeconds * 1000))}`
     : "";
-  return `${start}${end}: ${number.format(bucket.count)} событий`;
+  return `${start}${end}: ${number.format(bucket.count)} событий${bucket.levels ? `; ${LOG_LEVELS.map((level) => `${level.toUpperCase()} ${number.format(bucket.levels![level])}`).join(", ")}` : ""}`;
 }
 
 /** Общая count-диаграмма. Сравнение выравнивается по позиции в окне. */
@@ -50,8 +51,11 @@ export default function Histogram({
     `${(index + 0.5) * step},${height - bucket.count / peak * (height - 8)}`,
   ).join(" ");
 
+  const stacked = buckets.some((bucket) => bucket.levels !== undefined);
   return (
     <div className="histogram" aria-busy={loading}>
+      {stacked && <div className="legend histogram-legend" aria-label="Уровни диаграммы">{LOG_LEVELS.map((level) =>
+        <span key={level}><i className={`level-dot level-${level}`} />{level.toUpperCase()}</span>)}</div>}
       <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-labelledby={titleId} role="group">
         <title id={titleId}>{label}. Максимум: {number.format(maximum)} событий за интервал.</title>
         {[0, 0.25, 0.5, 0.75, 1].map((fraction) => (
@@ -75,8 +79,16 @@ export default function Histogram({
               } : undefined}>
               <title>{description}{previous ? `\n${comparisonLabel}: ${bucketLabel(previous, intervalSeconds)}` : ""}</title>
               <rect className="histogram-hit" x={index * step} y="0" width={step} height={height} fill="transparent" />
-              <rect className="histogram-bar" x={index * step + gap / 2} y={height - barHeight}
-                width={step - gap} height={barHeight} rx={Math.min(2, step / 4)} />
+              {bucket.levels ? LOG_LEVELS.map((level, levelIndex) => {
+                const count = bucket.levels![level];
+                const before = LOG_LEVELS.slice(0, levelIndex).reduce((sum, item) => sum + bucket.levels![item], 0);
+                const segmentHeight = count / peak * (height - 8);
+                return <rect key={level} className={`histogram-bar level-${level}`} data-level={level}
+                  x={index * step + gap / 2} y={height - (before + count) / peak * (height - 8)}
+                  width={step - gap} height={segmentHeight} />;
+              }) : <rect className="histogram-bar" x={index * step + gap / 2} y={height - barHeight}
+                width={step - gap} height={barHeight} rx={Math.min(2, step / 4)} />}
+
             </g>
           );
         })}
@@ -96,6 +108,7 @@ export default function Histogram({
           <table>
             <caption>{label}</caption>
             <thead><tr><th scope="col">Начало интервала</th><th scope="col">Событий</th>
+              {stacked && LOG_LEVELS.map((level) => <th key={level} scope="col">{level.toUpperCase()}</th>)}
               {comparison && <th scope="col">{comparisonLabel}</th>}
             </tr></thead>
             <tbody>{buckets.map((bucket, index) => (
@@ -105,6 +118,7 @@ export default function Histogram({
                   ? <button type="button" className="link-button" onClick={() => onBucket(bucket.timestamp)}
                     aria-label={`${bucketLabel(bucket, intervalSeconds)}. Открыть логи`}>{number.format(bucket.count)}</button>
                   : number.format(bucket.count)}</td>
+                {stacked && LOG_LEVELS.map((level) => <td key={level}>{number.format(bucket.levels?.[level] ?? 0)}</td>)}
                 {comparison && <td><time dateTime={comparison[index].timestamp} title={comparison[index].timestamp}>{time.format(new Date(comparison[index].timestamp))}</time>{" · "}{number.format(comparison[index].count)}</td>}
               </tr>
             ))}</tbody>

@@ -12,6 +12,7 @@ pub mod metrics;
 pub mod model;
 pub mod query;
 pub mod storage;
+pub mod summary;
 pub mod wal;
 pub mod wire;
 mod wire_budget;
