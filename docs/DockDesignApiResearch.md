@@ -1,181 +1,195 @@
-# Dock: API и данные для интеграции шаблонов
+# Dock: инвентаризация API core и dock для интеграции шести дизайнов
 
-Дата проверки: 2026-10-14. Исследование исходников текущей ветки; код, ветки и коммиты не менялись. Прочитаны Obsidian Index, Core/Dock и их ProjectMap, README, query/analytics/model/wire/access/metrics, клиент и live Dock, ingest/normalize/auth-cache relay, wire/config/sender agent. Шаблоны изучены как примеры желаемого поведения, не как действующие контракты.
+Дата проверки: 2026-10-14. Текущее состояние после первого выпуска этапов 0–3A плана интеграции; серверные контракты проверены по `Lognara-dock/src/query.rs`, `core_client.rs` и исходникам core. Проверка API основана на чтении кода. Проверки реализации описаны в [README dock](../Lognara-dock/README.md).
+
+Dock проксирует поиск, trace, histogram и group-by с полным envelope и query timeout 35 секунд. Live и admin используют timeout 10 секунд. Эталоны сохранены в `docs/design-references/dock/` с контрольными суммами; оригиналы находятся в `/Users/liis/Projects/Lognara/docs/страницы дизайна/`.
+
+## Источники
+
+Obsidian: `Obsidian/LognaraVault/Index.md`, `Core/LognaraCore.md`, `Core/LognaraCore-ProjectMap.md`, `Dock/LognaraDock.md`, `Dock/LognaraDock-ProjectMap.md`, `Dock/DesignIntegration.md`.
+
+Core: `Lognara-core/src/api.rs`, `query.rs`, `analytics.rs`, `columns.rs`, `model.rs`, `wire.rs`, `index.rs`, `access.rs`, `catalog.rs`, `metrics.rs`, `journal.rs`, `storage.rs`, `config.rs`.
+
+Dock: `Lognara-dock/src/api.rs`, `query.rs`, `core_client.rs`, `live.rs`, `access.rs`, `account.rs`, `session.rs`, `store.rs`, `config.rs`; клиент `Lognara-dock/web/src/api.ts`, `pages/Logs.tsx`, `pages/Analytics.tsx`, `pages/Access.tsx`.
+
+Relay и agent: `Lognara-relay/src/ingest.rs`, `agents.rs`; `Lognara-agent/src/ingest.rs`. Проверено отсутствие HTTP-эндпоинтов здоровья и метрик у relay и agent.
 
 ## Краткий вывод
 
-Core уже умеет исторический поиск, trace lookup, временную гистограмму и группировки count. Dock предоставляет браузеру только SSE логов и CRUD реестра подключений; его внутренний search-клиент извлекает только `events`, теряя курсор и `as_of`. Первая интеграция логов и базовой аналитики требует расширения Dock, а не нового хранилища. Паттерны, проблемы, alert-engine и телеметрия узлов требуют новых серверных моделей. [Core router][core-router], [Dock router][dock-router], [CoreClient::search][dock-client]
+Core уже даёт исторический поиск с курсором, trace, одну серию гистограммы и группировку по счётчику. Core не даёт `total`, текстовых агрегатов, числовых статистик, атрибутов как измерений, паттернов, проблем, узлов с heartbeat и правил алертов. Dock проксирует уже существующие core-эндпоинты и управляет учётными данными relay и agent. События, корреляция Trace и базовая count-аналитика уже используют эти API. Полные паттерны, текстовые агрегаты и p95 требуют расширений core. Экраны «Ошибки», «Инфраструктура» и «Алерты» требуют новых серверных моделей. В Dock SQLite сейчас есть таблицы только для сессий, пользователей и passkeys (`Lognara-dock/src/store.rs:14-30`); таблиц правил, паттернов, проблем и узлов нет нигде.
 
-| Область | Уже есть | Нужно расширить | Полностью новое |
-|---|---|---|---|
-| События (`Main.dc.html`) | Поиск, точные фильтры, текст message, JSON события, cursor | API Dock, парсер строки запроса, `total` для текстового поиска, согласованная сводка, экспорт | Надёжный tail по порядку публикации, если требуется полнота Live |
-| Паттерны (`variant-f.dc.html`) | Исходные message/attributes | Поиск/агрегаты по идентификатору паттерна | Версионированный fingerprint, шаблон/переменные, first/last seen, доля, рост, samples, скрытие |
-| Ошибки (`errors.dc.html`) | Фильтр level, trace/span IDs, сырые attributes | Извлечение stack trace, события trace в Dock | Проблема как сущность, статус/история/возврат, связь с паттерном/деплоем |
-| Аналитика (`analytics.dc.html`) | Histogram/count group-by, топ сервисов по ERROR | Серии по level и общая сводка в одном снимке, p95 числового атрибута | Число/новизна паттернов до появления модели паттернов |
-| Инфраструктура (`infra.dc.html`) | Профили relay/agent; core Prometheus counters/gauges | JSON API состояния core/Dock, storage sizes, временные ряды | Достоверная связь профилей и источников; heartbeat, версии, spool и health каждого узла |
-| Алерты (`alerts.dc.html`) | Count-гистограмма как примитив вычисления условия | Серверные агрегаты для preview | CRUD правил, evaluator, состояния/история, cooldown/recovery/quiet hours, каналы и доставка |
-| Facets / top-k / stats / SQL | Group-by даёт ограниченный top count; histogram даёт count | Facet-контракт/полнота, числовые агрегаты, summary | Произвольный SQL API отсутствует и шаблонам не требуется |
+## Матрица возможностей
 
-## Поиск, фильтры и пагинация
+Статусы: **есть** — доступно через текущий API; **частично** — есть, но без нужной семантики; **нет** — требуется новый backend.
 
-`POST /v1/logs/search`, query Bearer. Тело: `from`, `to` RFC3339, `filters: {field: string[]}`, optional `text: {query, mode}`, `limit` (default 100), optional `cursor`. Неизвестные поля отклоняются, диапазон строго `from < to`, внутри используется `[from,to)` по времени **события**. `limit` 1..1000. [SearchRequest][query-request], [PreparedFilter][query-filter], [range query][query-range]
+| Функция | Статус | Что есть сейчас | Что требуется | Источник |
+|---|---|---|---|---|
+| Поиск событий по точным полям | есть | `POST /api/logs/search` → core `POST /v1/logs/search` | — | `api.rs:131`, `query.rs:177`, `core_client.rs:120` |
+| Текстовый поиск по `message` | частично | токены AND или последовательная фраза; одно слово — обычный токен, не подстрока | подстрока/prefix, если нужна |`query.rs:191-203`, `query.rs:337-338` |
+| Строка запроса `service:x AND level:(...)` | частично | в клиенте `logs.ts` разбирается в `filters` и `text` | серверный разбор не нужен, если оставить клиентский | `Lognara-dock/web/src/logs.ts` |
+| Фильтры по `attributes` | нет | поле хранится JSON-строкой, не индексируется и не фильтруется | новый индекс или извлечённые колонки | `columns.rs:60,92,177`, `index.rs:18-29` |
+| Числовые фильтры и сравнения | нет | только `in`-списки строк | диапазоны и NOT, если нужны | `query.rs:98-111`, `analytics.rs:292` |
+| Пагинация «дальше» по курсору | есть | `next_cursor`, `limit` 1..1000, default 100 | — | `query.rs:188`, `query.rs:248-262` |
+| Переход назад / номер страницы | нет | курсор только вперёд; стек курсоров на клиенте | — | `query.rs:259-262` |
+| `total` у поиска | нет | в envelope только `events`, `next_cursor`, `as_of` | exact count с тем же snapshot | `query.rs:57-62` |
+| `total` для структурных фильтров | есть | сумма `buckets[].count` или сумма `group-by level` | для text-фильтра нет | `analytics.rs:26-37`, `analytics.rs:133-203` |
+| Порядок выдачи | частично | `timestamp, sequence` DESC; trace ASC; произвольной сортировки нет | сортировка по другим полям, если нужна | `query.rs:181-185` |
+| Live-лента | частично | polling окна `[now-300s, now+60s)`, до 1000 самых свежих за опрос, без фильтров | потоковый tail с фильтрами и полнотой | `live.rs:28-34`, `live.rs:129-133`, `config.rs:184-188` |
+| Trace | частично | логи trace по возрастанию, без модели spans | spans с длительностями | `api.rs:148-166`, `Dock query.rs:186` |
+| Гистограмма объёма | есть | одна серия count, интервал 1..86400 с, до 10 000 корзин | серии по level/service, p95 | `analytics.rs:71-131` |
+| Группировка (top-k по count) | частично | 1–2 поля из `environment, server, backend, service, service_instance, action, level`; limit 1..1000 | distinct, другие поля, сумма/средние | `analytics.rs:133-203` |
+| Facets (значения с счётчиками) | частично | `group-by` с limit; нет `other`, `has_more`, prefix, distinct-total | своя семантика исключения собственного фильтра | `analytics.rs:135-158`, `analytics.rs:193` |
+| `stats` (sum/avg/min/max/p95) | нет | только count | числовые атрибуты и квантили | `analytics.rs:133-203` |
+| Distinct trace/request/span | нет | count — число строк событий | distinct-агрегаты | `analytics.rs:133-203` |
+| Произвольный SQL | нет | DataFusion внутри core, наружу не выставлен | не требуется шаблонами | `storage.rs:64-68` |
+| Группировка ошибок (fingerprint) | нет | `fingerprint` в core — хеш параметров курсора, не сигнатура ошибки | сигнатура, нормализация, история | `query.rs:204-205` |
+| Паттерны сообщений | нет | только сырые `message` и `attributes` | шаблонизация, версии, first/last seen, доли, рост | `model.rs:17-31` |
+| Проблемы (жизненный цикл) | нет | — | сущность, статусы, история, связь с паттерном | — |
+| Stack trace | частично | если приложение положило его в `attributes`, dock отдаёт JSON | извлечение и поиск | `Dock query.rs:106-125` |
+| Реестр relay и agent | есть | list/create/delete через dock → core admin | — | `Dock access.rs:1-117`, `core_client.rs:207-237` |
+| Выдача токенов relay/agent | есть | токен один раз в ответе, `Cache-Control: no-store`, dock не хранит | повторный показ и ротация нет | `core access.rs:108,145`, `Dock access.rs:110-117` |
+| Heartbeat, последнее событие, версия, спул узла | нет | ни в core, ни в relay, ни в agent | протокол heartbeat и хранение состояния | см. раздел «Инфраструктура» |
+| Счётчики потерь relay/agent | частично | только Prometheus-счётчики процесса core | per-source история | `journal.rs:140-162`, `metrics.rs:27-36` |
+| Размеры Parquet/индексов/WAL, сегменты | частично | WAL — gauge в `/metrics`; сегменты только внутри catalog | JSON-эндпоинт storage | `metrics.rs:12-14`, `catalog.rs:62` |
+| Правила алертов, история, каналы, доставка | нет | — | CRUD, evaluator, состояния, секреты каналов | см. раздел «Алерты» |
+| Предпросмотр условия алерта | частично | histogram/group-by по count за окно | evaluator на сервере | `analytics.rs:71-131` |
+| Авторизация пользователей | есть | сессии в cookie, passkeys, Origin-проверка небезопасных методов | — | `session.rs:156-196`, `api.rs:151-154` |
+| Выдача токенов core пользователям | нет | query и admin токены только в env dock | — | `Lognara-dock/src/config.rs:131-137` |
 
-Разрешены точные поля `id`, `environment`, `server`, `backend`, `service`, `service_instance`, `action`, `trace_id`, `span_id`, `parent_span_id`, `request_id`, отдельно `level`. Между полями AND, внутри массива значений OR. Нет произвольного OR между полями, NOT, сравнения чисел, regexp/wildcard, фильтра по attributes/ingested_at или сортировки по произвольному полю. Каждому фильтру нужны 1..64 значения, значение ≤4096 байт. UUID нормализуется; trace ID = 32 hex, span ID = 16 hex, регистр hex нормализуется. Имена source/action/request_id сравниваются точно. [Exact fields][index-fields], [validation][query-filter], [BooleanQuery][query-range]
+## Core: инвентаризация
 
-API принимает `trace`, `debug`, `info`, `warn`, `error`, `fatal`, `unknown` в нижнем регистре. `ERROR` в JSON filters даёт 400: query::level сравнивает `as_str()` без нормализации. Relay при ingest принимает mixed-case текст уровня и нормализует. UI может показывать `ERROR`, но отправлять должен `error`. [query::level][query-level], [LogLevel][wire-level], [relay::level][relay-level]
+Маршруты (`Lognara-core/src/api.rs:28-51`):
 
-Текст ищется только в `message`: `all` (default) = все токены AND; `phrase` = фраза по позициям. SimpleTokenizer + LowerCaser: это токенный поиск, не поиск подстроки. Query ≤8192 байт и 1..64 токена. Строка `service:billing AND level:(ERROR OR WARN)` из Main не является языком core: нельзя отправить её в `text.query` и ожидать фильтров. Нужен ограниченный, явно описанный парсер Dock или отдельные контролы, переводящие её в `filters` и `text`. [TextQuery][query-request], [token validation][query-search], [tokenizer][index-tokenizer], [query building][query-range], [Main query][template-main-query]
+- `POST /v1/logs/search`, `GET /v1/traces/{trace_id}`, `POST /v1/stats/histogram`, `POST /v1/stats/group-by`: query-токен (`api.rs:29-38`).
+- `GET|POST /v1/admin/relays`, `DELETE /v1/admin/relays/{id}`, `GET|POST /v1/admin/agents`, `DELETE /v1/admin/agents/{id}`: admin-токен (`api.rs:39-48`).
+- `POST /v1/batches` (relay, по токену relay), `GET /v1/agents` (relay получает хеши агентов) (`api.rs:105-112`, `api.rs:474`).
+- `GET /metrics` с query-токеном, text Prometheus (`api.rs:113-118`, `api.rs:333-339`).
+- `GET /health/live`, `GET /health/ready` без токена (`api.rs:122-124`, `api.rs:325-331`).
 
-Ответ только `{events, next_cursor, as_of}`. **`total` отсутствует**, длина events - размер страницы. Сортировка search DESC по `(timestamp, sequence)`; trace ASC. Core выбирает limit+1, чтобы определить наличие следующей страницы. Нет offset/page-number и произвольного перехода на страницу. Нужна кнопка «Загрузить ещё» или сохранённый стек cursor для возврата назад. Серверный порядок следует сохранять; JS Date теряет наносекунды, а `sequence` не отдаётся в LogEvent. Текущий фронтенд пересортировывает SSE через Date.parse. [SearchResponse][query-response], [pagination][query-pagination], [TopDocs][query-topdocs], [Logs merge][dock-logs-merge]
+Конкурентность и таймауты: `search_slots` = 4, `analytics_slots` = 2 (`storage.rs:87-88`). Занятость возвращает 503 (`api.rs:82`, `api.rs:172-173`). Таймаут запроса по умолчанию 30 секунд (`config.rs:73`). Пул DataFusion: 1 GiB (`LOGNARA_QUERY_MEMORY_BYTES`, `storage.rs:64-68`); память страницы поиска 128 MiB (`LOGNARA_SEARCH_MEMORY_BYTES`). Каждая аналитика берёт свой снимок `core.snapshot()` (`analytics.rs:89`, `analytics.rs:158`), поэтому два ответа могут иметь разный `as_of`.
 
-Курсор HMAC фиксирует fingerprint фильтров/text/направления, watermark и `as_of`, живёт 10 минут от **первой** страницы, инвалидируется при рестарте и смене retention generation; изменение запроса даёт 400, истечение/несовместимый snapshot - 410. `as_of` - момент публикации снимка core, не конец диапазона и не SLA полноты доставки. Между независимыми search/histogram/group-by нет общего snapshot token: ответы могут иметь разные `as_of`. Для строго согласованной таблицы/total/графика нужен один серверный summary/search-with-summary или новый snapshot-контракт. [cursor checks][query-cursor], [cursor creation][query-pagination], [snapshot publication][storage-publish]
+Ошибки запросов (`api.rs:206-215` и `query.rs:64-75`): 400 invalid, 410 cursor expired или снимок недоступен, 503 busy или storage, 504 timeout.
 
-Ошибки query: 400 invalid, 410 cursor gone, 503 capacity/storage, 504 timeout. Четыре concurrent search slots, два analytics slots; по умолчанию timeout 30s, search page memory 128 MiB, общий DataFusion pool 1 GiB. Новый клиент Dock должен сохранять семантику ошибок и envelope; сейчас общий HTTP timeout 10s и возвращаются только events. [errors][core-query-errors], [slots/pool][storage-runtime], [limits][core-config], [Dock client][dock-client]
+Модель события (`model.rs:17-31`, `wire.rs:41-57`): `id`, `timestamp`, `ingested_at`, `environment`, `server`, `backend`, `service`, `service_instance`, `action`, `level`, `message`, `trace_id`, `span_id`, `parent_span_id`, `request_id`, `attributes` (объект JSON). Значения `trace_id` 32 hex, `span_id` и `parent_span_id` 16 hex (`query.rs:137-143`). Уровни `trace, debug, info, warn, error, fatal, unknown` (`wire.rs:59-70`).
 
-### `total`, facets, top-k и stats: что можно считать сейчас
+Схема хранения (`columns.rs:44-60`, `index.rs:18-29`): `attributes` хранится как JSON-строка, но в индексе отсутствует, поэтому фильтр и группировка по атрибутам невозможны. Для числовых атрибутов (например `duration_ms`) сейчас нет ни статистики, ни квантиля.
 
-- Для **структурных** фильтров total можно получить суммой всех bucket.count histogram или суммой `group-by level` с limit ≥7 (уровней ровно семь). Это полный count в снимке данного запроса, не размер страницы. Для text-фильтра такой путь отсутствует: HistogramRequest/GroupRequest не имеют text. [analytics requests][analytics-requests], [histogram][analytics-histogram], [group-by][analytics-group], [levels][wire-level]
-- `group-by service` с `filters.level=["error"]` даёт топ сервисов по ERROR; `group-by action` даёт число лог-событий на action. Это **не число вызовов**, если приложение пишет несколько логов на вызов. Нет distinct request/span, duration, p95 или sum/avg/min/max. [group aggregate][analytics-group]
-- Для выпадающего списка сервисов/серверов можно временно применять group-by соответствующего поля. Это максимум 1000 групп, отсортированных count DESC, без `next_cursor`, `has_more`, `other_count`, distinct-total или prefix search. Нельзя обещать полный каталог значений на больших данных. Возврат null есть для optional environment/service_instance/action; отфильтровать null текущими string[] фильтрами нельзя. Нужно определить, учитывает facet все активные фильтры или исключает собственный. [group response][analytics-requests], [group limit/order][analytics-group], [filter literals][analytics-frame]
-- Endpoint `/facets`, `/topk`, `/stats` summary отсутствуют; семантически ограниченный top-k count уже покрыт `/v1/stats/group-by`. Не стоит заводить дублирующий endpoint без потребности в новой семантике. [Core routes][core-router]
+Реестр (`access.rs:38-56`, `access.rs:160-189`): relay — `id, name, created_at`; agent — `id, name, relay_id, created_at`. Полей здоровья, версии, времени последнего контакта нет. Хеш токена хранится в SQLite (`access.rs:73-75`), токен возвращается один раз (`access.rs:108-118`, `access.rs:145-156`). Префиксы: `lnr_` для relay, `lna_` для agent. Ограничения: имя до 64 символов без управляющих (`access.rs:233-239`); удалить relay с агентами нельзя (`access.rs:191-208`, ошибка `relay_has_agents`).
 
-## Гистограммы и аналитика
+Retention по умолчанию 7 суток (`config.rs:70`: `LOGNARA_RETENTION_SECONDS`, 7 × 86400). Шаблон `infra.dc.html` показывает пример «retention 30 дн»; интерфейс должен показывать фактическую настройку. Для 30-дневного baseline алертов нужна отдельная история или изменение retention.
 
-`POST /v1/stats/histogram`: `from`, `to`, `filters`, `interval_seconds` (default 60). Ответ `{buckets:[{timestamp,count}], as_of}`. Interval 1..86400 s, ≤10000 buckets; UTC floor от Unix epoch, первая корзина может начаться раньше from, но учитываются только события `[from,to)`. Нули заполнены. Это **одна серия count**, без разбиения по level/service. [request/response][analytics-requests], [histogram implementation][analytics-histogram]
+## Core: поиск, фильтры, курсор
 
-Стек WARN/ERROR/INFO из шаблонов можно получить отдельными histogram-запросами с соответствующим lower-case level; сравнение предыдущего периода - отдельный запрос со сдвинутым диапазоном. Результат не атомарен между запросами и расходует два доступных analytics slots; рекомендуется серверная многосерийная гистограмма/summary для целого экрана. При большом числе параллельных запросов клиент получит 503. Доля ERROR = count(error) / count(all), средняя частота = total / длительность окна; смысл «событий в минуту» (последняя минута или среднее за выбранный период) нужно назвать. [histogram][analytics-histogram], [capacity][core-analytics-run], [analytics KPI][template-analytics]
+Запрос (`query.rs:26-35`): `from`, `to` (RFC3339), `filters` (поля → массивы), `text` (`query`, `mode` = `all` или `phrase`), `limit` (1..1000, по умолчанию 100), `cursor`. Неизвестные поля отклоняются (`deny_unknown_fields`). Правила (`query.rs:85-130`):
 
-`POST /v1/stats/group-by`: `group_by` из 1–2 **разных** полей environment/server/backend/service/service_instance/action/level; limit default 100, 1..1000. Count DESC, затем ключи ASC, значения строка/null. Группировка по message/attributes/pattern/trace/request_id не разрешена. Histogram и group-by имеют общие точные filters; text, SQL и attributes-предикаты отклоняются через deny_unknown_fields или PreparedFilter. [requests][analytics-requests], [validation and aggregate][analytics-group]
+- `from < to`.
+- Поля фильтра только из `index::EXACT_FIELDS` плюс `level` (`query.rs:98`; список в `index.rs:18-29`): `id, environment, server, backend, service, service_instance, action, trace_id, span_id, parent_span_id, request_id`.
+- Значений от 1 до 64 на поле, каждое до 4096 байт (`query.rs:101-111`).
+- `level` проверяется по строгому совпадению `as_str()` в нижнем регистре (`query.rs:120-121`, `query.rs:145-157`). `ERROR` даёт 400. Клиент обязан отправлять `error`.
+- Текст до 8192 байт и от 1 до 64 токенов (`query.rs:191-199`). Токены берутся из `message` по `index::tokens`. Режим `phrase` применяется только при 2 и более токенах (`query.rs:337-338`).
+- Поиск идёт по `timestamp` события в `[from, to)`, не по `ingested_at` (`query.rs:298-306`).
 
-DataFusion читает выбранные по времени Parquet и активные Arrow batches одного core snapshot, фильтрует timestamp и `sequence <= watermark`. Внешнего SQL нет: код строит типизированные выражения, таблиц SQL для браузера не регистрирует. SQL не является обязательной частью шести шаблонов; добавление редактора SQL расширит отдельную поверхность доступа/ресурсов. [frame][analytics-frame], [Core routes][core-router]
+Ответ (`query.rs:57-62`): `{events, next_cursor, as_of}`. `total` отсутствует. Core запрашивает `limit + 1` записей, чтобы понять наличие следующей страницы (`query.rs:243-249`).
 
-`duration_ms` отсутствует в Event, LogEvent и Arrow schema. При JSON ingest верхний duration_ms становится `attributes.duration_ms`; nested attributes перекрывает одноимённый верхний ключ. Тип и единицы не проверяются. В Arrow attributes хранится UTF-8 JSON-строкой; текущие агрегаты его не разбирают. Для p95/action нужно сначала определить контракт: numeric finite ≥0 ms, какие события являются завершением операции, как считать неизвестные/некорректные значения, точный или приближённый percentile. Минимальная реализация может читать утверждённый атрибут; отдельная типизированная колонка и миграция нужны только после решения о нормализованном поле. [Event][wire-event], [JSON API][core-model], [Arrow schema][columns-schema], [normalize::fill][relay-fill], [analytics p95][template-analytics]
+Курсор (`query.rs:159-171`, `query.rs:209-262`) подписан HMAC-SHA256 ключом процесса `core.cursor_key` (`query.rs:540-560`); неверная подпись или строка длиннее 4096 байт дают 410 (`query.rs:548-560`). Внутри курсор содержит `instance`, `generation`, `watermark`, хеш запроса (фильтры, текст и направление; `limit` в хеш не входит), последнюю пару `(timestamp, sequence)`, `issued_at` и `as_of`. Срок жизни 10 минут от первой страницы (`query.rs:219`). Смена параметров запроса даёт 400 (`query.rs:224-225`). Рестарт или смена `generation` даёт 410 (`query.rs:215-223`).
 
-## Trace и ошибки
+Сортировка: поиск DESC по `(timestamp, sequence)`, trace ASC (`query.rs:181-185`, `api.rs:148-166`).
 
-`GET /v1/traces/{trace_id}?from=...&to=...&limit=...&cursor=...` вызывает обычный search с единственным trace_id фильтром и ASC. Это полные log events с trace/span/parent_span IDs, **не коллекция завершённых spans**. Контракт не содержит start/end/span kind/status/duration; из одного timestamp нельзя построить достоверную waterfall 820/750/520 ms из errors. Первая версия может показывать timeline событий и ссылки; waterfall требует отдельного span-контракта либо утверждённых атрибутов start/end/duration и правил неполных spans. [trace handler][core-trace], [LogEvent][core-model], [waterfall example][template-errors]
+Видимость: снимок публикуется по `LOGNARA_REFRESH_MS` (default 1000 мс, `config.rs:69`), записи видны по `sequence <= watermark` (`analytics.rs:271`, `query.rs:298-310`).
 
-Stack trace/exception/deploy version не имеют канонических полей. Их можно показать из message/attributes при известном формате приложения; текущий relay сохраняет незнакомые JSON keys. Простое оформление Stack trace возможно, автоматическое выделение app/framework frames и fingerprint требует правил нормализации. [normalization][relay-fill], [stack trace template][template-errors]
+## Core: гистограмма и группировка
 
-`variant-f` требует паттерн с переменными ip/num/word/uuid, count/share/growth/sparkline, first seen/new, samples, доли значений переменных, скрытие, связь с проблемой и алертом. В core нет pattern_id/fingerprint на событии и агрегатов по ним. `fingerprint` в query.rs относится к **параметрам курсора**, а не сообщениям. Нельзя группировать один browser page и показывать count/share как статистику всего окна. Нужна серверная версия алгоритма, стабильный ID, ограничения cardinality и хранение соответствия event→pattern, а также миграционная стратегия для старых событий. [Event/schema][wire-event], [index fields][index-fields], [allowed group-by][analytics-group], [cursor fingerprint][query-search], [pattern template][template-patterns]
+Гистограмма (`analytics.rs:26-37`, `analytics.rs:71-131`): `from`, `to`, `filters`, `interval_seconds` (default 60, 1..86400). Корзины выравниваются по эпохе UTC (`date_bin` от `timestamp(0)`, `analytics.rs:91-98`). Первая корзина может начинаться раньше `from`, но учитываются только события `[from, to)`. Пустые корзины заполняются нулями. Лимит 10 000 корзин (`analytics.rs:84`). Ответ `{buckets: [{timestamp, count}], as_of}`. Текст в запросе не допускается (`deny_unknown_fields`).
 
-`errors` дополнительно требует persisted issue с состояниями new/open/resolved/reopened, first/last occurrence, count за окно, affected servers, transitions пользователя и связь с deployment. Ни API, ни таблиц проблем нет. Предлагается хранить пользовательские состояния/историю отдельно от сырых логов, с устойчивой связью на pattern/fingerprint: retention логов не должен молча стирать решение проблемы. Выбор хранилища/владельца (core или Dock) - отдельное архитектурное решение. [Core routes][core-router], [Dock migrations][dock-store], [errors template][template-errors]
+Группировка (`analytics.rs:40-49`, `analytics.rs:133-203`): `group_by` 1–2 различных поля из `environment, server, backend, service, service_instance, action, level` (`analytics.rs:135-152`); `limit` 1..1000 (`analytics.rs:155`), default 100 (`analytics.rs:44`). Порядок: `count` DESC, затем значения групп по возрастанию (`analytics.rs:160-165`). Пустые значения приходят как `null` (`analytics.rs:177-206`). `level` возвращается строкой через `LogLevel::from_code` (`analytics.rs:193-195`). Группы не содержат `has_more`, `other_count` и distinct-total.
 
-«Контекст ±5 мин» можно реализовать search вокруг timestamp с нужными source filters; связь по trace/request_id уже возможна. Нужно определить scope контекста (инстанс/сервис/trace), иначе попадут чужие события. «Копировать ссылку» - frontend URL-state с диапазоном/filters/selected id; id уже разрешён как фильтр. «Все события»/экспорт требуют пагинации core, не выгрузки последних 2000 SSE строк. [Exact fields][index-fields], [Main actions][template-main-actions], [cursor semantics][query-cursor]
+Ответы аналитики используют `count` строк событий, а не число вызовов или запросов (`analytics.rs:133-203`).
 
-## Инфраструктура и идентичность
+## Dock: инвентаризация
 
-Реестр core: relay `{id,name,created_at}`, agent `{id,name,relay_id,created_at}`. В нём нет last_seen, source, version, address, heartbeat, spool, last_event, health. Имя relay уникально глобально, имя agent внутри relay; поля name обрезаются trim, 1..64 символа без control. Это **учётные данные**, не обнаруженные работающие узлы. [registry models/schema][core-access], [registry names][core-access-name]
+Маршруты (`Lognara-dock/src/api.rs:119-150`), все под `/api`:
 
-Source события - `{environment?, server, backend, service, service_instance?}`. Агент берёт их из env (`service_instance` fallback HOSTNAME), relay переносит из batch. В Event/Source не входят `agent_id`/`relay_id`; core получает relay_id только в request extensions для authorization, а ingest обработчик не сохраняет его в событии. Relay получает от core только список хешей токенов агентов; его authorize возвращает boolean membership, не agent_id. Поэтому невозможно достоверно связать `agent.name == server` или `relay.name == backend`, вычислить last_event зарегистрированного узла либо безопасно ограничить Source указанным профилем. Один агент может заявить любой Source. [Source][wire-source], [agent config][agent-config], [relay source mapping][relay-ingest], [core authorization][core-relay-auth], [core ingest signature][core-ingest], [agent hashes/cache][relay-agents], [relay auth][relay-auth]
+- Вход и аккаунт: `POST /auth/login`, `POST /auth/logout`, `POST /auth/passkey/start|finish`, `GET /me`, `POST /account/password`, `GET /account/passkeys`, `POST /account/passkeys/start|finish`, `DELETE /account/passkeys/{id}`.
+- Логи: `GET /logs/stream` (SSE), `POST /logs/search`, `GET /traces/{trace_id}`, `POST /stats/histogram`, `POST /stats/group-by`.
+- Учётные данные: `GET|POST /relays`, `DELETE /relays/{id}`, `GET|POST /agents`, `DELETE /agents/{id}`.
+- Здоровье: `GET /health/live`, `GET /health/ready` (вне `/api`, `api.rs:158-161`).
 
-До телеметрии нужно утвердить node identity: сохранять аутентифицированный relay_id/agent_id на сервере, связать их с Source и heartbeat; определить поведение при пересоздании профиля/смене service_instance и совместимость старого wire. Не стоит строить инфраструктурный монитор на совпадении строковых имён. Для нескольких экземпляров одного профиля отдельно решить стабильный instance ID и boot ID.
+Авторизация: `AuthUser` требует cookie сессии, пользователь должен быть в htpasswd (`session.rs:156-181`). `require_origin` требует точного `Origin` для POST, PUT, DELETE и других небезопасных методов (`session.rs:183-196`). Обработчики поиска, аналитики и реестра принимают `AuthUser` (`Dock query.rs:177-213`, `Lognara-dock/src/access.rs`). Ответы `/api` получают `Cache-Control: no-store` (`api.rs:151-154`). Вход ограничивается `LoginLimiter` с ответом 429 и `Retry-After` (`auth.rs:76-96`, `api.rs:103-108`).
 
-Heartbeat endpoint и wire отсутствуют. Пустая пачка agent→relay отвергается, sender agent без pending выходит, поэтому отсутствие логов не означает отсутствие подключения. Статусы «Нет новых логов» и «Отключён» из infra принципиально не выводятся из current last log; нужен независимый heartbeat, received_at на принимающей стороне, TTL/stale и правила degraded. [empty batch][relay-ingest], [sender empty][agent-sender], [infra status semantics][template-infra]
+Проксирование поиска и аналитики (`Lognara-dock/src/core_client.rs`):
 
-Core `/metrics` защищён query Bearer, отдаёт Prometheus: accepted/duplicate/rejected batches, accepted events, relay/agent dropped, WAL bytes, visible_sequence, visibility lag, sealed/deleted segments, queries/errors, total query/ack duration. Counters не размечены по узлам; cumulative duration не позволяет p95. Нет per-node CPU/RAM, свободного диска, Parquet/index bytes, accepted/transport bytes total, process version или endpoint истории. Метрики создаются заново при Journal::open (wal_bytes инициализируется), rate требует delta/time и обработку restart/reset. `delta(accepted_events_total)/delta(time)` даёт скорость приёма новым core процессом, а histogram по timestamp - частоту событий приложения; эти показатели имеют разные часы и не взаимозаменяемы. WAL bytes - текущий объём очереди, не объём всего хранилища и не скорость трафика. [metrics][core-metrics], [metrics endpoint][core-metrics-endpoint], [metrics initialization][core-journal]
+- `search_page` (`core_client.rs:120-131`) возвращает полный envelope `{events, next_cursor, as_of}` и отклоняет ответ, если `events` больше `limit` (`core_client.rs:127`). Проверки длины на `trace` (`:145`), гистограмму (`:160`, не более 10 000) и группировку (`:172-183`, длина групп не больше `limit`, все поля присутствуют в `values`).
+- Таймаут запроса к core переопределяется на 35 секунд (`core_client.rs:21`, `:192`), общий клиент 10 секунд (`core_client.rs:19`, `:73`) не применяется к запросам поиска.
+- Ошибки core → ответы dock (`Lognara-dock/src/query.rs:165-173`, преобразование `CoreQueryError`): 400 → `invalid_query`, 410 → `cursor_expired`, 503 → `query_unavailable`, 504 → `query_timeout`, прочее → 502 `core_unavailable`.
 
-`visibility_lag_milliseconds` = возраст старейшей ещё не материализованной WAL-пачки от её receipt.received_at до now. Это не p95 «от события до Core». `core_received_at` хранится внутренне в Arrow, но отсутствует в JSON; `timestamp` относится приложению (fallback приёма агентом), `ingested_at` - приёму агентом. Для p95 доставки нужна измеряемая latency distribution, явные точки измерения и оговорка clock skew. [lag calculation][storage-publish], [StoredEvent/LogEvent][core-model], [normalization timestamps][relay-event], [columns][columns-schema]
+Live (`Lognara-dock/src/live.rs`): один опрос core на всех подписчиков (`live.rs:129-133`) с окном `[now - lookback, now + 60 с)`, `lookback` по умолчанию 300 с (`config.rs:184-188`), опрос каждую секунду (`config.rs:184`). Лимит 1000 событий за опрос (`live.rs:28`). Новому подписчику отдаются последние 200 (`live.rs:30`). SSE-события: `logs` (массив событий), `core_error`, `core_ok`, `lagged` (`live.rs:179-240`). Фильтров у потока нет. Дедупликация по `id` (`live.rs:154-159`). Если в окне больше 1000 событий, часть старых теряется без уведомления.
 
-Core retention default **7 суток**, шаблон показывает 30. Retention удаляет целые закрытые сегменты по max core_received_at, не по timestamp события; receipt history живёт минимум 7 дней. В `infra` нужно отображать фактическую config из серверного API, а не число из макета. Storage breakdown, oldest segment и прогноз disk fill требуют новых измерений/истории и обработки невозможности прогноза. [config][core-config], [retention][storage-retain], [infra storage][template-infra]
+Реестр (`Lognara-dock/src/access.rs`): dock не сохраняет plaintext персональных токенов relay/agent после создания. Центральные query/admin-токены хранятся в окружении и CoreClient на сервере, не выдаются браузеру. Новый relay или agent возвращается браузеру в ответе `201` с `Cache-Control: no-store` (`access.rs:110-117`). Список возвращается как есть из core (`{relays: [...]}`, `{agents: [...]}`).
 
-Dock уже знает размер broadcast subscriptions внутри Live и хранит sessions SQLite, но количества SSE-клиентов/активных сессий и версии не публикует. Dock `/health/ready` проверяет корректность htpasswd, **не доступность core**; нельзя подписывать его как здоровье всей цепочки. [Live][dock-live], [sessions schema][dock-store], [Dock ready][dock-router]
+Хранилище dock (`store.rs:14-30`): таблицы `sessions`, `users`, `passkeys`. Ничего для правил, каналов или состояний не предусмотрено.
 
-## Live: пределы существующего механизма
+Клиент: `Lognara-dock/web/src/api.ts` отправляет `credentials: "same-origin"`. Страница «Аналитика» (`Analytics.tsx:91-127`) выбирает интервал так, чтобы корзин было не больше 72 (`Analytics.tsx:67-68`). Запросы выполняются последовательно (`Analytics.tsx:88-89`). Страница «Логи» (`Logs.tsx:139-214`) использует поиск, trace, гистограмму и `EventSource("/api/logs/stream")`.
 
-SSE `/api/logs/stream` с auth session выдаёт `logs`, `core_error`, `core_ok`, `lagged`. Один общий poller ищет `[now-lookback,now+60s)` без пользовательских filters/text/cursor, limit 1000; новый подписчик получает до 200 событий, frontend хранит 2000. Следовательно, фильтрация только уже пришедших SSE данных не даёт полного filtered live view: нужный сервис может вытесняться из общей top1000. [Live poll][dock-live-poll], [SSE][dock-sse], [CoreClient][dock-client], [browser rows][dock-logs-merge]
+## Соответствие экранам
 
-При >1000 новых событий за опрос или доставке позднее lookback события теряются для ленты; это не надёжный tail. `lagged` - пропуски broadcast **пачек**, не точное число потерянных logs. Текущий браузер не подписан на lagged. Core cursor поискового окна не решает вечное tail-слежение за поздними публикациями. Для заявленной полноты нужны tail API по sequence/publication, resume/backfill и контракт gaps; для первой версии интерфейс должен явно обозначать ограниченную live-ленту. [live limitation][dock-live], [poll][dock-live-poll], [lagged event][dock-sse], [browser handlers][dock-logs-merge]
+| Шаблон | Что доступно сейчас | Что требуется новое |
+|---|---|---|
+| `Main.dc.html` (события) | поиск с фильтрами, курсор, trace, гистограмма; строка `service:billing AND level:(ERROR OR WARN)` (`Main.dc.html:103`) разбирается клиентом | exact total для текстового поиска; live с полнотой и фильтрами |
+| `variant-f.dc.html` (паттерны) | исходные `message` и `attributes` | шаблонизация сообщений, идентичность паттерна, first/last seen, доля, рост за час (`variant-f.dc.html:101-108`), действия «алерт по паттерну» и «скрыть» |
+| `analytics.dc.html` (аналитика) | count-гистограмма, group-by по level и service, сравнение периода клиентом | p95 `duration_ms` по действию (`analytics.dc.html:100`, `:154-156`), числовые атрибуты, distinct вызовов, сводка в одном снимке |
+| `errors.dc.html` (проблемы) | `level` и `trace_id`, сырые атрибуты | группировка по fingerprint, сущность проблемы, статус, повторы, серверы, история (`errors.dc.html:98-105`), stack trace |
+| `infra.dc.html` (инфраструктура) | `/metrics` core (Prometheus, query-токен), реестр relay и agent | heartbeat, последнее событие, версия, спул и здоровье каждого узла (`infra.dc.html:129-135`); заполнение диска по сегментам (`infra.dc.html:143-160`); задержка p95 (`infra.dc.html:89`) |
+| `alerts.dc.html` (алерты) | count-гистограмма как предпросмотр условия | CRUD правил, фоновый evaluator, состояния, история срабатываний, каналы Telegram и Discord (согласовано пользователем, см. `Dock/DesignIntegration.md`), повтор не чаще cooldown, тихие часы, сообщение о восстановлении (`alerts.dc.html:117-136`) |
 
-Live дедуплицирует по пользовательскому event.id. Relay принимает валидный supplied UUID, core дедуплицирует пачки по байтам, не отдельные IDs. Повторяющиеся IDs приложений схлопнутся в текущем Live/браузере. Это существующее ограничение, не причина для незапрошенного рефакторинга, но будущий tail стоит адресовать внутренним sequence. [relay supplied id][relay-fill], [Live dedup][dock-live-poll], [browser merge][dock-logs-merge], [journal receipt dedup][core-journal]
+## Инфраструктура: что известно из кода
 
-## Алерты
+- Relay и agent не предоставляют HTTP-эндпоинтов здоровья или метрик. Relay: только `POST /v1/batches` (`Lognara-relay/src/ingest.rs:33`). Agent: только `POST /v1/logs` (`Lognara-agent/src/ingest.rs:26`).
+- Потери relay и agent приходят в пачке как `dropped` (`wire.rs:18`, `wire.rs:26`) и суммируются в процессных счётчиках `relay_dropped_events_total` и `agent_dropped_events_total` (`journal.rs:140-162`, `metrics.rs:35-36`). Потери не сохраняются по источнику и не запрашиваются через API.
+- Prometheus gauge `wal_bytes`, `visible_sequence`, `visibility_lag_milliseconds` доступны на `/metrics` core (`metrics.rs:12-14`). Dock их не проксирует.
 
-Core router и Dock router не содержат alerts API; migrations Dock хранят только sessions/users/passkeys. Нет evaluator, persisted rules/firings, channel configuration, delivery queue/retry, cooldown/recovery/quiet-hours. Условие count можно считать существующим histogram, но автоматическое правило должно работать серверно даже при закрытом браузере. [routes][core-router], [Dock routes][dock-router], [Dock persistence][dock-store], [alert template][template-alerts]
+## Алерты: что известно из кода
 
-Шаблон запрашивает несколько разных типов правил: count threshold, новый pattern за 30d, pattern growth, отсутствие событий, сравнение с медианой 7d. Их нельзя честно реализовать одним checkbox/UI. Первый серверный этап может включить count threshold и silence; pattern rules зависят от модели паттернов, baseline median - от временных рядов и определения сравнительного окна. Для «silence» нужно отличать транспортный сбой/heartbeat stale от отсутствия бизнес-событий, если это требуется продуктом. [alert rule examples][template-alerts]
+- Нет таблиц, маршрутов, фоновых задач или каналов доставки. Поиск по `alert|webhook|telegram|discord` в `Lognara-dock/src` и `Lognara-core/src` не находит реализации.
+- Для вычисления условия можно использовать histogram/group-by, но они выполняются в аналитических слотах (2 на core, `storage.rs:88`). Фоновый evaluator будет конкурировать с интерактивными запросами и получать 503 при занятости (`api.rs:82`).
+- Секреты каналов (токены Telegram и Discord) негде хранить. Dock не содержит хранилища секретов, а токены core не должны логироваться и кэшироваться (`access.rs:1-5`, `api.rs:151-154`).
 
-Preview «сработало бы 3 раза» требует точной семантики окон (sliding/tumbling), transition detection, cooldown, late arrivals, часового пояса и quiet hours; сумма bucket превышений не обязательно равна числу notifications. Recovery и quiet-hours morning digest требуют persisted state. Доставку каналов следует вводить выбранными пользователем приоритетами; секреты хранить на сервере, не в браузерном состоянии/URL. Исходники текущего проекта не подтверждают ни одну интеграцию Telegram/Slack/Email/Discord/Webhook. [alert behavior][template-alerts]
+## Пробелы и риски (по убыванию важности)
 
-## Доступ и безопасность интеграции
+1. **Нет exact total и согласованного снимка.** Поиск не возвращает `total`. Несколько запросов аналитики используют разные снимки (`analytics.rs:89`, `:163`). Экран «52 574 события» и таблица паттернов не могут быть точными без нового серверного ответа с общим снимком.
+2. **Атрибуты не участвуют в агрегатах.** Нет индекса, фильтра, квантилей и распределений по `attributes` (`columns.rs:92`, `analytics.rs:135-152`). Для p95 нужен числовой контракт duration и новый агрегат. Его можно считать чтением утверждённого JSON-атрибута; отдельная материализованная колонка потребует решения о чтении/миграции старых сегментов. Stack trace можно оформить из существующих message/attributes без миграции. Fingerprint и паттерны требуют нового алгоритма, API и состояния, но не обязательно изменения сырых событий.
+3. **Нет устойчивого идентификатора паттерна и ошибки.** Сигнатуры не существуют. Версионирование шаблона и миграция потребуют отдельной модели и пересчёта.
+4. **Инфраструктура без состояния узлов.** Ни relay, ни agent не отправляют heartbeat или версию. Таблица «Узел / Heartbeat / Спул» невозможна без нового протокола и хранения.
+5. **Alerts без backend.** Нужны таблицы правил, evaluator с идемпотентными состояниями, cooldown, история, отдельный пул для фоновых запросов и хранение секретов каналов. Пункт затрагивает безопасность.
+6. **Retention 7 суток по умолчанию** (`config.rs:70`) отличается от примера шаблона (30 дней). Для правил с 30-дневным baseline требуется отдельное состояние/агрегаты или иная настройка retention.
+7. **Общий SSE не полон и не имеет серверных фильтров.** Клиент применяет условия локально, это не обеспечивает полноту выбранного сервиса. Окно 300 секунд, лимит 1000 за опрос, дедупликация по `id`, выбор по `timestamp` события (`live.rs:28-34`, `:129-153`). Поздние события относятся к окну по времени события, а не приёма.
+8. **Строгий регистр уровней.** `ERROR` даёт 400 (`query.rs:120-121`, `:145-157`). Любой новый UI должен отправлять нижний регистр.
+9. **`group-by` не даёт полноты значений.** Лимит до 1000, порядок по count, нет `other` и `has_more`. Для списка сервисов на большом объёме часть значений пропадает. Значение `null` нельзя отфильтровать существующими `string[]`-фильтрами (`analytics.rs:177-206`).
+10. **Нет поиска по подстроке и regexp.** Текст токенизирован (`index::tokens`). Для части шаблонов (например поиск `ERROR` внутри `message`) семантика будет отличаться от ожиданий.
+11. **Курсор только вперёд и живёт 10 минут** от первой страницы (`query.rs:219`). Долгая работа оператора потеряет переход дальше.
+12. **Токены core не выдаются пользователям, но управление учётными данными зависит от admin-токена dock.** Ротации и повторного показа токена нет. Удалить relay с агентами нельзя (`access.rs:191-208`).
+13. **Лимит 35 секунд у dock и 30 секунд у core** (`core_client.rs:21`, `config.rs:73`). Это допустимо, но клиент не имеет собственного таймаута на `fetch` в `api.ts`.
+14. **Очереди аналитики.** Два слота на весь core (`storage.rs:88`). Одновременное открытие «Аналитики» несколькими пользователями и фоновый evaluator дадут 503.
 
-Все новые proxy endpoints Dock должны требовать `AuthUser`; POST/DELETE/PATCH проходят тот же `require_origin`. Он проверяет Origin у любого non-GET/HEAD/OPTIONS, включая POST-поиск. Cookie HttpOnly/Secure/SameSite Strict; core query/admin токены остаются в backend. Браузеру следует обращаться только к `/api/*`. [AuthUser/cookie/origin][dock-session], [client tokens][dock-client], [router middleware][dock-router]
+## Что можно сделать без нового backend
 
-Сейчас AuthUser содержит username/token_hash, role/permissions отсутствуют. Любой аутентифицированный пользователь может управлять профилями relay/agent через общий admin credential Dock. Надпись `admin` шаблона - пример username, не доказательство RBAC. Если требуется ограничить rules/channels/node admin или дать viewer-only доступ, это отдельный контракт ролей. [AuthUser][dock-session], [access handlers][dock-access], [App user name][dock-app]
+- Поиск, курсор, trace, live с текущими ограничениями, гистограмма объёма, group-by по level и service, count по уровням и топ сервисов по ERROR.
+- Управление relay и agent, включая выдачу токена один раз.
+- Доля ERROR по `group-by level` с учётом всех семи уровней в знаменателе (`Analytics.tsx:94-96`).
+- Сравнение с предыдущим периодом двумя запросами, как уже сделано в `Analytics.tsx:115-122`.
+- Точный count на клиенте в пределах одного ответа гистограммы и сумма по `group-by level`. Для структурных фильтров без текста.
 
-Персональные relay/agent secrets видны один раз при создании; профили содержат только metadata, токен хранится core хешем, create response Dock `Cache-Control:no-store`. Перенос раздела «Подключения» в Infra должен сохранить этот flow и запрет удаления relay с агентами. Новые telemetry responses не должны включать token hashes или payload секретов. [registry][core-access], [one-time proxy][dock-access], [delete restriction][core-access-delete]
+## Что нужно добавить (в порядке зависимостей)
 
-Строки message/attributes/stacktrace/variable values - недоверенные данные логов: рендерить как текст/React text nodes; подсветку JSON и trace строить без вставки raw HTML. Ссылка из шаблона `href="#"` не является API. Alert webhooks вводят outbound requests и нуждаются в определённой политике URL/redirect/network destinations; это требование новой функциональности, не ограничение текущего query API.
+1. Серверный ответ «сводка» с общим снимком: `total`, гистограмма по level, топ-k и `as_of` в одном вызове. Либо явный snapshot token между запросами.
+2. Числовой контракт `duration_ms` и типизированные агрегаты; материализация/индекс — по подтверждённой необходимости. Stack trace отображается из существующих полей при согласованном формате.
+3. Модель паттернов: шаблон, версия, first/last seen, счётчики по окнам.
+4. Модель проблем: fingerprint, статус, история, связь с паттерном.
+5. Heartbeat и состояние узлов: протокол агента и relay, хранение последнего контакта, версии, спула, потерь по источнику.
+6. Правила алертов: таблицы, evaluator, состояния, cooldown, журнал, каналы с хранением секретов.
+7. Решение по retention и холодному хранению.
 
-## Рекомендуемые решения до реализации
+## Проверки и ограничения
 
-1. Договориться о первой функциональной поставке: historical logs + базовая count-аналитика + существующие подключения доступны раньше pattern/issue/alert/heartbeat.
-2. Утвердить общий query model: диапазон, exact filters, message text; lower-case levels; границы ограниченного DSL; URL-state. Метрики для text-запроса должны использовать тот же предикат или показываться отдельно с явным scope.
-3. Для таблицы и графиков выбрать строго общий snapshot или независимые ответы с показом `as_of`; не выдавать top-k за полный facet и page length за total.
-4. Решить identity relay/agent/source **до** мониторинга и heartbeat; не использовать совпадение имён как join key.
-5. Утвердить источник duration/span/exception/deployment metadata и модель паттернов с версией fingerprint. Числовые p95 и waterfall нельзя получить из текущего JSON без новых соглашений.
-6. Для alert этапа выбрать первый тип правила и канал, semantics окна/late logs/cooldown и retention истории. 30d new-pattern baseline несовместим с default 7d raw retention без отдельного состояния/агрегатов.
-
-Проверки для реализации: contract/integration tests proxy filters/cursor/400/410/503/504 и Origin/session; точность total/histogram/series при text-фильтре, null facet и >1000 групп; сохранение server order; export completeness и TTL; heartbeat без логов/после рестарта/при spool backlog; issue reopen и alert transitions на истории. В этой read-only проверке тесты не запускались: выводы подтверждены кодом.
-
-[core-router]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-core/src/api.rs:28
-[dock-router]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-dock/src/api.rs:110
-[dock-client]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-dock/src/core_client.rs:14
-[query-request]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-core/src/query.rs:24
-[query-filter]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-core/src/query.rs:85
-[query-range]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-core/src/query.rs:287
-[index-fields]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-core/src/index.rs:18
-[query-level]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-core/src/query.rs:145
-[wire-level]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-core/src/wire.rs:151
-[relay-level]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-relay/src/normalize.rs:174
-[query-search]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-core/src/query.rs:181
-[index-tokenizer]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-core/src/index.rs:61
-[query-response]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-core/src/query.rs:57
-[query-pagination]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-core/src/query.rs:239
-[query-topdocs]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-core/src/query.rs:446
-[query-cursor]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-core/src/query.rs:204
-[storage-publish]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-core/src/storage.rs:370
-[core-query-errors]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-core/src/api.rs:205
-[storage-runtime]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-core/src/storage.rs:63
-[core-config]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-core/src/config.rs:48
-[analytics-requests]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-core/src/analytics.rs:24
-[analytics-histogram]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-core/src/analytics.rs:71
-[analytics-group]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-core/src/analytics.rs:133
-[analytics-frame]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-core/src/analytics.rs:227
-[core-analytics-run]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-core/src/api.rs:74
-[wire-event]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-core/src/wire.rs:40
-[core-model]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-core/src/model.rs:8
-[columns-schema]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-core/src/columns.rs:32
-[relay-fill]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-relay/src/normalize.rs:121
-[core-trace]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-core/src/api.rs:138
-[core-access]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-core/src/access.rs:37
-[core-access-name]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-core/src/access.rs:233
-[core-access-delete]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-core/src/access.rs:191
-[wire-source]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-core/src/wire.rs:30
-[agent-config]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-agent/src/config.rs:135
-[relay-ingest]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-relay/src/ingest.rs:108
-[core-relay-auth]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-core/src/api.rs:360
-[core-ingest]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-core/src/api.rs:232
-[relay-agents]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-relay/src/agents.rs:17
-[relay-auth]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-relay/src/ingest.rs:31
-[agent-sender]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-agent/src/sender.rs:64
-[core-metrics]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-core/src/metrics.rs:4
-[core-metrics-endpoint]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-core/src/api.rs:333
-[core-journal]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-core/src/journal.rs:64
-[relay-event]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-relay/src/normalize.rs:64
-[storage-retain]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-core/src/storage.rs:466
-[dock-live]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-dock/src/live.rs:1
-[dock-live-poll]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-dock/src/live.rs:129
-[dock-sse]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-dock/src/live.rs:178
-[dock-logs-merge]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-dock/web/src/pages/Logs.tsx:14
-[dock-store]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-dock/src/store.rs:12
-[dock-session]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-dock/src/session.rs:132
-[dock-access]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-dock/src/access.rs:51
-[dock-app]: /Users/liis/.t3/worktrees/Lognara/t3-08da1ce8/Lognara-dock/web/src/App.tsx:40
-[template-main-query]: </Users/liis/Projects/Lognara/docs/страницы дизайна/Main.dc.html:95>
-[template-main-actions]: </Users/liis/Projects/Lognara/docs/страницы дизайна/Main.dc.html:153>
-[template-patterns]: </Users/liis/Projects/Lognara/docs/страницы дизайна/variant-f.dc.html:100>
-[template-errors]: </Users/liis/Projects/Lognara/docs/страницы дизайна/errors.dc.html:85>
-[template-analytics]: </Users/liis/Projects/Lognara/docs/страницы дизайна/analytics.dc.html:85>
-[template-infra]: </Users/liis/Projects/Lognara/docs/страницы дизайна/infra.dc.html:85>
-[template-alerts]: </Users/liis/Projects/Lognara/docs/страницы дизайна/alerts.dc.html:80>
+- Инвентаризация контрактов основана на исходниках. Проверки Rust, frontend, браузерных сценариев и запуска настоящего dock с тестовым core выполнялись отдельно в ходе реализации.
+- Нагрузочная проверка и приёмка на production-данных не выполнялись.
+- Вывод о Prometheus-метриках и отсутствии heartbeat основан на отсутствии таких полей в исходниках. Внешняя документация не проверялась.

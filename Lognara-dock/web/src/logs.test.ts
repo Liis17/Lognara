@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { appendHistory, contextBounds, eventsToCsv, matchesQuery, parseQuery, prependLive, sourceQuery } from "./logs.ts";
+import { appendHistory, contextBounds, eventBounds, eventsToCsv, matchesQuery, parseQuery, prependLive, sourceQuery } from "./logs.ts";
 import type { LogEvent } from "./types.ts";
 
 const event = (overrides: Partial<LogEvent> = {}): LogEvent => ({
@@ -116,4 +116,17 @@ test("CSV prevents spreadsheet formulas while leaving the source event unchanged
     assert.equal(row[header.indexOf("message")], `'${formula}`);
     assert.equal(input.message, formula);
   }
+});
+
+test('Live tokenization follows core Unicode tokenization then per-character lowercase', () => {
+  assert.equal(matchesQuery(event({ message: 'İstanbul' }), parseQuery('i')), false);
+  assert.equal(matchesQuery(event({ message: 'ΟΣ' }), parseQuery('οσ')), true);
+  assert.equal(matchesQuery(event({ message: 'ΟΣ' }), parseQuery('ος')), false);
+});
+
+test('event lookup bounds preserve nanoseconds, carry seconds and handle pre-epoch timestamps', () => {
+  assert.deepEqual(eventBounds('2026-10-14T12:00:00.123456789Z'), { from: '2026-10-14T12:00:00.123456789Z', to: '2026-10-14T12:00:00.123456790Z' });
+  assert.equal(eventBounds('2026-10-14T12:00:00.999999999Z').to, '2026-10-14T12:00:01.000000000Z');
+  assert.equal(eventBounds('1969-12-31T23:59:59.123456789Z').to, '1969-12-31T23:59:59.123456790Z');
+  assert.throws(() => eventBounds('bad-time'));
 });

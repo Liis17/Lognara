@@ -97,7 +97,7 @@ h3 { font-size: 13px; font-weight: 600; }
 .topbar nav { display: flex; flex-wrap: wrap; gap: 4px; }
 .topbar nav a { color: var(--ink3); text-decoration: none; padding: 6px 10px; border-radius: 999px; font-weight: 500; }
 .topbar nav a.active { color: var(--ink); background: var(--raised); }
-.topbar .user { margin-left: auto; color: var(--ink3); font-size: 12px; }
+.topbar .user { margin-left: auto; color: var(--ink3); font-size: 12px; min-width: 0; max-width: 160px; overflow-wrap: anywhere; }
 main { padding: 20px 26px; }
 section { min-width: 0; }
 .session-state { padding: 32px; color: var(--ink3); }
@@ -148,7 +148,7 @@ table.logs, .logs-table { font-size: 12px; }
 .event-details td { padding: 16px 20px; }
 .detail-grid { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1.2fr) auto; gap: 22px; }
 .detail-grid h3 { text-transform: uppercase; color: var(--ink3); font-size: 11px; letter-spacing: .07em; margin: 0 0 8px; }
-.fields { display: grid; grid-template-columns: 100px minmax(0,1fr); gap: 4px 10px; margin: 0; font: 12px/1.6 var(--mono); }
+.fields { display: grid; grid-template-columns: 120px minmax(0,1fr); gap: 4px 10px; margin: 0; font: 12px/1.6 var(--mono); }
 .fields dt { color: var(--ink3); }
 .fields dd { margin: 0; color: var(--ink); overflow-wrap: anywhere; }
 pre.json, .event-details pre, tr.details pre { margin: 0; padding: 12px; background: var(--bg); border-radius: 8px; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.6 var(--mono); color: var(--ink2); }
@@ -160,7 +160,7 @@ pre.json, .event-details pre, tr.details pre { margin: 0; padding: 12px; backgro
 .histogram-grid { stroke: var(--line); }
 .histogram svg .histogram-bar { fill: var(--info); }
 .histogram-comparison { stroke: var(--ink3); }
-.histogram-scale { fill: var(--ink3); font: 11px var(--mono); }
+.histogram-scale { display: flex; justify-content: space-between; margin-top: 6px; color: var(--ink3); font: 11px var(--mono); }
 .histogram-bucket.interactive { cursor: pointer; }
 .histogram-bucket:focus { outline: none; }
 .histogram-bucket:focus-visible .histogram-hit { fill: var(--raised); stroke: var(--accent); stroke-width: 2px; }

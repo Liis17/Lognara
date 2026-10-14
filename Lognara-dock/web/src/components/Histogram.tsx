@@ -52,7 +52,7 @@ export default function Histogram({
 
   return (
     <div className="histogram" aria-busy={loading}>
-      <svg viewBox={`0 0 ${width} ${height + 24}`} aria-labelledby={titleId} role="group">
+      <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-labelledby={titleId} role="group">
         <title id={titleId}>{label}. Максимум: {number.format(maximum)} событий за интервал.</title>
         {[0, 0.25, 0.5, 0.75, 1].map((fraction) => (
           <line key={fraction} className="histogram-grid" x1="0" x2={width}
@@ -82,9 +82,8 @@ export default function Histogram({
         })}
         {points && <polyline className="histogram-comparison" points={points} fill="none"
           strokeWidth="2" strokeDasharray="6 5" vectorEffect="non-scaling-stroke" pointerEvents="none" aria-hidden="true" />}
-        <text className="histogram-scale" x="0" y={height + 19}>0</text>
-        <text className="histogram-scale" x={width} y={height + 19} textAnchor="end">Пик: {number.format(maximum)}</text>
       </svg>
+      <div className="histogram-scale" aria-hidden="true"><span>0</span><span>Пик: {number.format(maximum)}</span></div>
       <div className="histogram-axis" aria-hidden="true">
         <span>{time.format(new Date(buckets[0].timestamp))}</span>
         {buckets.length > 2 && <span>{time.format(new Date(buckets[Math.floor(buckets.length / 2)].timestamp))}</span>}

@@ -2,7 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 import { api, ApiError, errorText } from "../api";
 import Histogram from "../components/Histogram";
-import { appendHistory, contextBounds, eventsToCsv, LOG_LEVELS, matchesQuery, MAX_LIVE_ROWS,
+import { appendHistory, contextBounds, eventBounds, eventsToCsv, LOG_LEVELS, matchesQuery, MAX_LIVE_ROWS,
   parseQuery, prependLive, sourceQuery } from "../logs";
 import type { ParsedQuery } from "../logs";
 import type { HistogramResponse, LogEvent, SearchRequest, SearchResponse } from "../types";
@@ -22,6 +22,10 @@ const calendar = new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "2-di
 function eventTime(timestamp: string): string {
   const fraction = timestamp.match(/\.(\d+)/)?.[1].slice(0, 3).padEnd(3, "0") ?? "000";
   return `${clock.format(new Date(timestamp))}.${fraction}`;
+}
+
+function periodLabel(timestamp: string): string {
+  return Number.isFinite(Date.parse(timestamp)) ? `${calendar.format(new Date(timestamp))} ${clock.format(new Date(timestamp))}` : "Некорректное время";
 }
 
 function EventDetails({ event, onContext, onTrace, onCopy }: {
@@ -60,6 +64,8 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
       from: params.get("from") ?? new Date(now - RANGES[range]).toISOString(),
       to: params.get("to") ?? new Date(now).toISOString(),
       traceId: params.get("trace_id") ?? "", selected: params.get("selected"),
+      selectedTimestamp: params.get("selected_timestamp"),
+      occurrence: /^\d{1,6}$/.test(params.get("selected_occurrence") ?? "") ? Number(params.get("selected_occurrence")) : 0,
     };
   }, [paramsKey]);
   const queryKey = JSON.stringify([location.view, location.q, location.range, location.from, location.to, location.traceId]);
@@ -104,6 +110,11 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
   const unauthorized = useRef(onUnauthorized);
   unauthorized.current = onUnauthorized;
   const intervalSeconds = Math.max(1, Math.ceil((Date.parse(location.to) - Date.parse(location.from)) / 1000 / 60));
+  const rows = liveEnabled ? liveRows : page.events;
+  const selectedIndex = rows.reduce<number[]>((indices, event, index) => {
+    if (event.id === location.selected && (!location.selectedTimestamp || event.timestamp === location.selectedTimestamp)) indices.push(index);
+    return indices;
+  }, [])[location.occurrence] ?? -1;
   const fixedRange = Date.parse(location.to) - Date.parse(location.from) !== RANGES[location.range];
 
   const updateLocation = (values: Record<string, string | null>, replace = false) => {
@@ -112,6 +123,7 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
       for (const [key, value] of Object.entries(values)) {
         if (value === null || value === "") next.delete(key); else next.set(key, value);
       }
+      if (values.selected === null) { next.delete("selected_timestamp"); next.delete("selected_occurrence"); }
       return next;
     }, { replace });
   };
@@ -172,24 +184,34 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
     const controller = new AbortController();
     setSelectedEvent(null); setSelectionNote("");
     const selected = location.selected;
-    if (!selected || parsed.error || liveEnabled || loading || page.events.some((event) => event.id === selected)) {
+    if (!selected || parsed.error || liveEnabled || loading || selectedIndex !== -1) {
       return () => controller.abort();
     }
     setSelectionNote("Загружаем событие из ссылки…");
+    let bounds = { from: location.from, to: location.to };
+    try {
+      if (location.selectedTimestamp) bounds = eventBounds(location.selectedTimestamp);
+    } catch (error) {
+      setSelectionNote(errorText(error)); return () => controller.abort();
+    }
     api<SearchResponse>("POST", "/api/logs/search", {
-      from: location.from, to: location.to, ...parsed.query,
-      filters: { ...parsed.query.filters, id: [selected] }, limit: 1,
+      ...bounds, ...parsed.query,
+      filters: { ...parsed.query.filters, id: [selected] }, limit: 1000,
     }, { signal: controller.signal }).then((response) => {
       if (controller.signal.aborted) return;
-      setSelectedEvent(response.events[0] ?? null);
-      setSelectionNote(response.events.length ? "Событие из ссылки показано отдельно от текущей страницы." :
-        "Событие не найдено в этом диапазоне. Возможно, оно удалено по сроку хранения.");
+      const candidates = location.view === "trace" ? [...response.events].reverse() : response.events;
+      const found = location.view === "trace" && response.next_cursor ? undefined : candidates[location.occurrence];
+      setSelectedEvent(found ?? null);
+      setSelectionNote(location.view === "trace" && response.next_cursor ? "Найдено больше 1000 совпадений. Точный порядок Trace восстановить нельзя; автоматическое выделение не выполнено." :
+        !found ? "Событие не найдено среди первых 1000 совпадений. Возможно, оно удалено по сроку хранения." :
+        response.events.length > 1 ? "Найдено несколько событий с этими признаками. Выбор по порядку может измениться при повторном поступлении; для точной идентичности нужен уникальный ID события." :
+        "Событие из ссылки показано отдельно от текущей страницы.");
     }).catch((error) => {
       if (controller.signal.aborted) return;
       if (error instanceof ApiError && error.status === 401) unauthorized.current(); else setSelectionNote(errorText(error));
     });
     return () => controller.abort();
-  }, [location.selected, queryKey, page.events, loading, liveEnabled, parsed.error]);
+  }, [location.selected, location.selectedTimestamp, location.occurrence, selectedIndex, queryKey, page.events, loading, liveEnabled, parsed.error]);
   useEffect(() => {
     pausedRef.current = false; setPaused(false); pending.current = []; setPendingCount(0); setLiveRows([]); setLiveNotice("");
     if (location.view === "trace" || parsed.error) { setLiveEnabled(false); return; }
@@ -269,22 +291,23 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
   const refreshHistory = () => { setRange(location.range); restart(); };
   const openContext = (event: LogEvent) => {
     setLiveEnabled(false);
-    updateLocation({ view: "events", q: sourceQuery(event), trace_id: null, selected: event.id, ...contextBounds(event.timestamp) });
+    updateLocation({ view: "events", q: sourceQuery(event), trace_id: null, selected: null, ...contextBounds(event.timestamp) });
   };
   const openTrace = (event: LogEvent) => {
     if (!event.trace_id) return;
     setLiveEnabled(false);
-    updateLocation({ view: "trace", q: null, trace_id: event.trace_id, selected: event.id, ...(liveEnabled ? contextBounds(event.timestamp) : {}) });
+    updateLocation({ view: "trace", q: null, trace_id: event.trace_id, selected: null, ...(liveEnabled ? contextBounds(event.timestamp) : {}) });
   };
   const copyLink = async (event: LogEvent) => {
     const query = new URLSearchParams({ view: location.view, range: location.range, q: location.q,
       from: location.from, to: location.to, selected: event.id });
+    query.set("selected_timestamp", event.timestamp);
+    query.set("selected_occurrence", String(location.occurrence));
     if (location.view === "trace") query.set("trace_id", location.traceId);
     if (liveEnabled) for (const [key, value] of Object.entries(contextBounds(event.timestamp))) query.set(key, value);
     try { await navigator.clipboard.writeText(`${window.location.origin}/logs?${query}`); setCopyNote("Ссылка скопирована."); }
     catch { setCopyNote("Не удалось скопировать ссылку. Проверьте доступ к буферу обмена."); }
   };
-  const rows = liveEnabled ? liveRows : page.events;
   const exportRows = (format: "json" | "csv") => {
     const payload = format === "csv" ? eventsToCsv(rows) : JSON.stringify({
       scope: "loaded_rows", exported_at: new Date().toISOString(), view: liveEnabled ? "live" : location.view,
@@ -354,7 +377,10 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
       <button type="button" className="button" aria-pressed={paused} onClick={togglePause}>{paused ? "Продолжить" : "Пауза"}</button>
       {paused && <span className="muted">На паузе · в буфере {pendingCount} строк</span>}
       <button type="button" className="button" onClick={refreshHistory}>Обновить историю</button>
-    </div> : <p className="page-note">Диапазон [from, to): {location.from} → {location.to}{page.as_of && ` · Снимок поиска ${page.as_of}`}</p>}
+    </div> : <p className="page-note">Период: <time dateTime={location.from} title={location.from}>{periodLabel(location.from)}</time>
+      {" → "}<time dateTime={location.to} title={location.to}>{periodLabel(location.to)}</time>
+      {" · "}{Intl.DateTimeFormat().resolvedOptions().timeZone}
+      {page.as_of && <> · Обновлено <time dateTime={page.as_of} title={page.as_of}>{clock.format(new Date(page.as_of))}</time></>}</p>}
     {liveEnabled && <p className="page-note">Live показывает новые поступления из общего потока, до 2000 строк. Возможны пропуски при высокой нагрузке;
       для полного диапазона используйте историю. Пауза по Space вне элементов управления.</p>}
     {liveEnabled && liveNotice && <p className="page-note" role="status">{liveNotice}</p>}
@@ -377,6 +403,8 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
     {location.view === "trace" && <p className="page-note">Логи упорядочены от ранних к поздним. Это корреляция по trace_id;
       spans и длительности появятся отдельным этапом.</p>}
     {copyNote && <p className="page-note" role="status">{copyNote}</p>}
+    {location.selected && rows.filter((event) => event.id === location.selected && (!location.selectedTimestamp || event.timestamp === location.selectedTimestamp)).length > 1 &&
+      <p className="page-note" role="status">Несколько строк имеют одинаковые признаки записи. Выбор в ссылке зависит от их порядка; для точной идентичности нужен уникальный ID события.</p>}
     {selectionNote && <p className="page-note" role="status">{selectionNote}</p>}
     {selectedEvent && <section className="panel event-details" aria-label="Событие из ссылки">
       <h2>{selectedEvent.level.toUpperCase()} · {selectedEvent.timestamp}</h2><p>{selectedEvent.message}</p>{details(selectedEvent)}
@@ -385,19 +413,24 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
       <table className="logs-table"><thead><tr>
         <th scope="col">Время</th><th scope="col">Уровень</th><th scope="col">Источник</th><th scope="col">Сообщение</th>
       </tr></thead><tbody>{rows.map((event, index) => <Fragment key={`${event.id}:${index}`}>
-        <tr className={`event-row level-${event.level} ${location.selected === event.id ? "open" : ""}`}>
+        <tr className={`event-row level-${event.level} ${selectedIndex === index ? "open" : ""}`}>
           <td className="time" title={event.timestamp}>
             {Date.parse(location.to) - Date.parse(location.from) >= 86_400_000 && <span className="date">{calendar.format(new Date(event.timestamp))}</span>}
             <time dateTime={event.timestamp}>{eventTime(event.timestamp)}</time>
           </td>
           <td><span className={`level level-${event.level}`}>{event.level.toUpperCase()}</span></td>
           <td className="source">{event.service}<br /><span className="muted">{event.service_instance ?? event.server}</span></td>
-          <td className="message"><button type="button" className="row-button" aria-expanded={location.selected === event.id}
-            onClick={() => updateLocation({ selected: location.selected === event.id ? null : event.id }, true)}>
-            <span className="caret" aria-hidden="true">{location.selected === event.id ? "▾" : "▸"}</span><code>{event.message}</code>
+          <td className="message"><button type="button" className="row-button" aria-expanded={selectedIndex === index}
+            onClick={() => {
+              const occurrence = rows.slice(0, index).filter((row) => row.id === event.id && row.timestamp === event.timestamp).length;
+              updateLocation({ selected: selectedIndex === index ? null : event.id,
+                selected_timestamp: selectedIndex === index ? null : event.timestamp,
+                selected_occurrence: selectedIndex === index ? null : String(occurrence) }, true);
+            }}>
+            <span className="caret" aria-hidden="true">{selectedIndex === index ? "▾" : "▸"}</span><code>{event.message}</code>
           </button></td>
         </tr>
-        {location.selected === event.id && <tr className="event-details"><td colSpan={4}>{details(event)}</td></tr>}
+        {selectedIndex === index && <tr className="event-details"><td colSpan={4}>{details(event)}</td></tr>}
       </Fragment>)}</tbody></table>
       {!rows.length && <p className="empty-state" role="status">{!liveEnabled && loading ? "Загружаем события…" :
         liveEnabled ? "Ожидаем события Live, соответствующие запросу." : parsed.error || searchError ? "Поиск не выполнен." : "В выбранном диапазоне событий нет."}</p>}

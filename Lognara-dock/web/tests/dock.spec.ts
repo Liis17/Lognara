@@ -16,7 +16,7 @@ const events = Array.from({ length: 70 }, (_, index) => ({
 }));
 
 type Call = { path: string; body: Record<string, any> };
-async function fixture(page: Page, initiallyAuthenticated = true) {
+async function fixture(page: Page, initiallyAuthenticated = true, dataset = events) {
   let authenticated = initiallyAuthenticated;
   const calls: Call[] = [];
   await page.route('**/api/**', async (route) => {
@@ -38,15 +38,16 @@ async function fixture(page: Page, initiallyAuthenticated = true) {
     if (path === '/api/relays') return reply({ relays: [{ id: 1, name: 'relay-eu', created_at: new Date(now).toISOString() }] });
     if (path === '/api/agents') return reply({ agents: [] });
     if (path === '/api/logs/search') {
-      let rows = events;
+      let rows = dataset;
       for (const [field, values] of Object.entries(body.filters ?? {})) {
         rows = rows.filter((event) => (values as string[]).includes(String(event[field as keyof typeof event])));
       }
       if (body.text) rows = rows.filter((event) => event.message.toLowerCase().includes(body.text.query.toLowerCase()));
+      if (body.filters?.id && body.limit === 1000) rows = rows.filter(event => event.timestamp === body.from);
       const offset = body.cursor === 'page-2' ? 50 : 0;
       return reply({ events: rows.slice(offset, offset + body.limit), next_cursor: offset + body.limit < rows.length ? 'page-2' : null, as_of: new Date(now).toISOString() });
     }
-    if (path.startsWith('/api/traces/')) return reply({ events: events.slice(0, 4).reverse(), next_cursor: null, as_of: new Date(now).toISOString() });
+    if (path.startsWith('/api/traces/')) return reply({ events: dataset.slice(0, 4).reverse(), next_cursor: null, as_of: new Date(now).toISOString() });
     if (path === '/api/stats/histogram') {
       const start = Date.parse(body.from);
       const step = body.interval_seconds * 1000;
@@ -149,6 +150,13 @@ test('desktop screenshots preserve actual template composition', async ({ page }
   await page.screenshot({ path: test.info().outputPath('logs-desktop.png'), fullPage: true });
   await page.goto('/analytics');
   await expect(page.locator('.metric').filter({ hasText: 'Доля ERROR' })).toContainText('7%');
+  const plotInsets = await page.locator('svg').evaluate((svg) => {
+    const outer = svg.getBoundingClientRect();
+    const bars = svg.querySelectorAll('.histogram-bar');
+    return [bars[0].getBoundingClientRect().left - outer.left,
+      outer.right - bars[bars.length - 1].getBoundingClientRect().right];
+  });
+  expect(Math.max(...plotInsets)).toBeLessThan(8);
   await page.screenshot({ path: test.info().outputPath('analytics-desktop.png'), fullPage: true });
 });
 
@@ -179,4 +187,52 @@ test('live pause buffers new events and Space inside search does not toggle it',
   await expect(page.locator('.row-button')).toHaveCount(3);
   await page.evaluate(() => (window as any).__testStream.dispatchEvent(new MessageEvent('lagged', { data: '{}' })));
   await expect(page.getByText(/Live пропустил пачки событий/)).toBeVisible();
+});
+
+test('repeated event ids open one occurrence and shared link restores its timestamp', async ({ page }) => {
+  const repeated = { ...events[1], id: events[0].id, message: 'Repeated ID second event' };
+  await fixture(page, true, [...events.slice(0, 50), repeated]);
+  await page.goto('/logs');
+  await page.getByRole('button', { name: 'Загрузить ещё 50', exact: true }).click();
+  await page.getByRole('button', { name: 'Repeated ID second event', exact: true }).click();
+  await expect(page.locator('.row-button[aria-expanded=true]')).toHaveCount(1);
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+  await page.getByRole('button', { name: 'Копировать ссылку', exact: true }).click();
+  const shared = await page.evaluate(() => navigator.clipboard.readText());
+  expect(new URL(shared).searchParams.get('selected_timestamp')).toBe(repeated.timestamp);
+  await page.goto(shared);
+  await expect(page.getByRole('region', { name: 'Событие из ссылки', exact: true })).toContainText('Repeated ID second event');
+  await expect(page.locator('.row-button[aria-expanded=true]')).toHaveCount(0);
+});
+
+test('long account name does not overflow the mobile navigation', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await fixture(page);
+  await page.route('**/api/me', route => route.fulfill({ json: { username: 'a'.repeat(100), passkeys: 0 } }));
+  await page.goto('/settings');
+  await expect(page.getByRole('heading', { name: 'Пароль', exact: true })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+});
+
+test('switching to Trace clears occurrence selection when equal ids and timestamps reverse order', async ({ page }) => {
+  const first = { ...events[0], message: 'Occurrence A' };
+  const second = { ...events[0], message: 'Occurrence B' };
+  await fixture(page, true, [second, first]);
+  await page.goto('/logs');
+  await page.getByRole('button', { name: 'Occurrence A', exact: true }).click();
+  await expect(page.locator('.row-button[aria-expanded=true]')).toHaveCount(1);
+  await expect(page).toHaveURL(/selected_occurrence=1/);
+  await page.getByRole('button', { name: 'Открыть Trace', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Связанные логи Trace', exact: true })).toBeVisible();
+  expect(new URL(page.url()).searchParams.has('selected')).toBe(false);
+  await expect(page.locator('.row-button[aria-expanded=true]')).toHaveCount(0);
+  await expect(page.locator('.row-button').first()).toHaveText('▸Occurrence A');
+});
+
+test('invalid URL dates show a recoverable error instead of crashing', async ({ page }) => {
+  await fixture(page);
+  await page.goto('/logs?from=bad&to=bad');
+  await expect(page.getByRole('alert')).toContainText('Диапазон времени в ссылке некорректен');
+  await page.getByLabel('Период', { exact: true }).selectOption('1h');
+  await expect(page.getByRole('button', { name: /Database connection refused/ })).toBeVisible();
 });

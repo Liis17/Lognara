@@ -149,7 +149,21 @@ export function parseQuery(query: string): ParsedQuery {
 }
 
 function messageTokens(text: string): string[] {
-  return text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+  return (text.match(/[\p{Alphabetic}\p{N}]+/gu) ?? [])
+    .map((token) => [...token].map((character) => character.toLowerCase()).join(""));
+}
+
+/** Узкое окно события сохраняет наносекунды, которые Date.parse округляет до миллисекунд. */
+export function eventBounds(timestamp: string): { from: string; to: string } {
+  const millis = Date.parse(timestamp);
+  const rawFraction = timestamp.match(/\.(\d+)/)?.[1] ?? "";
+  if (!Number.isFinite(millis) || rawFraction.length > 9) throw new Error("Некорректное время события в ссылке.");
+  const fraction = rawFraction.padEnd(9, "0");
+  const next = BigInt(millis) * 1_000_000n + BigInt(fraction.slice(3) || "0") + 1n;
+  let seconds = next / 1_000_000_000n;
+  if (next < 0n && next % 1_000_000_000n !== 0n) seconds--;
+  const nanos = (next - seconds * 1_000_000_000n).toString().padStart(9, "0");
+  return { from: timestamp, to: new Date(Number(seconds) * 1000).toISOString().replace(".000Z", `.${nanos}Z`) };
 }
 
 /** Локальный фильтр общего SSE; полнота фильтрованной ленты не гарантируется core. */
