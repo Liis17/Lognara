@@ -59,7 +59,7 @@ Parent: [[Index]]
 
 ## Просмотр логов
 
-Браузер → nginx (TLS) → lognara-dock `:7403` → query API core. Dock проверяет вход по htpasswd/passkey, хранит сессии/ключи в SQLite, проксирует историю поиска, trace lookup, histogram/group-by/summary и раздаёт новые события через SSE. Query/admin-токены остаются в dock. Core summary объединяет текстовый подсчёт, stacked histogram, p95 duration_ms и первую страницу в одном Snapshot без миграции raw-сегментов. Прошлое окно аналитики получает отдельный снимок. Ограничения ленты описаны в [[Dock/LognaraDock]].
+Браузер → nginx (TLS) → lognara-dock `:7403` → query API core. Dock проверяет вход по htpasswd/passkey, хранит сессии/ключи в SQLite, проксирует историю поиска, trace lookup, histogram/group-by/summary и раздаёт новые события через SSE. Query/admin-токены остаются в dock. Core summary объединяет текстовый подсчёт, stacked histogram, p95 duration_ms и первую страницу в одном Snapshot без миграции raw-сегментов. Паттерны: core вычисляет pattern_id детерминированно, фоновый поток ведёт производный `patterns.sqlite` (checkpoint, first_seen, полнота истории), а числа считает по сырым событиям; dock хранит персонально скрытые паттерны в своей SQLite. Прошлое окно аналитики получает отдельный снимок. Ограничения ленты описаны в [[Dock/LognaraDock]].
 
 ## Паттерны
 

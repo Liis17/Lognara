@@ -16,7 +16,8 @@ Lognara-dock/
     config.rs                 LOGNARA_DOCK_* и проверки
     api.rs                    App/AppState, ApiError, router, health, SPA
     htpasswd.rs               разбор, кэш по stamp, verify, атомарная перезапись
-    store.rs                  SQLite, миграции, lock каталога данных
+    store.rs                  SQLite, миграции, lock каталога данных, скрытые паттерны
+    patterns.rs               DTO паттернов, proxy search/details и персональное скрытие
     session.rs                Sessions, cookie, AuthUser, require_origin
     auth.rs                   login/logout, LoginLimiter, check_password
     access.rs                 /api/relays, /api/agents: сессия и proxy admin core
@@ -33,6 +34,7 @@ Lognara-dock/
     passkey.rs                церемония с SoftPasskey, отказ challenge
     live.rs                   поддельный core: дедупликация, ошибки, остановка опроса
     query.rs                  query Bearer, DTO/cursor, Origin/сессия, no-store, ошибки, timeout
+    patterns.rs               скрытие по пользователю, лимит 1000, exclude_patterns, ошибки паттернов
     static.rs                 SPA fallback и 404 для /api
   web/
     public/fonts/             локальные Commissioner / IBM Plex Mono, OFL, provenance
@@ -42,6 +44,7 @@ Lognara-dock/
     src/logs.ts               ограниченный query parser, Live merge, контекст и CSV
     src/logs.test.ts          query/history/live/CSV unit-тесты Node
     src/components/Histogram.tsx count SVG, сравнение, доступные числа и drilldown
+    src/components/Patterns.tsx  режим паттернов: таблица, sparkline, детали, скрытие, переход к событиям
     src/webauthn.ts           base64url ↔ ArrayBuffer для navigator.credentials
     src/App.tsx               проверка /api/me, маршруты /login, /logs, /analytics, /access, /settings
     src/pages/Login.tsx       пароль и кнопка passkey

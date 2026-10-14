@@ -24,16 +24,16 @@ Lognara — система сбора логов: агент в контейне
 ### Core
 | Файл | Компонент | Описание |
 |------|-----------|----------|
-| [[Core/LognaraCore]] | lognara-core | Реестр relay/агентов, admin API, хранилище, поиск и аналитика. |
+| [[Core/LognaraCore]] | lognara-core | Реестр relay/агентов, admin API, хранилище, поиск, аналитика и паттерны сообщений. |
 | [[Core/LognaraCore-ProjectMap]] | lognara-core | Модули, конвейер и тесты. |
 
 ### Dock
 
 | Файл | Компонент | Описание |
 |------|-----------|----------|
-| [[Dock/LognaraDock]] | lognara-dock | Веб-интерфейс за nginx: вход/passkey, подключения, история/cursor/Trace, отдельный Live, согласованная аналитика и p95; параметры `LOGNARA_DOCK_*`. |
+| [[Dock/LognaraDock]] | lognara-dock | Веб-интерфейс за nginx: вход/passkey, подключения, история/cursor/Trace, паттерны с персональным скрытием, отдельный Live, согласованная аналитика и p95; параметры `LOGNARA_DOCK_*`. |
 | [[Dock/LognaraDock-ProjectMap]] | lognara-dock | Дерево файлов Rust и React, связи модулей и тесты. |
-| [[Dock/DesignIntegration]] | развитие dock | Полный план шести HTML-дизайнов; этапы 0–3B реализованы, дальнейшие backend-этапы и решения пользователя. |
+| [[Dock/DesignIntegration]] | развитие dock | Полный план шести HTML-дизайнов; этапы 0–4 реализованы, дальнейшие backend-этапы и решения пользователя. |
 
 ### Delivery
 

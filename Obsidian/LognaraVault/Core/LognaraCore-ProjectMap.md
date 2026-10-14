@@ -18,8 +18,11 @@ Parent: [[Core/LognaraCore]]
 | query | Проверка фильтров, top-k, чтение строк, HMAC-курсоры |
 | analytics | Типизированные агрегаты DataFusion, общий memory pool, общий фильтр Arrow/Parquet |
 | summary | Единый Snapshot, text-aware count/stacked histogram, p95 duration_ms/coverage, action groups и первая страница |
+| pattern_identity | Консервативная нормализация v1 и SHA-256 pattern_id |
+| pattern_catalog | Фоновый каталог `patterns.sqlite`: checkpoint, полнота истории, lifetime first/last |
+| patterns | API паттернов и деталей по сырым событиям, UDF `log_pattern_id` |
 | metrics | Счётчики и gauges Prometheus |
-| tests | access.rs: CRUD, изоляция и отзыв токенов; контракт, HTTP, WAL, Parquet, поиск, аналитика, retention, аварийные subprocess и настоящие agent/relay и восстановление всей цепочки после недоступности core |
+| tests | patterns.rs: counts, прошлое окно, скрытие, pattern_id в search/summary, рестарт, поздние события и неполная история; access.rs: CRUD, изоляция и отзыв токенов; контракт, HTTP, WAL, Parquet, поиск, аналитика, retention, аварийные subprocess и настоящие agent/relay и восстановление всей цепочки после недоступности core |
 | examples/relay_fixture | Fixture через настоящий encoder relay; запись без происхождения (`origin: None`) сохраняет прежний контракт |
 | examples/load | Нагрузочный HTTP-клиент и выборочная проверка свежести от ACK |
 | scripts/benchmark.py | Запуск release-стенда, сбор RSS/CPU/диска/метрик |

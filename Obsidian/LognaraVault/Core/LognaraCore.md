@@ -95,6 +95,25 @@ Retention смотрит max core_received_at, исключает expired сег
 
 `POST /v1/stats/summary`: общий Snapshot для total, stacked buckets (семь уровней), levels, top-5 ERROR services, p95 duration_ms/coverage, top-20 action groups и первой страницы DESC. Cursor страницы фиксирует тот же watermark; новый запрос создаёт новый снимок. `duration_ms` читается из старых attributes как конечное неотрицательное JSON-число; строки и отсутствие не измерены, null p95 при measured=0. Метод приблизительный t-digest с линейным масштабированием экстремальных чисел против переполнения центроидов; count action означает события. Данные сканируются потоково, агрегаты выполняются последовательно в общем DataFusion memory pool. Summary сам удерживает analytics permit; при отмене HTTP blocking-поиск удерживает свою Arc-копию permit до завершения. Контракт: [DockSummaryContract](../../../docs/DockSummaryContract.md).
 
+## Паттерны сообщений
+
+`pattern_identity` нормализует сообщение консервативно (v1): заменяются только UUID, IPv4/IPv6, hex-ID от 16 символов с цифрой, значения явно обозначенных ID (`id`, `*_id`, `userId`, `pid`...) и длительности с единицей или ключом `duration/elapsed/latency/took/*_ms`. Слова, числа, HTTP-статусы и коды ошибок остаются литералами; регистр, переносы строк и многострочность сохраняются. Идентичность: `p1_` + SHA-256 версии, environment (null отличается от пустой строки), service, level и частей шаблона. Сообщение свыше 16 KiB или с более чем 64 переменными хешируется целиком (`exact`); preview ограничен 4096 байтами, ID считается до усечения.
+
+`pattern_id` добавлен в Tantivy-индекс как точное поле, поэтому `filters.pattern_id` работает в search/cursor; индексы старой схемы восстанавливаются из Parquet при первом чтении. В summary/histogram/group-by фильтр вычисляется UDF `log_pattern_id`. Raw Arrow/Parquet схема не менялась.
+
+Фоновый поток `lognara-patterns` ведёт производный каталог `patterns.sqlite`: checkpoint sequence, as_of, history_from, признак полноты и lifetime first/last каждого паттерна. Он обрабатывает по одному сегменту после checkpoint и фиксирует метаданные и checkpoint одной транзакцией; повторный запуск не учитывает строки дважды. Пропуск sequence (retention до обработки) помечает историю неполной; удаление каталога вызывает rebuild по оставшимся данным без восстановления удалённой истории. Поток не занимает analytics slot пользователей, ошибки ёмкости делают только API паттернов недоступным.
+
+`POST /v1/patterns/search` и `POST /v1/patterns/{pattern_id}/details` считают counts, прошлое окно, корзины и значения переменных по сырым событиям диапазона до обработанного checkpoint; каталог даёт шаблон, first_seen и новизну. Не готов каталог → 503 `pattern index is not ready`, паттерн не найден в диапазоне → 404, превышение бюджета → 503. Контракт: [DockPatternsContract](../../../docs/DockPatternsContract.md).
+
+| Метод | Назначение |
+|---|---|
+| `pattern_identity::identify(environment: Option<&str>, service: &str, level: &str, message: &str): Identity` | Вычисляет pattern_id, шаблон, части и значения переменных. |
+| `pattern_identity::valid_id(id: &str): bool` | Проверяет формат `p1_` + 64 lowercase hex. |
+| `patterns::id_expr(): Expr` | DataFusion-выражение pattern_id для точного фильтра агрегатов. |
+| `patterns::search(core: &Core, request: PatternRequest): Result<PatternResponse, QueryError>` | Список паттернов с долями, ростом, новизной и корзинами. |
+| `patterns::details(core: &Core, pattern_id: &str, request: DetailsRequest): Result<DetailsResponse, QueryError>` | Top-5 значений переменных, до 3 новейших примеров и метрики паттерна. |
+| `PatternCatalog::checkpoint(): Option<u64>` | Обработанный sequence каталога или None до первичного прохода. |
+
 ## Эксплуатация и проверки
 
 `Lognara-core/docs/operations.md` описывает все переменные, запуск за TLS-прокси, остановку, резервную копию всего каталога и восстановление. SIGTERM/SIGINT прекращает HTTP, дорабатывает WAL и закрывает открытый сегмент. Метрики Prometheus защищены query-токеном; health доступен без токена. В примере Compose корневого README каталог `LOGNARA_DATA_DIR` монтируется из `LOGNARA_CORE_DATA` (папка на хосте) или volume `lognara-core-data`.
