@@ -78,6 +78,19 @@ export interface SeriesMetric {
   first_seen: string | null;
   last_seen: string | null;
   definition: Definition | null;
+  /** Окружения точек метрики по всем origin; пусто, если окружений нет. */
+  environments: string[];
+}
+
+/** Тело запроса серии; без environment сумма по всем окружениям. */
+export interface SeriesQuery {
+  service: string;
+  name: string;
+  from: string;
+  to: string;
+  step_seconds: number;
+  split: Split;
+  environment?: string;
 }
 
 export interface SeriesLine {

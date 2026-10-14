@@ -1,6 +1,6 @@
 //! Материализация WAL и атомарные снимки открытых/закрытых сегментов.
 use crate::{
-    catalog::{SegmentMeta, SeriesName},
+    catalog::{SegmentMeta, SeriesEnvironment, SeriesName},
     columns,
     config::Config,
     definitions::{LabelGuard, RuleSet},
@@ -16,7 +16,7 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use datafusion::arrow::array::RecordBatch;
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
@@ -40,6 +40,7 @@ pub struct ActiveView {
     pub batches: Vec<RecordBatch>,
     pub points: Vec<RecordBatch>,
     pub names: BTreeMap<(String, String, &'static str), (i64, i64)>,
+    pub environments: BTreeSet<SeriesEnvironment>,
     pub searcher: Searcher,
 }
 
@@ -140,6 +141,7 @@ struct ActiveSegment {
     point_min: i64,
     point_max: i64,
     names: BTreeMap<(String, String, &'static str), (i64, i64)>,
+    environments: BTreeSet<SeriesEnvironment>,
     series_path: String,
     index: ActiveIndex,
     started: Instant,
@@ -195,6 +197,13 @@ impl ActiveSegment {
                     *last = (*last).max(point.timestamp);
                 })
                 .or_insert((point.timestamp, point.timestamp));
+            if let Some(environment) = &point.source.environment {
+                self.environments.insert((
+                    point.source.service.clone(),
+                    point.name.clone(),
+                    environment.clone(),
+                ));
+            }
             self.point_min = self.point_min.min(point.timestamp);
             self.point_max = self.point_max.max(point.timestamp);
         }
@@ -423,7 +432,7 @@ impl Materializer {
         }
         // Пачки только со счётчиками dropped тоже должны двигать checkpoint.
         if receipt.events == 0 && self.active.is_none() {
-            self.checkpoint(None, None, &[])?;
+            self.checkpoint(None, None, &[], &[])?;
         }
         Ok(true)
     }
@@ -499,6 +508,7 @@ impl Materializer {
             point_min: i64::MAX,
             point_max: i64::MIN,
             names: BTreeMap::new(),
+            environments: BTreeSet::new(),
             series_path,
             index,
             started: Instant::now(),
@@ -512,6 +522,7 @@ impl Materializer {
                 batches: segment.batches.clone(),
                 points: segment.points.clone(),
                 names: segment.names.clone(),
+                environments: segment.environments.clone(),
                 searcher: segment.index.publish()?,
             })
         } else {
@@ -586,10 +597,12 @@ impl Materializer {
                 },
             )
             .collect();
+        let environments: Vec<SeriesEnvironment> = segment.environments.iter().cloned().collect();
         self.checkpoint(
             Some(&segment.meta),
             sealed_series.as_ref().map(|file| &file.meta),
             &names,
+            &environments,
         )?;
         if let Some(file) = sealed_series {
             self.series_files.push(Arc::new(file));
@@ -643,6 +656,7 @@ impl Materializer {
         segment: Option<&SegmentMeta>,
         series: Option<&SeriesFileMeta>,
         names: &[SeriesName],
+        environments: &[SeriesEnvironment],
     ) -> Result<()> {
         // Lock order всегда WAL -> catalog, как при дедупликации входящего запроса.
         let mut wal = self.core.journal.wal.lock().unwrap();
@@ -651,6 +665,7 @@ impl Materializer {
             segment,
             series,
             names,
+            environments,
             self.position,
             &receipts,
             wal.next_ids(),

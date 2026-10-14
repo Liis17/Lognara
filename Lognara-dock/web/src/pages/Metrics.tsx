@@ -1,5 +1,14 @@
 import { useEffect, useState } from "react";
-import { api, ApiError, errorText, type Definition, type SeriesMetric, type SeriesReply, type Split } from "../api";
+import {
+  api,
+  ApiError,
+  errorText,
+  type Definition,
+  type SeriesMetric,
+  type SeriesQuery,
+  type SeriesReply,
+  type Split,
+} from "../api";
 import Chart from "../components/Chart";
 import MetricEditor, { aggregationText, kindText, type EditorStart } from "./MetricEditor";
 
@@ -46,6 +55,8 @@ export default function Metrics({ seriesAdmin, onUnauthorized }: { seriesAdmin: 
   const [selected, setSelected] = useState<SeriesMetric | null>(null);
   const [range, setRange] = useState(ranges[1]);
   const [split, setSplit] = useState<Split>("none");
+  /** Пустая строка означает все окружения. */
+  const [environment, setEnvironment] = useState("");
   const [chart, setChart] = useState<SeriesReply | null>(null);
   const [chartError, setChartError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -82,14 +93,16 @@ export default function Metrics({ seriesAdmin, onUnauthorized }: { seriesAdmin: 
       range.ms !== null ? to - range.ms : metric.first_seen ? Date.parse(metric.first_seen) : to - 365 * DAY;
     setLoading(true);
     setChartError("");
-    api<SeriesReply>("POST", "/api/series/query", {
+    const query: SeriesQuery = {
       service: metric.service,
       name: metric.name,
       from: new Date(from).toISOString(),
       to: new Date(to).toISOString(),
       step_seconds: pickStep((to - from) / 1000),
       split,
-    })
+      environment: environment || undefined,
+    };
+    api<SeriesReply>("POST", "/api/series/query", query)
       .then((reply) => {
         if (!cancelled) setChart(reply);
       })
@@ -105,10 +118,11 @@ export default function Metrics({ seriesAdmin, onUnauthorized }: { seriesAdmin: 
     return () => {
       cancelled = true;
     };
-  }, [metric, range, split]);
+  }, [metric, range, split, environment]);
 
   const select = (item: SeriesMetric) => {
     setSelected(item);
+    setEnvironment("");
     setChart(null);
     setEditor(null);
   };
@@ -211,6 +225,16 @@ export default function Metrics({ seriesAdmin, onUnauthorized }: { seriesAdmin: 
                   </option>
                 ))}
               </select>
+              {metric.environments.length > 0 && (
+                <select aria-label="Окружение" value={environment} onChange={(e) => setEnvironment(e.target.value)}>
+                  <option value="">Все окружения</option>
+                  {metric.environments.map((item) => (
+                    <option key={item} value={item}>
+                      {item}
+                    </option>
+                  ))}
+                </select>
+              )}
             </div>
             {loading && <p className="muted">Загрузка…</p>}
             {chartError && <p className="error">{chartError}</p>}

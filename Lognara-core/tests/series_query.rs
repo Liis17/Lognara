@@ -558,6 +558,120 @@ async fn list_joins_observed_series_with_definitions_and_adds_definitions_withou
     core.shutdown().unwrap();
 }
 
+/// Метрика с указанным именем из ответа GET /v1/series.
+fn listed<'a>(list: &'a Value, name: &str) -> &'a Value {
+    list["metrics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|metric| metric["name"] == name)
+        .unwrap()
+}
+
+/// Серии ответа на запрос с токеном query; статус проверяется.
+async fn series_of(router: &Router, body: Value) -> Value {
+    let (status, reply) = send(router, "POST", QUERY, Some("query"), Some(body)).await;
+    assert_eq!(status, StatusCode::OK);
+    reply["series"].clone()
+}
+
+#[tokio::test]
+async fn environment_filters_queries_and_lists_environments_across_sealing() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config(dir.path(), 1000);
+    let core = Core::open(cfg.clone()).unwrap();
+    let router = api::router(core.clone());
+    let staging = Source {
+        environment: Some("staging".into()),
+        ..source("api", Some("eu-2"))
+    };
+    // Группа без окружения попадает в суммы без фильтра, но не в список окружений.
+    let unlabeled = Source {
+        environment: None,
+        ..source("api", Some("eu-3"))
+    };
+    core.journal
+        .accept(&batch(vec![
+            (
+                source("api", Some("eu-1")),
+                vec![report(
+                    1,
+                    "2026-10-13T10:00:10Z",
+                    json!({"runs": 3}),
+                    json!({}),
+                )],
+            ),
+            (
+                staging,
+                vec![report(
+                    2,
+                    "2026-10-13T10:00:20Z",
+                    json!({"runs": 5}),
+                    json!({}),
+                )],
+            ),
+            (
+                unlabeled,
+                vec![report(
+                    3,
+                    "2026-10-13T10:00:30Z",
+                    json!({"runs": 1, "boots": 1}),
+                    json!({}),
+                )],
+            ),
+        ]))
+        .unwrap();
+    wait(|| core.snapshot().watermark >= 3);
+
+    let mut body = query_body("runs", FROM, TO, 60);
+    assert_eq!(
+        series_of(&router, body.clone()).await,
+        json!([{"label": "", "values": [9.0]}])
+    );
+    body["environment"] = json!("staging");
+    assert_eq!(
+        series_of(&router, body.clone()).await,
+        json!([{"label": "", "values": [5.0]}])
+    );
+    body["environment"] = json!("production");
+    assert_eq!(
+        series_of(&router, body.clone()).await,
+        json!([{"label": "", "values": [3.0]}])
+    );
+    body["environment"] = json!("qa");
+    assert_eq!(series_of(&router, body.clone()).await, json!([]));
+
+    // Окружения открытого сегмента.
+    assert!(core.snapshot().active.is_some());
+    let (status, list) = send(&router, "GET", LIST, Some("query"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        listed(&list, "runs")["environments"],
+        json!(["production", "staging"])
+    );
+    assert_eq!(listed(&list, "boots")["environments"], json!([]));
+    drop(router);
+    core.shutdown().unwrap();
+    drop(core);
+
+    // После запечатывания окружения читаются из каталога.
+    let core = Core::open(cfg).unwrap();
+    let router = api::router(core.clone());
+    let (_, list) = send(&router, "GET", LIST, Some("query"), None).await;
+    assert_eq!(
+        listed(&list, "runs")["environments"],
+        json!(["production", "staging"])
+    );
+    assert_eq!(listed(&list, "boots")["environments"], json!([]));
+    body["environment"] = json!("staging");
+    assert_eq!(
+        series_of(&router, body).await,
+        json!([{"label": "", "values": [5.0]}])
+    );
+    drop(router);
+    core.shutdown().unwrap();
+}
+
 #[tokio::test]
 async fn invalid_queries_are_rejected_and_unknown_metrics_are_empty() {
     let dir = tempfile::tempdir().unwrap();

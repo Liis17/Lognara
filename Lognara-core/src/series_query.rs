@@ -1,6 +1,6 @@
 //! Графики метрик: список серий и bucket-значения поверх Parquet серий и открытых точек.
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     sync::Arc,
 };
 
@@ -22,7 +22,7 @@ use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    catalog::SeriesName,
+    catalog::{SeriesEnvironment, SeriesName},
     definitions::{Aggregation, Definition, Kind},
     model::format_timestamp,
     query::{Filters, PreparedFilter, QueryError},
@@ -54,6 +54,8 @@ pub struct QueryRequest {
     pub split: Split,
     #[serde(default)]
     pub origin: Option<Origin>,
+    #[serde(default)]
+    pub environment: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -85,6 +87,7 @@ pub struct Metric {
     pub first_seen: Option<String>,
     pub last_seen: Option<String>,
     pub definition: Option<Definition>,
+    pub environments: Vec<String>,
 }
 
 /// Ключ серии без split: окружение, сервер, бэкенд, экземпляр, origin, правило и метки.
@@ -146,14 +149,19 @@ fn merged_names(
     merged
 }
 
-/// Имена и определения из каталога; SQLite читается вне async-потока.
-async fn catalog(core: Arc<Core>) -> Result<(Vec<SeriesName>, Vec<Definition>), QueryError> {
-    tokio::task::spawn_blocking(
-        move || -> Result<(Vec<SeriesName>, Vec<Definition>), QueryError> {
-            let catalog = core.journal.catalog.lock().unwrap();
-            Ok((catalog.series_names()?, catalog.definitions()?))
-        },
-    )
+/// Имена, окружения и определения каталога.
+type CatalogRows = (Vec<SeriesName>, Vec<SeriesEnvironment>, Vec<Definition>);
+
+/// Имена, окружения и определения из каталога; SQLite читается вне async-потока.
+async fn catalog(core: Arc<Core>) -> Result<CatalogRows, QueryError> {
+    tokio::task::spawn_blocking(move || -> Result<CatalogRows, QueryError> {
+        let catalog = core.journal.catalog.lock().unwrap();
+        Ok((
+            catalog.series_names()?,
+            catalog.series_environments()?,
+            catalog.definitions()?,
+        ))
+    })
     .await
     .map_err(|error| QueryError::Storage(error.into()))?
 }
@@ -167,10 +175,22 @@ fn default_origin(definition: &Definition) -> Origin {
     }
 }
 
-/// GET /v1/series: серии каталога и открытого сегмента, определения без точек и определения у серий.
+/// GET /v1/series: серии каталога и открытого сегмента, окружения, определения без точек и определения у серий.
 pub async fn list(core: Arc<Core>) -> Result<ListResponse, QueryError> {
     let snapshot = core.snapshot();
-    let (names, definitions) = catalog(core.clone()).await?;
+    let (names, catalog_environments, definitions) = catalog(core.clone()).await?;
+    let mut environments: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
+    let active_environments = snapshot
+        .active
+        .iter()
+        .flat_map(|active| active.environments.iter().cloned());
+    for (service, name, environment) in catalog_environments.into_iter().chain(active_environments)
+    {
+        environments
+            .entry((service, name))
+            .or_default()
+            .insert(environment);
+    }
     let mut metrics: BTreeMap<(String, String, String), Metric> = BTreeMap::new();
     for ((service, name, origin), (first, last)) in merged_names(&names, &snapshot) {
         metrics.insert(
@@ -182,6 +202,7 @@ pub async fn list(core: Arc<Core>) -> Result<ListResponse, QueryError> {
                 first_seen: Some(format_timestamp(first)),
                 last_seen: Some(format_timestamp(last)),
                 definition: None,
+                environments: vec![],
             },
         );
     }
@@ -204,6 +225,7 @@ pub async fn list(core: Arc<Core>) -> Result<ListResponse, QueryError> {
                     first_seen: None,
                     last_seen: None,
                     definition: None,
+                    environments: vec![],
                 },
             );
         }
@@ -216,6 +238,10 @@ pub async fn list(core: Arc<Core>) -> Result<ListResponse, QueryError> {
                 definition.service == metric.service && definition.name == metric.name
             })
             .cloned();
+        metric.environments = environments
+            .get(&(metric.service.clone(), metric.name.clone()))
+            .map(|set| set.iter().cloned().collect())
+            .unwrap_or_default();
     }
     Ok(ListResponse { metrics })
 }
@@ -236,7 +262,7 @@ pub async fn query(core: Arc<Core>, request: QueryRequest) -> Result<QueryRespon
         ));
     }
     let snapshot = core.snapshot();
-    let (names, definitions) = catalog(core.clone()).await?;
+    let (names, _, definitions) = catalog(core.clone()).await?;
     let definition = definitions.iter().find(|definition| {
         definition.service == request.service && definition.name == request.name
     });
@@ -340,6 +366,9 @@ async fn read_buckets(
         .and(col("name").eq(lit(request.name.as_str())));
     if let Some(origin) = request.origin {
         predicate = predicate.and(col("origin").eq(lit(origin.as_str())));
+    }
+    if let Some(environment) = &request.environment {
+        predicate = predicate.and(col("environment").eq(lit(environment.as_str())));
     }
     let split = match request.split {
         Split::None => lit(""),

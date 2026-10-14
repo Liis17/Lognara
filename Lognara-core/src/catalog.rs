@@ -35,6 +35,9 @@ pub struct SeriesName {
     pub last_seen: i64,
 }
 
+/// Окружение метрики: (service, name, environment).
+pub type SeriesEnvironment = (String, String, String);
+
 pub struct Catalog {
     connection: Connection,
 }
@@ -53,6 +56,7 @@ impl Catalog {
             CREATE INDEX IF NOT EXISTS receipts_age ON receipts(received_at);
             CREATE TABLE IF NOT EXISTS series_files (id TEXT PRIMARY KEY, metadata TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('ready','deleting')));
             CREATE TABLE IF NOT EXISTS series_names (service TEXT NOT NULL, name TEXT NOT NULL, origin TEXT NOT NULL, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, PRIMARY KEY(service, name, origin));
+            CREATE TABLE IF NOT EXISTS series_environments (service TEXT NOT NULL, name TEXT NOT NULL, environment TEXT NOT NULL, PRIMARY KEY(service, name, environment));
             CREATE TABLE IF NOT EXISTS series_definitions (id TEXT PRIMARY KEY, service TEXT NOT NULL, name TEXT NOT NULL, body TEXT NOT NULL, UNIQUE(service, name));
             PRAGMA user_version=2;")?;
         sync_dir(path.parent().expect("catalog has a parent"))?;
@@ -125,6 +129,16 @@ impl Catalog {
             .collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// Окружения метрик (service, name, environment) из точек, сохранённых при запечатывании.
+    pub fn series_environments(&self) -> Result<Vec<SeriesEnvironment>> {
+        let mut statement = self.connection.prepare(
+            "SELECT service,name,environment FROM series_environments ORDER BY service,name,environment",
+        )?;
+        Ok(statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<Result<Vec<_>, _>>()?)
+    }
+
     /// Есть ли у (service, name) native-точки counter или gauge; точки правил не считаются.
     pub fn has_native_name(&self, service: &str, name: &str) -> Result<bool> {
         Ok(self.connection.query_row(
@@ -185,11 +199,13 @@ impl Catalog {
         }).optional()?)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn publish(
         &mut self,
         segment: Option<&SegmentMeta>,
         series: Option<&SeriesFileMeta>,
         names: &[SeriesName],
+        environments: &[SeriesEnvironment],
         checkpoint: Position,
         receipts: &[Receipt],
         next_ids: (u64, u64),
@@ -218,6 +234,12 @@ impl Catalog {
                     name.first_seen,
                     name.last_seen
                 ],
+            )?;
+        }
+        for (service, name, environment) in environments {
+            transaction.execute(
+                "INSERT OR IGNORE INTO series_environments VALUES(?1,?2,?3)",
+                params![service, name, environment],
             )?;
         }
         for receipt in receipts {

@@ -316,6 +316,7 @@ async fn runs_values(core: &Arc<Core>) -> Value {
         step_seconds: 60,
         split: Split::None,
         origin: None,
+        environment: None,
     };
     let reply = series_query::query(core.clone(), request).await.unwrap();
     serde_json::to_value(reply.series).unwrap()

@@ -247,6 +247,7 @@ pub fn series_metrics() -> Value {
         "first_seen": "2026-10-13T10:00:00Z",
         "last_seen": "2026-10-13T10:05:00Z",
         "definition": null,
+        "environments": ["production", "staging"],
     }] })
 }
 

@@ -108,6 +108,7 @@ fn register(data: &Path, files: &[SeriesFileMeta]) -> Result<()> {
         None,
         None,
         &names,
+        &[],
         checkpoint,
         &[],
         (next_batch, next_sequence),
@@ -116,6 +117,7 @@ fn register(data: &Path, files: &[SeriesFileMeta]) -> Result<()> {
         catalog.publish(
             None,
             Some(file),
+            &[],
             &[],
             checkpoint,
             &[],
@@ -209,6 +211,7 @@ async fn main() -> Result<()> {
                 step_seconds,
                 split,
                 origin: None,
+                environment: None,
             };
             let started = Instant::now();
             let reply = series_query::query(core.clone(), request).await?;
