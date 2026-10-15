@@ -430,9 +430,9 @@ GitHub Actions [CI](.github/workflows/ci.yml) запускается после 
 - Для всех пяти crate: `cargo fmt --all --check`, Clippy для всех targets/features с запретом предупреждений, обычная сборка без тестовых features и `cargo test --all-features` (unit, интеграционные, e2e и doc-тесты). Cargo использует `--locked` для сборки, Clippy и тестов.
 - Для core: в тестах включается `crash-tests`, проверяющий аварийное завершение и восстановление после ACK.
 - Для agent и relay: отдельные проверки памяти через `check-memory-profile.py`, включая обычно игнорируемые нагрузочные тесты; лимиты RSS 256 MiB и 2048 MiB соответственно.
-- Для `Lognara-dock/web`: Node.js 24, `npm ci` и `npm run build`, который проверяет TypeScript и собирает Vite. Отдельного набора frontend unit-тестов пока нет.
+- Для `Lognara-dock/web`: Node.js 24, `npm ci` и `npm run build`, который проверяет TypeScript и собирает Vite; `npm test` запускает unit-тесты, затем Playwright проверяет браузерные сценарии через `npm run test:e2e`.
 
-Rust-компоненты проверяются независимо; зависимости Cargo и npm кешируются. Проверки не требуют секретов или внешних сервисов. Итоговая проверка **`CI passed`** успешна только при успешном завершении всех Rust-проверок и веб-сборки. Чтобы запретить merge при ошибках, добавьте `CI passed` в обязательные status checks правил защищённой ветки или ruleset; сам workflow не изменяет настройки репозитория. [Обязательные status checks](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches#require-status-checks-before-merging).
+Rust-компоненты проверяются независимо; зависимости Cargo и npm кешируются. Проверки не требуют секретов или внешних сервисов. Итоговая проверка **`CI passed`** успешна только при успешном завершении всех Rust-проверок, веб-сборки, unit-тестов и браузерных тестов. Чтобы запретить merge при ошибках, добавьте `CI passed` в обязательные status checks правил защищённой ветки или ruleset; сам workflow не изменяет настройки репозитория. [Обязательные status checks](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches#require-status-checks-before-merging).
 
 Тесты, форматирование и линтер запускаются для каждого сервиса отдельно:
 
