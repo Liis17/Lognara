@@ -21,19 +21,89 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  changes:
+    name: Select affected checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      rust: ${{ steps.select.outputs.rust }}
+      web: ${{ steps.select.outputs.web }}
+    steps:
+      - uses: actions/checkout@v7
+        if: github.event_name == 'push' && github.ref != 'refs/heads/master'
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dorny/paths-filter@v4
+        id: filter
+        if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref != 'refs/heads/master')
+        with:
+          predicate-quantifier: some-with-excludes
+          filters: |
+            ci:
+              - '.github/**'
+              - '.cargo/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain*'
+              - 'rustfmt.toml'
+              - '.rustfmt.toml'
+              - 'clippy.toml'
+              - '.clippy.toml'
+            Lognara-agent:
+              - 'Lognara-agent/**'
+              - 'Lognara-spool/**'
+            Lognara-relay:
+              - 'Lognara-relay/**'
+              - 'Lognara-spool/**'
+            Lognara-spool:
+              - 'Lognara-spool/**'
+            # Core e2e tests compile agent and relay, which both depend on spool.
+            Lognara-core:
+              - 'Lognara-core/**'
+              - 'Lognara-agent/**'
+              - 'Lognara-relay/**'
+              - 'Lognara-spool/**'
+            Lognara-dock:
+              - 'Lognara-dock/**'
+              - '!Lognara-dock/web/**'
+            web:
+              - 'Lognara-dock/web/**'
+      - name: Select Rust matrix and web checks
+        id: select
+        env:
+          CHANGED_FILTERS: ${{ steps.filter.outputs.changes }}
+        shell: python
+        run: |
+          import json
+          import os
+
+          crates = ["Lognara-agent", "Lognara-relay", "Lognara-spool", "Lognara-core", "Lognara-dock"]
+          changed = json.loads(os.environ["CHANGED_FILTERS"] or "[]")
+          full = (
+              os.environ["GITHUB_EVENT_NAME"] == "workflow_dispatch"
+              or os.environ["GITHUB_REF"] == "refs/heads/master"
+              or "ci" in changed
+          )
+          rust = crates if full else [crate for crate in crates if crate in changed]
+          web = full or "web" in changed
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              print(f"rust={json.dumps(rust)}", file=output)
+              print(f"web={str(web).lower()}", file=output)
+
   rust:
     name: Rust (${{ matrix.crate }})
+    needs: [changes]
+    if: needs.changes.outputs.rust != '[]'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        crate:
-          - Lognara-agent
-          - Lognara-relay
-          - Lognara-spool
-          - Lognara-core
-          - Lognara-dock
+        crate: ${{ fromJSON(needs.changes.outputs.rust) }}
     defaults:
       run:
         working-directory: ${{ matrix.crate }}
@@ -62,6 +132,8 @@ jobs:
 
   web:
     name: Web (TypeScript and build)
+    needs: [changes]
+    if: needs.changes.outputs.web == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     defaults:
@@ -90,15 +162,29 @@ jobs:
   ci:
     name: CI passed
     if: ${{ always() }}
-    needs: [rust, web]
+    needs: [changes, rust, web]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
+      CHANGES_RESULT: ${{ needs.changes.result }}
+      RUST_REQUIRED: ${{ needs.changes.outputs.rust != '[]' }}
+      WEB_REQUIRED: ${{ needs.changes.outputs.web }}
       RUST_RESULT: ${{ needs.rust.result }}
       WEB_RESULT: ${{ needs.web.result }}
     steps:
       - name: Require all checks to pass
-        run: test "$RUST_RESULT" = success && test "$WEB_RESULT" = success
+        run: |
+          test "$CHANGES_RESULT" = success
+          if [ "$RUST_REQUIRED" = true ]; then
+            test "$RUST_RESULT" = success
+          else
+            test "$RUST_RESULT" = skipped
+          fi
+          if [ "$WEB_REQUIRED" = true ]; then
+            test "$WEB_RESULT" = success
+          else
+            test "$WEB_RESULT" = skipped
+          fi
 
   publish-images:
     name: Publish image (${{ matrix.component }})
