@@ -21,7 +21,9 @@ class NoRedirect(HTTPRedirectHandler):
 
 
 def request_json(url, authorization):
-    request = Request(url, headers={"Authorization": authorization, "Accept": "application/json"})
+    # Cloudflare перед реестром отвечает 403 на User-Agent Python-urllib.
+    headers = {"Authorization": authorization, "Accept": "application/json", "User-Agent": "lognara-release"}
+    request = Request(url, headers=headers)
     with build_opener(NoRedirect()).open(request, timeout=30) as response:
         return json.load(response), response.headers
 
