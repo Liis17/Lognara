@@ -1,0 +1,22 @@
+name: Release all containers
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require master branch
+        run: test "$GITHUB_REF" = refs/heads/master
+  release:
+    needs: [validate]
+    uses: ./.github/workflows/ci.yml
+    with:
+      release_all: true
+    secrets: inherit
