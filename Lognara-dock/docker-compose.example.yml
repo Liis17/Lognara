@@ -6,7 +6,7 @@
 #           LOGNARA_CORE_ADMIN_TOKEN=<admin-токен core>
 services:
   lognara-dock:
-    image: ghcr.io/liis17/lognara-dock:${LOGNARA_IMAGE_TAG:-master}
+    image: docker.barkfluff.com:443/lognara-dock:${LOGNARA_IMAGE_TAG:-master}
     user: "1000:1000"                       # владелец ./auth и ./data на хосте
     environment:
       LOGNARA_DOCK_PUBLIC_URL: https://dock.liis17.com
