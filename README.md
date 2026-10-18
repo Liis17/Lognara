@@ -239,14 +239,14 @@ Relay проверяет единственный Bearer-заголовок до
 
 Скопируйте `.env.example` в `.env`, сгенерируйте разные admin/query токены (`openssl rand -hex 32`), запустите центральные сервисы, затем впишите токены из dock на машине приложений. `.env` исключён из git. Compose подставляет `${...}`, контейнер получает значение через `environment`. Бинарники `.env` автоматически не читают.
 
-Фрагменты ниже используют образы core, relay и dock из `docker.barkfluff.com:443`, доступные после успешного CI в `master`, с общим `LOGNARA_IMAGE_TAG`. `app-with-agent` обозначает ваш контейнер приложения с настроенным `image`/`build`: agent собирается вместе с ним и принимает логи по localhost. Сборка всех сервисов есть в `Example/Dockerfile`.
+Фрагменты ниже используют образы core, relay и dock из `docker.barkfluff.com`, доступные после успешного CI в `master`, с общим `LOGNARA_IMAGE_TAG`. `app-with-agent` обозначает ваш контейнер приложения с настроенным `image`/`build`: agent собирается вместе с ним и принимает логи по localhost. Сборка всех сервисов есть в `Example/Dockerfile`.
 
 Центральный сервер: core + dock (для dock подготовьте htpasswd и каталог данных по его [руководству](Lognara-dock/README.md)):
 
 ```yaml
 services:
   lognara-core:
-    image: docker.barkfluff.com:443/lognara-core:${LOGNARA_IMAGE_TAG:-master}
+    image: docker.barkfluff.com/lognara-core:${LOGNARA_IMAGE_TAG:-master}
     environment:
       LOGNARA_LISTEN_ADDR: "0.0.0.0:7402"
       LOGNARA_ADMIN_TOKEN: ${LOGNARA_CORE_ADMIN_TOKEN:?Задайте LOGNARA_CORE_ADMIN_TOKEN}
@@ -254,7 +254,7 @@ services:
     volumes:
       - ${LOGNARA_CORE_DATA:-lognara-core-data}:/var/lib/lognara-core
   lognara-dock:
-    image: docker.barkfluff.com:443/lognara-dock:${LOGNARA_IMAGE_TAG:-master}
+    image: docker.barkfluff.com/lognara-dock:${LOGNARA_IMAGE_TAG:-master}
     environment:
       LOGNARA_DOCK_LISTEN_ADDR: "0.0.0.0:7403"
       LOGNARA_DOCK_PUBLIC_URL: https://dock.example.com
@@ -273,7 +273,7 @@ volumes:
 ```yaml
 services:
   lognara-relay:
-    image: docker.barkfluff.com:443/lognara-relay:${LOGNARA_IMAGE_TAG:-master}
+    image: docker.barkfluff.com/lognara-relay:${LOGNARA_IMAGE_TAG:-master}
     environment:
       LOGNARA_LISTEN_ADDR: "0.0.0.0:7401"
       LOGNARA_CORE_URL: https://core.example.com/v1/batches
@@ -309,9 +309,9 @@ volumes:
 
 Образы core, relay и dock публикуются из `master` после успешного прохождения выбранных проверок CI. Собираются и проверяются только затронутые проекты с учётом зависимостей; публикуются только затронутые контейнеры:
 
-- `docker.barkfluff.com:443/lognara-core`
-- `docker.barkfluff.com:443/lognara-relay`
-- `docker.barkfluff.com:443/lognara-dock`
+- `docker.barkfluff.com/lognara-core`
+- `docker.barkfluff.com/lognara-relay`
+- `docker.barkfluff.com/lognara-dock`
 
 Перед публикацией CI получает все теги компонента из registry, выбирает наибольшую версию `major.minor.patch` и увеличивает patch: `0.0.1`, `0.0.2` и далее. У core, relay и dock отдельные версии; первый релиз при отсутствии числовых тегов получает `0.0.1`. Ошибка доступа к registry останавливает релиз. Публикации одного компонента выполняются последовательно, включая ручные запуски, чтобы не выбрать одинаковый номер версии.
 
@@ -333,7 +333,7 @@ docker build -f Lognara-relay/Dockerfile -t lognara-relay .
 docker build -f Lognara-dock/Dockerfile -t lognara-dock Lognara-dock
 ```
 
-В настройках репозитория GitHub откройте **Settings → Secrets and variables → Actions** и добавьте secrets `REGISTRY_USERNAME` и `REGISTRY_PASSWORD`. CI передаёт их через окружение в [docker/login-action](https://github.com/docker/login-action) для входа в `docker.barkfluff.com:443`. На хосте развёртывания перед `docker compose pull` выполните `docker login docker.barkfluff.com:443`.
+В настройках репозитория GitHub откройте **Settings → Secrets and variables → Actions** и добавьте secrets `REGISTRY_USERNAME` и `REGISTRY_PASSWORD`. CI передаёт их через окружение в [docker/login-action](https://github.com/docker/login-action) для входа в `docker.barkfluff.com`. На хосте развёртывания перед `docker compose pull` выполните `docker login docker.barkfluff.com`.
 
 1. Сначала восстановите downstream и доставьте остатки старых очередей в RAM: старые версии не сохраняют подтверждённую очередь полностью.
 2. Поднимите обновлённые core и dock с разными admin/query-токенами. В dock зарегистрируйте relay и его агентов, сохраните персональные токены в `.env`. Старые `LOGNARA_INGEST_TOKEN` core и `LOGNARA_RELAY_TOKEN` relay больше не используются.

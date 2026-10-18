@@ -40,19 +40,19 @@ jobs:
       - name: Log in to private registry
         uses: docker/login-action@v4
         with:
-          registry: docker.barkfluff.com:443
+          registry: docker.barkfluff.com
           username: ${{ env.REGISTRY_USERNAME }}
           password: ${{ env.REGISTRY_PASSWORD }}
       - name: Get next release version from registry
         id: version
         env:
           COMPONENT: ${{ matrix.component }}
-        run: python3 .github/scripts/next_image_version.py
+        run: bash .github/scripts/next-image-version.sh
       - name: Image tags and labels
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: docker.barkfluff.com:443/lognara-${{ matrix.component }}
+          images: docker.barkfluff.com/lognara-${{ matrix.component }}
           flavor: latest=false
           tags: |
             type=raw,value=${{ steps.version.outputs.version }}
@@ -75,4 +75,4 @@ jobs:
         env:
           COMPONENT: ${{ matrix.component }}
           VERSION: ${{ steps.version.outputs.version }}
-        run: echo "Published docker.barkfluff.com:443/lognara-$COMPONENT:$VERSION" >> "$GITHUB_STEP_SUMMARY"
+        run: echo "Published docker.barkfluff.com/lognara-$COMPONENT:$VERSION" >> "$GITHUB_STEP_SUMMARY"

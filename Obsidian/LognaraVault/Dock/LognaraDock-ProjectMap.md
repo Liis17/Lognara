@@ -71,7 +71,7 @@ Lognara-dock/
 
 ## Связи модулей
 
-Публикация Dockerfile в `docker.barkfluff.com:443` из `master`, права каталогов данных и общие теги компонентов описаны в [[Repository/Images]].
+Публикация Dockerfile в `docker.barkfluff.com` из `master`, права каталогов данных и общие теги компонентов описаны в [[Repository/Images]].
 
 - `api::router` собирает обработчики `auth`, `account`, `access`, `passkey`, `live`, `query`; слой `session::require_origin` применяется ко всем `/api/*`.
 - `session::AuthUser` (extractor) использует `Sessions` и `Htpasswd::contains`.
