@@ -46,7 +46,7 @@ Parent: [[Index]]
 
 Автоматические проверки описаны в [[Repository/CI]]: `.github/workflows/ci.yml` на GitHub-hosted Ubuntu выбирает затронутые Rust-crate и веб-интерфейс по путям изменений в PR и рабочих ветках. Учитываются зависимости spool → agent/relay → e2e core; Rust dock и web проверяются независимо. Изменения общих настроек CI/Rust, push в `master` и ручной запуск включают все проверки. Проверки включают сборку, тесты с `crash-tests` у core, форматирование, Clippy, профили памяти agent/relay и TypeScript/Vite на Node.js 24. Итоговый status check `CI passed` требует успеха выбранных проверок и допускает пропуск незатронутых; для блокировки merge его нужно включить в правилах защищённой ветки.
 
-Поставка описана в [[Repository/Images]]: после успешного CI push в `master` публикует в GHCR отдельные образы core, relay и dock для `linux/amd64`, теги `master` и `sha-<полный SHA коммита>`. Agent собирается в контейнере приложения. Все три Dockerfile собирают release-бинарник и используют Debian slim с процессом `1000:1000`; dock также включает веб-сборку. Примеры Compose используют общий `LOGNARA_IMAGE_TAG` из `.env`.
+Поставка описана в [[Repository/Images]]: после успешного CI push в `master` публикует в `docker.barkfluff.com:443` отдельные образы core, relay и dock для `linux/amd64`, теги `master` и `sha-<полный SHA коммита>`. Agent собирается в контейнере приложения. Все три Dockerfile собирают release-бинарник и используют Debian slim с процессом `1000:1000`; dock также включает веб-сборку. Примеры Compose используют общий `LOGNARA_IMAGE_TAG` из `.env`.
 
 ## Сквозной поток логов
 

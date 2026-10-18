@@ -91,7 +91,7 @@ API dock: GET/POST `/api/relays`, `/api/agents`, DELETE `/api/relays/{id}`, `/ap
 ## Docker и nginx
 
 - [`Dockerfile`](Dockerfile) собирает фронтенд и бинарник. В образе процесс работает от `1000:1000`.
-- [`docker-compose.example.yml`](docker-compose.example.yml) использует `ghcr.io/liis17/lognara-dock:${LOGNARA_IMAGE_TAG:-master}`, содержит все переменные, тома `./auth` и `./data`, публикует порт только на `127.0.0.1`.
+- [`docker-compose.example.yml`](docker-compose.example.yml) использует `docker.barkfluff.com:443/lognara-dock:${LOGNARA_IMAGE_TAG:-master}`, содержит все переменные, тома `./auth` и `./data`, публикует порт только на `127.0.0.1`.
 - [`nginx.example.conf`](nginx.example.conf) показывает TLS и отдельный `location` для SSE без буферизации.
 
 nginx должен передавать заголовок `Origin` без изменений.
@@ -104,7 +104,7 @@ docker compose pull
 docker compose up -d
 ```
 
-Образ публикуется после успешного CI в `master` для `linux/amd64`. Для фиксации сборки задайте в `.env` `LOGNARA_IMAGE_TAG=sha-<полный SHA коммита>`; используйте тот же тег для core и relay. До первой публикации или для локальной сборки замените `image` на `build: .` и запускайте `docker compose up -d --build`. Приватный пакет GHCR требует авторизации; для публичного скачивания владелец должен включить Public в настройках пакета. Общая схема описана в [корневом README](../README.md#обновление).
+Образ публикуется после успешного CI в `master` для `linux/amd64`. Для фиксации сборки задайте в `.env` `LOGNARA_IMAGE_TAG=sha-<полный SHA коммита>`; используйте тот же тег для core и relay. До первой публикации или для локальной сборки замените `image` на `build: .` и запускайте `docker compose up -d --build`. Перед скачиванием приватного образа выполните `docker login docker.barkfluff.com:443`. Общая схема описана в [корневом README](../README.md#обновление).
 
 ## HTTP API
 
