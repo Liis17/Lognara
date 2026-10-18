@@ -120,7 +120,7 @@ python3 Lognara-agent/tests/check-memory-profile.py --sources --limit-mib 128
 
 Сначала зарегистрируйте relay и отдельного агента в dock («Подключения»). Выданный токен агента сохраняется в `.env` как `LOGNARA_AGENT_TOKEN`, а в процесс передаётся как `LOGNARA_RELAY_TOKEN`. Для каждого агента используйте свой токен; поля источника не проверяются по профилю.
 
-Примеры JSON: [examples/log-sources](../examples/log-sources). Пути в них должны совпадать с настройками приложения и доступными агенту volumes. Готовых Docker-образов с агентом в репозитории нет.
+Примеры JSON: [examples/log-sources](../examples/log-sources). Пути в них должны совпадать с настройками приложения и доступными агенту volumes. Готовые статические Linux-бинарники для amd64 и arm64 публикуются в [GitHub Releases](https://github.com/Liis17/Lognara/releases) отдельными архивами с `SHA256SUMS`. Описание каждого релиза завершается готовым примером сборки и запуска nginx; [шаблон](release-nginx.md) использует `@@TAG@@` и `@@REPOSITORY@@`, которые подставляются при публикации. Отдельный Docker-образ агента не публикуется.
 
 ### Nginx
 
