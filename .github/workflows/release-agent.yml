@@ -1,0 +1,128 @@
+name: Release agent
+
+on:
+  push:
+    branches: [master]
+    paths: ['Lognara-agent/**']
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: 2
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    name: Linux (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    defaults:
+      run:
+        working-directory: Lognara-agent
+    env:
+      CARGO_BUILD_TARGET: ${{ matrix.target }}
+      CC: musl-gcc
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install native musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools binutils zstd
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: Lognara-agent -> target
+          key: agent-release-${{ matrix.target }}
+      - name: Check release automation
+        run: python3 -m unittest discover -s tests -p 'test_release_agent.py'
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: Build
+        run: cargo build --locked --release --bin lognara-agent
+      - name: Test musl target
+        run: cargo test --locked --all-features
+      - name: Check memory profile
+        run: python3 tests/check-memory-profile.py
+      - name: Verify static ELF and package
+        env:
+          TARGET: ${{ matrix.target }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          binary="target/$TARGET/release/lognara-agent"
+          readelf -h "$binary"
+          if readelf -l "$binary" | grep INTERP > /dev/null; then
+            echo 'Unexpected dynamic loader' >&2
+            exit 1
+          fi
+          if readelf -d "$binary" | grep NEEDED > /dev/null; then
+            echo 'Unexpected shared library dependency' >&2
+            exit 1
+          fi
+          mkdir -p package dist
+          install -m 755 "$binary" package/lognara-agent
+          cp ../LICENSE package/LICENSE
+          tar -czf "dist/lognara-agent-linux-$ARCH.tar.gz" -C package lognara-agent LICENSE
+          cd dist
+          sha256sum "lognara-agent-linux-$ARCH.tar.gz" > "SHA256SUMS-$ARCH"
+          sha256sum -c "SHA256SUMS-$ARCH"
+          mkdir unpacked
+          tar -xzf "lognara-agent-linux-$ARCH.tar.gz" -C unpacked
+          cmp ../package/lognara-agent unpacked/lognara-agent
+      - name: Nginx Debian and Alpine smoke tests
+        run: python3 tests/release_nginx.py target/${{ matrix.target }}/release/lognara-agent
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-${{ matrix.arch }}
+          path: |
+            Lognara-agent/dist/*.tar.gz
+            Lognara-agent/dist/SHA256SUMS-*
+          if-no-files-found: error
+
+  publish:
+    name: Publish agent release
+    needs: [build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    concurrency:
+      group: agent-release-publication
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: agent-*
+          merge-multiple: true
+          path: release-assets
+      - name: Verify complete release assets
+        working-directory: release-assets
+        run: |
+          cat SHA256SUMS-amd64 SHA256SUMS-arm64 > SHA256SUMS
+          sha256sum -c SHA256SUMS
+      - name: Prepare and publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 Lognara-agent/scripts/release_agent.py release-assets

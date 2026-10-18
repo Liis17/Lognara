@@ -129,6 +129,9 @@ jobs:
       - name: Check memory profile
         if: matrix.crate == 'Lognara-agent' || matrix.crate == 'Lognara-relay'
         run: python3 tests/check-memory-profile.py
+      - name: Agent release automation tests
+        if: matrix.crate == 'Lognara-agent'
+        run: python3 -m unittest discover -s tests -p 'test_release_agent.py'
 
   web:
     name: Web (TypeScript and build)

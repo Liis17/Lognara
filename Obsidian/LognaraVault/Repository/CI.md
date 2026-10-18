@@ -28,9 +28,11 @@ Job `changes` использует `dorny/paths-filter@v4`. Для PR списо
 - Job `rust`: динамическая матрица затронутых crate из `Lognara-agent`, `Lognara-relay`, `Lognara-spool`, `Lognara-core`, `Lognara-dock`; при пустом списке job пропускается. Rust stable с rustfmt и Clippy. Проверяет форматирование, все targets/features через Clippy с `-D warnings`, обычную сборку без тестовых features и весь набор unit, интеграционных, e2e и doc-тестов с `--all-features`. Для сборки, Clippy и тестов используется `--locked`.
 - Feature `crash-tests` у core активна в тестах, но не в обычной сборке.
 - В матрице agent и relay дополнительно запускаются `tests/check-memory-profile.py`: нагрузочные тесты, пропускаемые обычным `cargo test`, с ограничением пикового RSS 256 MiB и 2048 MiB соответственно.
+- Для agent также запускаются `tests/test_release_agent.py`: изолированные Git-истории для changelog, выбора предыдущего релиза и latest, первого выпуска и повторной публикации. Эти проверки выполняются и в PR.
 - Job `web`: Node.js 24, `npm ci`, `npm run build` в `Lognara-dock/web`; команда проверяет TypeScript и собирает Vite. `npm test` запускает Node unit-тесты parser/history/live/CSV; после установки Chromium через Playwright job запускает `npm run test:e2e`. Браузерные сценарии используют настоящий React-интерфейс и поддельные API-ответы; отдельные Rust integration tests проверяют настоящий proxy dock.
 - Job `ci` с именем проверки `CI passed`: всегда запускается после `changes`, `rust` и `web`. Требует успеха выбора проверок и всех выбранных jobs, включая все элементы Rust-матрицы; для незатронутых jobs требует `skipped`. Ошибка или отмена обязательного job блокирует успех.
 - Job `publish-images`: только после успешного `ci` и только при push в `master`; собирает и публикует в GHCR образы core, relay и dock с тегами `master` и `sha-<полный SHA>`. Подробности в [[Repository/Images]].
+- Отдельный workflow `Release agent` публикует архивы Linux amd64/arm64 при push в `master`, затрагивающем `Lognara-agent/**`. Он независимо проверяет musl targets (fmt, Clippy, release build, все тесты и память), Python-тесты подготовки релиза и nginx smoke-тесты. Публикация требует успеха обеих архитектур, только её job получает `contents: write`. Форматы архивов, changelog, повторные запуски и очередь публикации описаны в [[Repository/Images#Архивы агента]].
 
 ## Окружение
 
