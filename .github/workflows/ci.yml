@@ -44,7 +44,7 @@ jobs:
           persist-credentials: false
       - uses: dorny/paths-filter@v4
         id: filter
-        if: github.event_name != 'workflow_dispatch'
+        if: github.event_name != 'workflow_dispatch' && !inputs.release_all
         with:
           base: ${{ github.ref == 'refs/heads/master' && github.ref || github.event.repository.default_branch }}
           predicate-quantifier: some-with-excludes
@@ -85,7 +85,7 @@ jobs:
         id: select
         env:
           CHANGED_FILTERS: ${{ steps.filter.outputs.changes }}
-          FULL_CHECKS: ${{ github.event_name == 'workflow_dispatch' }}
+          FULL_CHECKS: ${{ github.event_name == 'workflow_dispatch' || inputs.release_all }}
         run: python3 .github/scripts/select_ci.py
 
   automation:
