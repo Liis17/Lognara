@@ -80,7 +80,7 @@ jobs:
             image-build:
               - '.dockerignore'
               - '.github/workflows/publish-images.yml'
-              - '.github/scripts/next_image_version.py'
+              - '.github/scripts/next-image-version.sh'
       - name: Select Rust matrix and web checks
         id: select
         env:
