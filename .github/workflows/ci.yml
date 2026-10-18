@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref == 'refs/heads/master' && github.run_id || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -31,20 +31,20 @@ jobs:
     outputs:
       rust: ${{ steps.select.outputs.rust }}
       web: ${{ steps.select.outputs.web }}
+      images: ${{ steps.select.outputs.images }}
     steps:
       - uses: actions/checkout@v7
-        if: github.event_name == 'push' && github.ref != 'refs/heads/master'
         with:
           fetch-depth: 0
           persist-credentials: false
       - uses: dorny/paths-filter@v4
         id: filter
-        if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref != 'refs/heads/master')
+        if: github.event_name != 'workflow_dispatch'
         with:
+          base: ${{ github.ref == 'refs/heads/master' && github.ref || github.event.repository.default_branch }}
           predicate-quantifier: some-with-excludes
           filters: |
             ci:
-              - '.github/**'
               - '.cargo/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
@@ -72,27 +72,26 @@ jobs:
               - '!Lognara-dock/web/**'
             web:
               - 'Lognara-dock/web/**'
+            image-build:
+              - '.dockerignore'
+              - '.github/workflows/publish-images.yml'
+              - '.github/scripts/next_image_version.py'
       - name: Select Rust matrix and web checks
         id: select
         env:
           CHANGED_FILTERS: ${{ steps.filter.outputs.changes }}
-        shell: python
-        run: |
-          import json
-          import os
+          FULL_CHECKS: ${{ github.event_name == 'workflow_dispatch' }}
+        run: python3 .github/scripts/select_ci.py
 
-          crates = ["Lognara-agent", "Lognara-relay", "Lognara-spool", "Lognara-core", "Lognara-dock"]
-          changed = json.loads(os.environ["CHANGED_FILTERS"] or "[]")
-          full = (
-              os.environ["GITHUB_EVENT_NAME"] == "workflow_dispatch"
-              or os.environ["GITHUB_REF"] == "refs/heads/master"
-              or "ci" in changed
-          )
-          rust = crates if full else [crate for crate in crates if crate in changed]
-          web = full or "web" in changed
-          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              print(f"rust={json.dumps(rust)}", file=output)
-              print(f"web={str(web).lower()}", file=output)
+  automation:
+    name: Workflow automation tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: python3 -m unittest discover -s .github/tests -p 'test_*.py'
 
   rust:
     name: Rust (${{ matrix.crate }})
@@ -165,11 +164,12 @@ jobs:
   ci:
     name: CI passed
     if: ${{ always() }}
-    needs: [changes, rust, web]
+    needs: [changes, automation, rust, web]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
       CHANGES_RESULT: ${{ needs.changes.result }}
+      AUTOMATION_RESULT: ${{ needs.automation.result }}
       RUST_REQUIRED: ${{ needs.changes.outputs.rust != '[]' }}
       WEB_REQUIRED: ${{ needs.changes.outputs.web }}
       RUST_RESULT: ${{ needs.rust.result }}
@@ -178,6 +178,7 @@ jobs:
       - name: Require all checks to pass
         run: |
           test "$CHANGES_RESULT" = success
+          test "$AUTOMATION_RESULT" = success
           if [ "$RUST_REQUIRED" = true ]; then
             test "$RUST_RESULT" = success
           else
@@ -191,8 +192,8 @@ jobs:
 
   publish-images:
     name: Publish image (${{ matrix.component }})
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-    needs: [ci]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master' && needs.changes.outputs.images != '[]'
+    needs: [ci, changes]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -203,16 +204,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - component: core
-            context: .
-            dockerfile: Lognara-core/Dockerfile
-          - component: relay
-            context: .
-            dockerfile: Lognara-relay/Dockerfile
-          - component: dock
-            context: Lognara-dock
-            dockerfile: Lognara-dock/Dockerfile
+        component: ${{ fromJSON(needs.changes.outputs.images) }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -236,8 +228,8 @@ jobs:
       - name: Build and publish
         uses: docker/build-push-action@v7
         with:
-          context: ${{ matrix.context }}
-          file: ${{ matrix.dockerfile }}
+          context: ${{ matrix.component == 'dock' && 'Lognara-dock' || '.' }}
+          file: Lognara-${{ matrix.component }}/Dockerfile
           platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
