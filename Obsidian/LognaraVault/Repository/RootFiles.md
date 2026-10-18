@@ -15,7 +15,7 @@ Parent: [[Index]]
 - `.github/workflows/ci.yml` — GitHub Actions для всех веток и PR: сборка и тесты пяти Rust-crate, Clippy, форматирование, проверки памяти agent/relay и сборка веб-интерфейса. Детали в [[Repository/CI]].
 - `.dockerignore` — исключает git, локальные Rust/Node-сборки и `.env` из корневого контекста Docker-сборки core и relay. Поставка в [[Repository/Images]].
 
-`.env.example` также задаёт `LOGNARA_IMAGE_TAG=master` для согласованного выбора тегов core, relay и dock в примерах Compose; можно заменить на `sha-<полный SHA коммита>`.
+`.env.example` также задаёт `LOGNARA_IMAGE_TAG=master` для выбора тегов core, relay и dock в примерах Compose; общий `sha-<полный SHA коммита>` можно использовать после полного релиза. Числовые patch-версии компонентов независимы; при их закреплении тег задаётся в `image` каждого сервиса. Контракт публикации описан в [[Repository/Images]].
 
 ## Ключевые методы/функции
 
