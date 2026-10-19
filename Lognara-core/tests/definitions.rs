@@ -46,8 +46,14 @@ async fn send(
     method: &str,
     uri: &str,
     token: Option<&str>,
-    body: Option<Value>,
+    mut body: Option<Value>,
 ) -> (StatusCode, Value) {
+    if uri.starts_with(DEFINITIONS)
+        && matches!(method, "POST" | "PUT")
+        && let Some(Value::Object(value)) = body.as_mut()
+    {
+        value.entry("server").or_insert(json!("eu-prod-01"));
+    }
     let mut request = Request::builder().method(method).uri(uri);
     if let Some(token) = token {
         request = request.header("authorization", format!("Bearer {token}"));
@@ -682,5 +688,502 @@ async fn preview_scans_recent_logs_of_the_service_and_environment() {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"], "minutes must be 1..60");
     }
+    core.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn server_scopes_isolate_rules_preview_listing_and_queries() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = Core::open(config(dir.path(), 2)).unwrap();
+    let router = api::router(core.clone());
+    for (server, pattern) in [("a", "value=(?P<n>\\d+)"), ("b", "value=(?P<n>\\d+)")] {
+        let (status,_)=send(&router,"POST",DEFINITIONS,Some("admin"),Some(json!({"server":server,"service":"api","name":"amount","kind":"gauge","rule":{"contains":"value=","pattern":pattern,"value_group":"n"}}))).await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+    let now = now_nanos();
+    let mut a = source("api", Some("prod"));
+    a.server = "a".into();
+    let mut b = a.clone();
+    b.server = "b".into();
+    core.journal
+        .accept(&batch(vec![
+            (a, vec![event(901, now, "value=2")]),
+            (b, vec![event(902, now, "value=9")]),
+        ]))
+        .unwrap();
+    wait(|| !core.snapshot().series_files.is_empty());
+    let (status, list) = send(
+        &router,
+        "GET",
+        "/v1/series?group_by=server",
+        Some("query"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(list["metrics"].as_array().unwrap().len(), 2);
+    for (server, value) in [("a", 2.0), ("b", 9.0)] {
+        let (status,reply)=send(&router,"POST","/v1/series/query",Some("query"),Some(json!({"server":server,"service":"api","name":"amount","origin":"rule","from":lognara_core::model::format_timestamp(now-60_000_000_000),"to":lognara_core::model::format_timestamp(now+60_000_000_000),"step_seconds":60}))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            reply["series"][0]["values"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v.as_f64() == Some(value)),
+            "{reply}"
+        );
+        let (_,preview)=send(&router,"POST",PREVIEW,Some("admin"),Some(json!({"server":server,"service":"api","rule":{"contains":"value=","pattern":"value=(?P<n>\\d+)","value_group":"n"}}))).await;
+        assert_eq!(preview["matched"], 1);
+        assert_eq!(preview["samples"][0]["value"], value);
+    }
+    core.shutdown().unwrap();
+    drop(router);
+    drop(core);
+    let core = Core::open(config(dir.path(), 100)).unwrap();
+    assert_eq!(
+        lognara_core::scoped_metrics::sources(core.clone())
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        lognara_core::scoped_metrics::list(core.clone())
+            .await
+            .unwrap()
+            .metrics
+            .len(),
+        2
+    );
+    core.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn bundle_import_is_atomic_and_supports_conflicts_and_stale_revisions() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = Core::open(config(dir.path(), 100)).unwrap();
+    let router = api::router(core.clone());
+    let bundle = json!({"format":"lognara-metrics","version":1,"metrics":[{"name":"requests","kind":"delta","rule":{"contains":"done","pattern":"done"}}]});
+    let request = json!({"server":"a","service":"api","bundle":bundle});
+    let (status, check) = send(
+        &router,
+        "POST",
+        "/v1/admin/series/import/check",
+        Some("admin"),
+        Some(request.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(check["errors"], json!([]));
+    let mut apply = request.clone();
+    apply["revision"] = check["revision"].clone();
+    apply["actions"] = json!([{"action":"create"}]);
+    let (status, result) = send(
+        &router,
+        "POST",
+        "/v1/admin/series/import/apply",
+        Some("admin"),
+        Some(apply.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(result["created"], 1);
+    assert_eq!(
+        send(
+            &router,
+            "POST",
+            "/v1/admin/series/import/apply",
+            Some("admin"),
+            Some(apply)
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    let (_, check) = send(
+        &router,
+        "POST",
+        "/v1/admin/series/import/check",
+        Some("admin"),
+        Some(request.clone()),
+    )
+    .await;
+    assert_eq!(check["conflicts"].as_array().unwrap().len(), 1);
+    let original = check["conflicts"][0]["existing"]["id"].clone();
+    let mut apply = request.clone();
+    apply["revision"] = check["revision"].clone();
+    apply["actions"] = json!([{"action":"replace"}]);
+    assert_eq!(
+        send(
+            &router,
+            "POST",
+            "/v1/admin/series/import/apply",
+            Some("admin"),
+            Some(apply)
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        lognara_core::definitions::list(&core).unwrap()[0]
+            .id
+            .to_string(),
+        original.as_str().unwrap()
+    );
+    let (_, check) = send(
+        &router,
+        "POST",
+        "/v1/admin/series/import/check",
+        Some("admin"),
+        Some(request.clone()),
+    )
+    .await;
+    let mut apply = request.clone();
+    apply["revision"] = check["revision"].clone();
+    apply["actions"] = json!([{"action":"rename","name":"requests.copy"}]);
+    assert_eq!(
+        send(
+            &router,
+            "POST",
+            "/v1/admin/series/import/apply",
+            Some("admin"),
+            Some(apply)
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (_, check) = send(
+        &router,
+        "POST",
+        "/v1/admin/series/import/check",
+        Some("admin"),
+        Some(request.clone()),
+    )
+    .await;
+    let mut apply = request.clone();
+    apply["revision"] = check["revision"].clone();
+    apply["actions"] = json!([{"action":"skip"}]);
+    assert_eq!(
+        send(
+            &router,
+            "POST",
+            "/v1/admin/series/import/apply",
+            Some("admin"),
+            Some(apply)
+        )
+        .await
+        .1["skipped"],
+        1
+    );
+    let mut bad = request;
+    bad["bundle"]["metrics"] = json!([{"name":"fresh","kind":"delta","rule":{"contains":"done","pattern":"done"}},{"name":"broken","kind":"delta","rule":{"contains":"done","pattern":"("}}]);
+    let (_, check) = send(
+        &router,
+        "POST",
+        "/v1/admin/series/import/check",
+        Some("admin"),
+        Some(bad.clone()),
+    )
+    .await;
+    assert_eq!(check["errors"][0]["index"], 1);
+    bad["revision"] = check["revision"].clone();
+    bad["actions"] = json!([{"action":"create"},{"action":"create"}]);
+    assert_eq!(
+        send(
+            &router,
+            "POST",
+            "/v1/admin/series/import/apply",
+            Some("admin"),
+            Some(bad)
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(lognara_core::definitions::list(&core).unwrap().len(), 2);
+    let valid = json!({"server":"a","service":"api","bundle":{"format":"lognara-metrics","version":1,"metrics":[{"name":"new","kind":"delta","rule":{"contains":"done","pattern":"done"}}]}});
+    for (field, value) in [
+        ("version", json!(2)),
+        ("format", json!("unknown")),
+        ("metrics", json!([])),
+    ] {
+        let mut invalid = valid.clone();
+        invalid["bundle"][field] = value;
+        assert_eq!(
+            send(
+                &router,
+                "POST",
+                "/v1/admin/series/import/check",
+                Some("admin"),
+                Some(invalid)
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let mut duplicate = valid.clone();
+    duplicate["bundle"]["metrics"] =
+        json!([valid["bundle"]["metrics"][0], valid["bundle"]["metrics"][0]]);
+    let (_, reply) = send(
+        &router,
+        "POST",
+        "/v1/admin/series/import/check",
+        Some("admin"),
+        Some(duplicate),
+    )
+    .await;
+    assert_eq!(reply["errors"][0]["field"], "name");
+    assert_eq!(reply["errors"][0]["index"], 1);
+    let mut over_quota = valid;
+    over_quota["bundle"]["metrics"]=Value::Array((0..63).map(|i|json!({"name":format!("extra_{i}"),"kind":"delta","rule":{"contains":"done","pattern":"done"}})).collect());
+    let (_, check) = send(
+        &router,
+        "POST",
+        "/v1/admin/series/import/check",
+        Some("admin"),
+        Some(over_quota.clone()),
+    )
+    .await;
+    assert!(
+        check["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["index"].is_null())
+    );
+    over_quota["revision"] = check["revision"].clone();
+    over_quota["actions"] = Value::Array((0..63).map(|_| json!({"action":"create"})).collect());
+    assert_eq!(
+        send(
+            &router,
+            "POST",
+            "/v1/admin/series/import/apply",
+            Some("admin"),
+            Some(over_quota)
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(lognara_core::definitions::list(&core).unwrap().len(), 2);
+    core.shutdown().unwrap();
+}
+
+#[test]
+fn nginx_templates_match_combined_and_error_logs_with_bounded_labels() {
+    use lognara_core::definitions::{DefinitionInput, validate};
+    let bundle: Value = serde_json::from_str(include_str!(
+        "../../Lognara-dock/web/public/metrics-nginx.json"
+    ))
+    .unwrap();
+    let lines = [
+        "2001:db8::1 - - [19/Oct/2026:12:00:00 +0000] \"GET / HTTP/1.1\" 200 0 \"-\" \"curl/8.0\"",
+        "127.0.0.1 - user [19/Oct/2026:12:00:00 +0000] \"POST /api HTTP/1.1\" 404 512 \"-\" \"test\\x22agent\"",
+        "127.0.0.1 - - [19/Oct/2026:12:00:00 +0000] \"DELETE / HTTP/1.1\" 503 32 \"-\" \"curl\"",
+        "2026/10/19 12:00:00 [error] 123#123: *42 upstream timed out",
+        "not an nginx log",
+    ];
+    for (index, value) in bundle["metrics"].as_array().unwrap().iter().enumerate() {
+        let mut value = value.clone();
+        value["server"] = json!("a");
+        value["service"] = json!("nginx");
+        let input: DefinitionInput = serde_json::from_value(value).unwrap();
+        validate(&input, &[], false).unwrap();
+        let regex = lognara_core::definitions::validate_rule(input.rule.as_ref().unwrap()).unwrap();
+        let expected = match index {
+            0 | 1 | 4 => vec![true, true, true, false, false],
+            2 => vec![false, true, false, false, false],
+            3 => vec![false, false, true, false, false],
+            _ => vec![false, false, false, true, false],
+        };
+        assert_eq!(
+            lines
+                .iter()
+                .map(|line| regex.is_match(line))
+                .collect::<Vec<_>>(),
+            expected,
+            "{}",
+            input.name
+        );
+    }
+}
+
+#[tokio::test]
+async fn legacy_migration_copies_known_servers_removes_orphans_and_preserves_points() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = Core::open(config(dir.path(), 2)).unwrap();
+    let now = now_nanos();
+    let mut a = source("api", None);
+    a.server = "a".into();
+    let mut b = a.clone();
+    b.server = "b".into();
+    let mut native = event(10001, now, "ServiceMetrics");
+    native.attributes.insert("Metrics".into(),json!({"SchemaVersion":2,"Counters":{"runs":3},"Timestamp":lognara_core::model::format_timestamp(now)}));
+    core.journal
+        .accept(&batch(vec![
+            (a, vec![native]),
+            (b, vec![event(10002, now, "done")]),
+        ]))
+        .unwrap();
+    wait(|| !core.snapshot().series_files.is_empty());
+    core.shutdown().unwrap();
+    drop(core);
+    let path = dir.path().join("catalog.sqlite");
+    let original = json!({"id":Uuid::new_v4(),"service":"api","name":"requests","title":"Requests","description":"","unit":"requests","kind":"delta","aggregation":"sum","enabled":true,"rule":{"contains":"done","pattern":"done"},"updated_at":"2026-01-01T00:00:00Z"});
+    {
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute_batch("DROP TABLE series_definitions; DROP TABLE metric_sources; DROP TABLE scoped_series; DROP TABLE metrics_backfill; DROP TABLE metrics_migration; CREATE TABLE series_definitions(id TEXT PRIMARY KEY,service TEXT NOT NULL,name TEXT NOT NULL,body TEXT NOT NULL,UNIQUE(service,name)); PRAGMA user_version=2;").unwrap();
+        db.execute(
+            "INSERT INTO series_definitions VALUES(?1,'api','requests',?2)",
+            rusqlite::params![original["id"].as_str().unwrap(), original.to_string()],
+        )
+        .unwrap();
+        let mut orphan = original.clone();
+        orphan["id"] = json!(Uuid::new_v4());
+        orphan["service"] = json!("unknown");
+        db.execute(
+            "INSERT INTO series_definitions VALUES(?1,'unknown','requests',?2)",
+            rusqlite::params![orphan["id"].as_str().unwrap(), orphan.to_string()],
+        )
+        .unwrap();
+    }
+    for _ in 0..2 {
+        let core = Core::open(config(dir.path(), 100)).unwrap();
+        let definitions = lognara_core::definitions::list(&core).unwrap();
+        assert_eq!(definitions.len(), 2);
+        assert_eq!(
+            definitions
+                .iter()
+                .map(|d| d.server.as_str())
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from(["a", "b"])
+        );
+        assert_eq!(
+            lognara_core::scoped_metrics::list(core.clone())
+                .await
+                .unwrap()
+                .metrics
+                .len(),
+            3
+        );
+        assert_eq!(
+            read_points(&core.snapshot().series_files[0].path)[0].value,
+            3.0
+        );
+        core.shutdown().unwrap();
+        drop(core);
+    }
+}
+
+#[test]
+fn migration_quota_failure_is_retryable_without_modifying_legacy_definitions() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = Core::open(config(dir.path(), 1)).unwrap();
+    let mut source = source("api", None);
+    source.server = "a".into();
+    core.journal
+        .accept(&batch(vec![(
+            source,
+            vec![event(20001, now_nanos(), "done")],
+        )]))
+        .unwrap();
+    wait(|| !core.snapshot().closed.is_empty());
+    core.shutdown().unwrap();
+    drop(core);
+    let path = dir.path().join("catalog.sqlite");
+    {
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute_batch("DROP TABLE series_definitions; DROP TABLE metric_sources; DROP TABLE scoped_series; DROP TABLE metrics_backfill; DROP TABLE metrics_migration; CREATE TABLE series_definitions(id TEXT PRIMARY KEY,service TEXT NOT NULL,name TEXT NOT NULL,body TEXT NOT NULL,UNIQUE(service,name)); PRAGMA user_version=2;").unwrap();
+        for i in 0..65 {
+            let definition = json!({"id":Uuid::new_v4(),"service":"api","name":format!("rule_{i}"),"title":"","description":"","unit":"","kind":"delta","aggregation":"sum","enabled":true,"rule":{"contains":"done","pattern":"done"},"updated_at":"2026-01-01T00:00:00Z"});
+            db.execute(
+                "INSERT INTO series_definitions VALUES(?1,'api',?2,?3)",
+                rusqlite::params![
+                    definition["id"].as_str().unwrap(),
+                    format!("rule_{i}"),
+                    definition.to_string()
+                ],
+            )
+            .unwrap();
+        }
+    }
+    assert!(Core::open(config(dir.path(), 100)).is_err());
+    {
+        let db = rusqlite::Connection::open(&path).unwrap();
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM legacy_series_definitions", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .unwrap(),
+            65
+        );
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM series_definitions", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        db.execute(
+            "DELETE FROM legacy_series_definitions WHERE name='rule_64'",
+            [],
+        )
+        .unwrap();
+    }
+    let core = Core::open(config(dir.path(), 100)).unwrap();
+    assert_eq!(lognara_core::definitions::list(&core).unwrap().len(), 64);
+    core.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn cumulative_rule_continues_across_legacy_migration() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = Core::open(config(dir.path(), 1)).unwrap();
+    let input=serde_json::from_value(json!({"server":"a","service":"api","name":"total","kind":"cumulative","rule":{"contains":"total=","pattern":"total=(?P<n>\\d+)","value_group":"n"}})).unwrap();
+    let definition = lognara_core::definitions::create(&core, input).unwrap();
+    let minute = 60_000_000_000;
+    let time = (now_nanos() / minute - 2) * minute;
+    let mut source = source("api", None);
+    source.server = "a".into();
+    core.journal
+        .accept(&batch(vec![(
+            source.clone(),
+            vec![event(51001, time, "total=10")],
+        )]))
+        .unwrap();
+    wait(|| !core.snapshot().series_files.is_empty());
+    core.shutdown().unwrap();
+    drop(core);
+    {
+        let db = rusqlite::Connection::open(dir.path().join("catalog.sqlite")).unwrap();
+        db.execute_batch("DROP TABLE series_definitions; DROP TABLE metric_sources; DROP TABLE scoped_series; DROP TABLE metrics_backfill; DROP TABLE metrics_migration; CREATE TABLE series_definitions(id TEXT PRIMARY KEY,service TEXT NOT NULL,name TEXT NOT NULL,body TEXT NOT NULL,UNIQUE(service,name)); PRAGMA user_version=2;").unwrap();
+        let mut legacy = serde_json::to_value(&definition).unwrap();
+        legacy.as_object_mut().unwrap().remove("server");
+        db.execute(
+            "INSERT INTO series_definitions VALUES(?1,'api','total',?2)",
+            rusqlite::params![definition.id.to_string(), legacy.to_string()],
+        )
+        .unwrap();
+    }
+    let core = Core::open(config(dir.path(), 1)).unwrap();
+    let migrated = lognara_core::definitions::list(&core).unwrap().remove(0);
+    assert_eq!(
+        migrated.legacy_rule_id.as_deref(),
+        Some(definition.id.to_string().as_str())
+    );
+    core.journal
+        .accept(&batch(vec![(
+            source,
+            vec![event(51002, time + minute, "total=15")],
+        )]))
+        .unwrap();
+    wait(|| core.snapshot().series_files.len() == 2);
+    let router = api::router(core.clone());
+    let (status,reply)=send(&router,"POST","/v1/series/query",Some("query"),Some(json!({"server":"a","service":"api","name":"total","from":lognara_core::model::format_timestamp(time+minute),"to":lognara_core::model::format_timestamp(time+2*minute),"step_seconds":60}))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(reply["series"][0]["values"], json!([5.0]));
     core.shutdown().unwrap();
 }

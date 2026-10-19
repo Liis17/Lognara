@@ -46,6 +46,8 @@ pub enum Split {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QueryRequest {
+    #[serde(default)]
+    pub server: Option<String>,
     pub service: String,
     pub name: String,
     pub from: String,
@@ -82,6 +84,8 @@ pub struct ListResponse {
 
 #[derive(Debug, Serialize)]
 pub struct Metric {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
     pub service: String,
     pub name: String,
     pub origin: String,
@@ -151,7 +155,12 @@ fn merged_names(
 }
 
 /// Имена, окружения и определения каталога.
-type CatalogRows = (Vec<SeriesName>, Vec<SeriesEnvironment>, Vec<Definition>);
+type CatalogRows = (
+    Vec<SeriesName>,
+    Vec<SeriesEnvironment>,
+    Vec<Definition>,
+    crate::scoped_metrics::Metadata,
+);
 
 /// Имена, окружения и определения из каталога; SQLite читается вне async-потока.
 async fn catalog(core: Arc<Core>) -> Result<CatalogRows, QueryError> {
@@ -161,6 +170,7 @@ async fn catalog(core: Arc<Core>) -> Result<CatalogRows, QueryError> {
             catalog.series_names()?,
             catalog.series_environments()?,
             catalog.definitions()?,
+            crate::scoped_metrics::Metadata::load(&catalog)?,
         ))
     })
     .await
@@ -179,7 +189,7 @@ fn default_origin(definition: &Definition) -> Origin {
 /// GET /v1/series: серии каталога и открытого сегмента, окружения, определения без точек и определения у серий.
 pub async fn list(core: Arc<Core>) -> Result<ListResponse, QueryError> {
     let snapshot = core.snapshot();
-    let (names, catalog_environments, definitions) = catalog(core.clone()).await?;
+    let (names, catalog_environments, definitions, _) = catalog(core.clone()).await?;
     let mut environments: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
     let active_environments = snapshot
         .active
@@ -197,6 +207,7 @@ pub async fn list(core: Arc<Core>) -> Result<ListResponse, QueryError> {
         metrics.insert(
             (service.clone(), name.clone(), origin.clone()),
             Metric {
+                server: None,
                 service,
                 name,
                 origin,
@@ -220,6 +231,7 @@ pub async fn list(core: Arc<Core>) -> Result<ListResponse, QueryError> {
                     origin.clone(),
                 ),
                 Metric {
+                    server: None,
                     service: definition.service.clone(),
                     name: definition.name.clone(),
                     origin,
@@ -263,30 +275,64 @@ pub async fn query(core: Arc<Core>, request: QueryRequest) -> Result<QueryRespon
         ));
     }
     let snapshot = core.snapshot();
-    let (names, _, definitions) = catalog(core.clone()).await?;
-    let definition = definitions.iter().find(|definition| {
-        definition.service == request.service && definition.name == request.name
-    });
-    let (kind, aggregation, unit) = match definition {
-        Some(definition) => {
-            // Кумулятивная серия всегда агрегируется суммой приращений.
-            let aggregation = if definition.kind == Kind::Cumulative {
-                Aggregation::Sum
-            } else {
-                definition.aggregation
-            };
-            (definition.kind, aggregation, definition.unit.clone())
-        }
-        None => {
-            let origins: Vec<String> = merged_names(&names, &snapshot)
-                .into_keys()
-                .filter(|(service, name, _)| *service == request.service && *name == request.name)
-                .map(|(_, _, origin)| origin)
+    let (_, _, definitions, mut metadata) = catalog(core.clone()).await?;
+    if let Some(active) = &snapshot.active {
+        metadata.merge(&active.scoped);
+    }
+    if let Some(server) = &request.server {
+        crate::definitions::validate_service(server).map_err(QueryError::Invalid)?;
+    }
+    let candidates: Vec<_> = definitions
+        .iter()
+        .filter(|d| d.service == request.service && d.name == request.name)
+        .collect();
+    let mut servers: BTreeSet<String> = metadata
+        .names
+        .keys()
+        .filter(|(_, service, name, origin, _)| {
+            service == &request.service
+                && name == &request.name
+                && request.origin.is_none_or(|o| o.as_str() == origin)
+        })
+        .map(|(server, _, _, _, _)| server.clone())
+        .collect();
+    servers.extend(
+        candidates
+            .iter()
+            .filter(|d| {
+                request
+                    .origin
+                    .is_none_or(|origin| default_origin(d) == origin)
+            })
+            .map(|d| d.server.clone()),
+    );
+    if let Some(server) = &request.server {
+        servers = BTreeSet::from([server.clone()]);
+    }
+    let settings_for = |server: &str| {
+        if let Some(definition) = candidates.iter().find(|d| d.server == server) {
+            (
+                definition.kind,
+                if definition.kind == Kind::Cumulative {
+                    Aggregation::Sum
+                } else {
+                    definition.aggregation
+                },
+                definition.unit.clone(),
+            )
+        } else {
+            let origins: Vec<_> = metadata
+                .names
+                .keys()
+                .filter(|(s, service, name, _, _)| {
+                    s == server && service == &request.service && name == &request.name
+                })
+                .map(|(_, _, _, origin, _)| origin.as_str())
                 .collect();
-            let gauge = match request.origin {
-                Some(origin) => origin == Origin::Gauge,
-                None => !origins.is_empty() && origins.iter().all(|origin| origin == "gauge"),
-            };
+            let gauge = request
+                .origin
+                .map(|o| o == Origin::Gauge)
+                .unwrap_or(!origins.is_empty() && origins.iter().all(|o| *o == "gauge"));
             if gauge {
                 (Kind::Gauge, Aggregation::Avg, String::new())
             } else {
@@ -294,6 +340,14 @@ pub async fn query(core: Arc<Core>, request: QueryRequest) -> Result<QueryRespon
             }
         }
     };
+    let settings: Vec<_> = servers.iter().map(|server| settings_for(server)).collect();
+    if settings.windows(2).any(|pair| pair[0] != pair[1]) {
+        return Err(QueryError::Invalid("server_required".into()));
+    }
+    let (kind, aggregation, unit) = settings
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| settings_for(""));
     // Приращению нужен один bucket до начала окна: первое приращение считается от него.
     let read_from = if kind == Kind::Cumulative {
         (first - step).max(i64::MIN as i128)
@@ -536,6 +590,9 @@ fn scope(request: &QueryRequest) -> Expr {
     let mut predicate = col("service")
         .eq(lit(request.service.as_str()))
         .and(col("name").eq(lit(request.name.as_str())));
+    if let Some(server) = &request.server {
+        predicate = predicate.and(col("server").eq(lit(server.as_str())));
+    }
     if let Some(origin) = request.origin {
         predicate = predicate.and(col("origin").eq(lit(origin.as_str())));
     }

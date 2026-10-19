@@ -8,6 +8,7 @@ import Infrastructure from "./pages/Infrastructure";
 import Login from "./pages/Login";
 import Logs from "./pages/Logs";
 import Metrics from "./pages/Metrics";
+import MetricDetail from "./pages/MetricDetail";
 import Settings from "./pages/Settings";
 
 export default function App() {
@@ -71,6 +72,7 @@ export default function App() {
             path="/metrics"
             element={<Metrics onUnauthorized={() => setMe(null)} />}
           />
+          <Route path="/metrics/detail" element={<MetricDetail onUnauthorized={() => setMe(null)} />} />
           <Route path="/access" element={<Access onUnauthorized={() => setMe(null)} />} />
           <Route path="/settings" element={<Settings onChange={refresh} />} />
           <Route path="*" element={<Navigate to="/logs" replace />} />

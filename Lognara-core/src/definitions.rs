@@ -54,6 +54,11 @@ pub struct Rule {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Definition {
+    /// Стабильный ID извлечения для истории до разделения по серверам.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_rule_id: Option<String>,
+    #[serde(default)]
+    pub server: String,
     pub id: Uuid,
     pub service: String,
     pub name: String,
@@ -70,6 +75,7 @@ pub struct Definition {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DefinitionInput {
+    pub server: String,
     pub service: String,
     pub name: String,
     #[serde(default)]
@@ -92,13 +98,15 @@ fn enabled_by_default() -> bool {
 }
 
 impl Definition {
-    fn new(id: Uuid, input: DefinitionInput) -> Self {
+    pub(crate) fn new(id: Uuid, input: DefinitionInput) -> Self {
         let aggregation = input.aggregation.unwrap_or(match input.kind {
             Kind::Gauge => Aggregation::Avg,
             Kind::Delta | Kind::Cumulative => Aggregation::Sum,
         });
         Self {
+            legacy_rule_id: None,
             id,
+            server: input.server,
             service: input.service,
             name: input.name,
             title: input.title,
@@ -137,6 +145,7 @@ pub fn validate(
     native: bool,
 ) -> Result<(), String> {
     validate_service(&input.service)?;
+    validate_service(&input.server).map_err(|_| "server must be 1..=128 bytes")?;
     if !(1..=128).contains(&input.name.len())
         || !input
             .name
@@ -154,10 +163,11 @@ pub fn validate(
     if input.unit.chars().count() > 32 {
         return Err("unit must be at most 32 characters".into());
     }
-    if others
-        .iter()
-        .any(|definition| definition.service == input.service && definition.name == input.name)
-    {
+    if others.iter().any(|definition| {
+        definition.server == input.server
+            && definition.service == input.service
+            && definition.name == input.name
+    }) {
         return Err("definition already exists".into());
     }
     if let Some(rule) = &input.rule {
@@ -223,6 +233,7 @@ fn compile(pattern: &str) -> Result<Regex, regex::Error> {
 
 /// Включённое правило с готовым regex; id и name берутся из определения.
 pub struct CompiledRule {
+    pub server: Option<String>,
     pub id: String,
     pub name: String,
     pub environment: Option<String>,
@@ -235,6 +246,7 @@ pub struct CompiledRule {
 impl CompiledRule {
     pub fn new(id: String, name: String, rule: &Rule) -> Result<Self> {
         Ok(Self {
+            server: None,
             id,
             name,
             environment: rule.environment.clone(),
@@ -256,14 +268,19 @@ impl RuleSet {
         let mut services: HashMap<String, Vec<CompiledRule>> = HashMap::new();
         for definition in definitions.iter().filter(|definition| definition.enabled) {
             if let Some(rule) = &definition.rule {
+                let mut compiled = CompiledRule::new(
+                    definition
+                        .legacy_rule_id
+                        .clone()
+                        .unwrap_or_else(|| definition.id.to_string()),
+                    definition.name.clone(),
+                    rule,
+                )?;
+                compiled.server = Some(definition.server.clone());
                 services
                     .entry(definition.service.clone())
                     .or_default()
-                    .push(CompiledRule::new(
-                        definition.id.to_string(),
-                        definition.name.clone(),
-                        rule,
-                    )?);
+                    .push(compiled);
             }
         }
         Ok(Self { services })
@@ -303,7 +320,7 @@ pub fn create(core: &Core, input: DefinitionInput) -> Result<Definition, QueryEr
     // Проверка, запись и публикация правил идут под одной блокировкой каталога.
     let catalog = core.journal.catalog.lock().unwrap();
     let mut definitions = catalog.definitions()?;
-    let native = catalog.has_native_name(&input.service, &input.name)?;
+    let native = has_native(core, &catalog, &input)?;
     validate(&input, &definitions, native).map_err(QueryError::Invalid)?;
     let definition = Definition::new(Uuid::new_v4(), input);
     definitions.push(definition.clone());
@@ -330,10 +347,11 @@ pub fn update(
     else {
         return Ok(None);
     };
-    definitions.remove(position);
-    let native = catalog.has_native_name(&input.service, &input.name)?;
+    let previous = definitions.remove(position);
+    let native = has_native(core, &catalog, &input)?;
     validate(&input, &definitions, native).map_err(QueryError::Invalid)?;
-    let definition = Definition::new(id, input);
+    let mut definition = Definition::new(id, input);
+    definition.legacy_rule_id = previous.legacy_rule_id;
     definitions.push(definition.clone());
     let rules = RuleSet::load(&definitions)?;
     if !catalog.update_definition(&definition)? {
@@ -360,6 +378,27 @@ pub fn delete(core: &Core, id: &str) -> Result<bool, QueryError> {
     }
     *core.rules.write().unwrap() = Arc::new(rules);
     Ok(true)
+}
+
+pub(crate) fn has_native(
+    core: &Core,
+    catalog: &crate::catalog::Catalog,
+    input: &DefinitionInput,
+) -> Result<bool, QueryError> {
+    let persisted: bool = catalog.connection.query_row("SELECT EXISTS(SELECT 1 FROM scoped_series WHERE server=?1 AND service=?2 AND name=?3 AND origin IN ('counter','gauge'))", rusqlite::params![input.server,input.service,input.name], |r|r.get(0)).map_err(anyhow::Error::from)?;
+    Ok(persisted
+        || core.snapshot().active.as_ref().is_some_and(|active| {
+            active
+                .scoped
+                .names
+                .keys()
+                .any(|(server, service, name, origin, _)| {
+                    server == &input.server
+                        && service == &input.service
+                        && name == &input.name
+                        && origin != "rule"
+                })
+        }))
 }
 
 #[cfg(test)]

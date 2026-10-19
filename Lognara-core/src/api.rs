@@ -45,6 +45,7 @@ pub fn router(core: Arc<Core>) -> Router {
         .route("/v1/issues/{fingerprint}/details", post(issue_details))
         .route("/v1/status", get(status))
         .route("/v1/series", get(list_series))
+        .route("/v1/series/sources", get(series_sources))
         .route("/v1/series/query", post(query_series))
         .route_layer(middleware::from_fn_with_state(
             token_hash(&core.journal.config.query_token),
@@ -162,8 +163,23 @@ async fn group_by(
     }
 }
 
-async fn list_series(State(core): State<Arc<Core>>) -> Response {
-    run_analytics(&core, series_query::list(core.clone())).await
+async fn list_series(
+    State(core): State<Arc<Core>>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    match query.get("group_by").map(String::as_str) {
+        None => run_analytics(&core, series_query::list(core.clone())).await,
+        Some("server") => run_analytics(&core, crate::scoped_metrics::list(core.clone())).await,
+        _ => QueryError::Invalid("group_by must be server".into()).into_response(),
+    }
+}
+async fn series_sources(State(core): State<Arc<Core>>) -> Response {
+    run_analytics(&core, async {
+        crate::scoped_metrics::sources(core.clone())
+            .await
+            .map(|sources| serde_json::json!({"sources":sources}))
+    })
+    .await
 }
 
 async fn query_series(
@@ -228,6 +244,8 @@ fn admin_router(core: Arc<Core>, token: &str) -> Router {
             put(update_definition).delete(delete_definition),
         )
         .route("/v1/admin/series/preview", post(preview))
+        .route("/v1/admin/series/import/check", post(import_check))
+        .route("/v1/admin/series/import/apply", post(import_apply))
         .route_layer(middleware::from_fn_with_state(token_hash(token), authorize))
         .with_state(core)
 }
@@ -410,6 +428,7 @@ impl IntoResponse for QueryError {
     fn into_response(self) -> Response {
         let status = match &self {
             Self::Invalid(_) => StatusCode::BAD_REQUEST,
+            Self::Conflict => StatusCode::CONFLICT,
             Self::Gone => StatusCode::GONE,
             Self::Timeout => StatusCode::GATEWAY_TIMEOUT,
             Self::Busy | Self::NotReady => StatusCode::SERVICE_UNAVAILABLE,
@@ -711,4 +730,31 @@ async fn heartbeat(
         StatusCode::NO_CONTENT,
     )
     .await
+}
+
+async fn import_check(
+    State(core): State<Arc<Core>>,
+    request: Result<Json<crate::metric_import::Request>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let input = match request {
+        Ok(Json(input)) => input,
+        Err(e) => return QueryError::Invalid(e.body_text()).into_response(),
+    };
+    match blocking(core, move |core| crate::metric_import::check(core, input)).await {
+        Ok(reply) => Json(reply).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+async fn import_apply(
+    State(core): State<Arc<Core>>,
+    request: Result<Json<crate::metric_import::Request>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let input = match request {
+        Ok(Json(input)) => input,
+        Err(e) => return QueryError::Invalid(e.body_text()).into_response(),
+    };
+    match blocking(core, move |core| crate::metric_import::apply(core, input)).await {
+        Ok(reply) => Json(reply).into_response(),
+        Err(e) => e.into_response(),
+    }
 }

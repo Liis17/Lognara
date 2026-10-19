@@ -128,6 +128,9 @@ docker compose up -d
 | `POST /api/stats/group-by` | сессия + Origin | from/to/filters/group_by/limit; groups count и as_of |
 | `POST /api/stats/summary` | сессия + Origin | from/to/filters/text/interval_seconds/search_limit; согласованные total/buckets/levels/error_services/duration/actions/page/as_of |
 | `GET /api/series` | сессия | список метрик core (`GET /v1/series`) |
+| `GET /api/series?group_by=server` | сессия | метрики отдельно для каждого сервера |
+| `GET /api/series/sources` | сессия | сохранённые пары сервер/сервис и heartbeat |
+| `POST /api/series/import/check`, `/apply` | сессия + Origin, admin | проверка переносимого набора, разрешение конфликтов и атомарное сохранение |
 | `POST /api/series/query` | сессия | значения серии по корзинам (`POST /v1/series/query`), таймаут 35 с |
 | `GET`, `POST /api/series/definitions` | сессия, admin | список и создание определений |
 | `PUT`, `DELETE /api/series/definitions/{id}` | сессия, admin | замена и удаление определения |
@@ -176,3 +179,9 @@ Lognara-dock/target/debug/lognara-dock
 ```
 
 Для работы с Vite (`npm run dev`, порт 5173) запустите dock с `LOGNARA_DOCK_PUBLIC_URL=http://localhost:5173`: Vite проксирует `/api` на `127.0.0.1:7403`, а `Origin` и passkey проверяются по адресу, открытому в браузере.
+
+## Метрики по серверам
+
+Раздел `/metrics` показывает плитки по серверам и сервисам. Плитка открывает отдельную страницу с графиком и настройками этого источника. Создание доступно через модалку: ручное правило, JSON-набор или шаблоны nginx. Сначала выберите сервер, затем сервис.
+
+[Контракт метрик и миграция Core](../docs/MetricsBundle.md), [инструкция для генерации JSON другим агентом](web/public/metrics-guide.md), [JSON Schema](web/public/metrics-schema.json). Статические файлы доступны в Dock по `/metrics-guide.md`, `/metrics-schema.json`, `/metrics-example.json`, `/metrics-nginx.json`.

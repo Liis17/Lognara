@@ -72,6 +72,13 @@ pub fn rules(row: &StoredEvent, rules: &RuleSet) -> (Vec<Point>, bool) {
 /// Точка одного правила. Значение - группа value_group или 1 без неё; нечисловое значение - ошибка.
 pub fn rule_point(rule: &CompiledRule, row: &StoredEvent) -> (Option<Point>, bool) {
     if rule
+        .server
+        .as_ref()
+        .is_some_and(|server| server != &row.source.server)
+    {
+        return (None, false);
+    }
+    if rule
         .environment
         .as_ref()
         .is_some_and(|environment| row.source.environment.as_ref() != Some(environment))
@@ -179,7 +186,9 @@ mod tests {
 
     fn rule_set(rule: Rule) -> RuleSet {
         RuleSet::load(&[Definition {
+            legacy_rule_id: None,
             id: Uuid::from_u128(7),
+            server: "srv".into(),
             service: "svc".into(),
             name: "request_ms".into(),
             title: String::new(),

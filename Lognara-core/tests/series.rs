@@ -314,6 +314,7 @@ fn report_at(time: &str, runs: u64) -> Value {
 /// Значения серии runs по минутам 15:10-15:13; сравниваются до и после слияния.
 async fn runs_values(core: &Arc<Core>) -> Value {
     let request = QueryRequest {
+        server: None,
         service: fixture_service(),
         name: "runs".into(),
         from: "2026-10-13T15:10:00Z".into(),

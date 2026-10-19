@@ -58,6 +58,7 @@ export interface Rule {
 }
 
 export interface Definition {
+  server: string;
   id: string;
   service: string;
   name: string;
@@ -77,6 +78,7 @@ export type DefinitionInput = Omit<Definition, "id" | "updated_at" | "aggregatio
 };
 
 export interface SeriesMetric {
+  server: string;
   service: string;
   name: string;
   origin: Origin;
@@ -89,6 +91,8 @@ export interface SeriesMetric {
 
 /** Тело запроса серии; без environment сумма по всем окружениям. */
 export interface SeriesQuery {
+  server?: string;
+  origin?: Origin;
   service: string;
   name: string;
   from: string;
@@ -138,6 +142,7 @@ export interface Agent {
 }
 
 const messages: Record<string, string> = {
+  import_conflict: "Набор метрик изменился. Проверьте импорт повторно и выберите действия для конфликтов.",
   unauthorized: "Неверный логин или пароль",
   too_many_attempts: "Слишком много попыток, попробуйте позже",
   invalid_current_password: "Неверный текущий пароль",

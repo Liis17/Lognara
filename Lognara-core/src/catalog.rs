@@ -40,7 +40,7 @@ pub struct SeriesName {
 pub type SeriesEnvironment = (String, String, String);
 
 pub struct Catalog {
-    connection: Connection,
+    pub(crate) connection: Connection,
 }
 
 impl Catalog {
@@ -48,7 +48,7 @@ impl Catalog {
         let connection = Connection::open(path)?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         let version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        ensure!(version <= 2, "unsupported catalog schema version {version}");
+        ensure!(version <= 3, "unsupported catalog schema version {version}");
         connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
             CREATE TABLE IF NOT EXISTS progress (singleton INTEGER PRIMARY KEY CHECK(singleton=1), batch_id INTEGER NOT NULL, offset INTEGER NOT NULL, next_batch INTEGER NOT NULL, next_sequence INTEGER NOT NULL);
             INSERT OR IGNORE INTO progress VALUES(1,0,0,1,1);
@@ -61,7 +61,18 @@ impl Catalog {
             CREATE TABLE IF NOT EXISTS series_definitions (id TEXT PRIMARY KEY, service TEXT NOT NULL, name TEXT NOT NULL, body TEXT NOT NULL, UNIQUE(service, name));
             CREATE TABLE IF NOT EXISTS series_rollups (id TEXT PRIMARY KEY, day TEXT NOT NULL, resolution INTEGER NOT NULL, path TEXT NOT NULL, fingerprint TEXT NOT NULL, built_at INTEGER NOT NULL, state TEXT NOT NULL CHECK(state IN ('ready','deleting')));
             CREATE UNIQUE INDEX IF NOT EXISTS series_rollups_ready ON series_rollups(day, resolution) WHERE state='ready';
-            PRAGMA user_version=2;")?;
+")?;
+        if version < 3 {
+            let tx = connection.unchecked_transaction()?;
+            tx.execute_batch("ALTER TABLE series_definitions RENAME TO legacy_series_definitions;
+                CREATE TABLE series_definitions (id TEXT PRIMARY KEY, server TEXT NOT NULL, service TEXT NOT NULL, name TEXT NOT NULL, body TEXT NOT NULL, UNIQUE(server,service,name));
+                CREATE TABLE metric_sources (server TEXT NOT NULL, service TEXT NOT NULL, PRIMARY KEY(server,service));
+                CREATE TABLE scoped_series (server TEXT NOT NULL, service TEXT NOT NULL, name TEXT NOT NULL, origin TEXT NOT NULL, environment TEXT NOT NULL, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, PRIMARY KEY(server,service,name,origin,environment));
+                CREATE TABLE metrics_backfill (path TEXT PRIMARY KEY);
+                CREATE TABLE metrics_migration (done INTEGER NOT NULL);
+                PRAGMA user_version=3;")?;
+            tx.commit()?;
+        }
         sync_dir(path.parent().expect("catalog has a parent"))?;
         Ok(Self { connection })
     }
@@ -172,7 +183,7 @@ impl Catalog {
     pub fn definitions(&self) -> Result<Vec<Definition>> {
         let mut statement = self
             .connection
-            .prepare("SELECT body FROM series_definitions ORDER BY service,name")?;
+            .prepare("SELECT body FROM series_definitions ORDER BY service,name,server")?;
         let json = statement
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
@@ -183,9 +194,10 @@ impl Catalog {
 
     pub fn insert_definition(&self, definition: &Definition) -> Result<()> {
         self.connection.execute(
-            "INSERT INTO series_definitions VALUES(?1,?2,?3,?4)",
+            "INSERT INTO series_definitions VALUES(?1,?2,?3,?4,?5)",
             params![
                 definition.id.to_string(),
+                definition.server,
                 definition.service,
                 definition.name,
                 serde_json::to_string(definition)?
@@ -197,9 +209,10 @@ impl Catalog {
     /// false - определения с таким id нет.
     pub fn update_definition(&self, definition: &Definition) -> Result<bool> {
         Ok(self.connection.execute(
-            "UPDATE series_definitions SET service=?2,name=?3,body=?4 WHERE id=?1",
+            "UPDATE series_definitions SET server=?2,service=?3,name=?4,body=?5 WHERE id=?1",
             params![
                 definition.id.to_string(),
+                definition.server,
                 definition.service,
                 definition.name,
                 serde_json::to_string(definition)?

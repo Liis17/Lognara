@@ -48,6 +48,8 @@ fn query() -> Value {
 fn query_routes() -> Vec<(Method, String, Option<Value>)> {
     vec![
         (Method::GET, "/api/series".into(), None),
+        (Method::GET, "/api/series?group_by=server".into(), None),
+        (Method::GET, "/api/series/sources".into(), None),
         (Method::POST, "/api/series/query".into(), Some(query())),
     ]
 }
@@ -56,6 +58,16 @@ fn query_routes() -> Vec<(Method, String, Option<Value>)> {
 fn admin_routes() -> Vec<(Method, String, Option<Value>)> {
     vec![
         (Method::GET, "/api/series/definitions".into(), None),
+        (
+            Method::POST,
+            "/api/series/import/check".into(),
+            Some(json!({})),
+        ),
+        (
+            Method::POST,
+            "/api/series/import/apply".into(),
+            Some(json!({})),
+        ),
         (
             Method::POST,
             "/api/series/definitions".into(),
@@ -402,4 +414,49 @@ async fn responses_never_expose_tokens() {
             assert!(!text.contains(secret), "{name}: {text}");
         }
     }
+}
+
+#[tokio::test]
+async fn proxies_scoped_sources_and_import_with_safe_conflicts() {
+    let (core, url) = fake_core().await;
+    let t = dock(&url);
+    let session = login(&t, "liis", "password").await.session();
+    for path in ["/api/series?group_by=server", "/api/series/sources"] {
+        assert_eq!(
+            call(&t, Method::GET, path, &session, None).await.status,
+            StatusCode::OK
+        );
+    }
+    let body = json!({"server":"a","service":"api","bundle":{"format":"lognara-metrics","version":1,"metrics":[]}});
+    for action in ["check", "apply"] {
+        assert_eq!(
+            call(
+                &t,
+                Method::POST,
+                &format!("/api/series/import/{action}"),
+                &session,
+                Some(body.clone())
+            )
+            .await
+            .status,
+            StatusCode::OK
+        );
+    }
+    let calls = core.calls.lock().unwrap().clone();
+    assert_eq!(calls[1].path, "/v1/series/sources");
+    for call in &calls[2..] {
+        assert_eq!(call.authorization.as_deref(), Some("Bearer admin-secret"));
+        assert_eq!(call.body, body);
+    }
+    *core.reply.lock().unwrap() = Some((StatusCode::CONFLICT, json!({"error":"import_conflict"})));
+    let reply = call(
+        &t,
+        Method::POST,
+        "/api/series/import/apply",
+        &session,
+        Some(body),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::CONFLICT);
+    assert_eq!(reply.body, json!({"error":"import_conflict"}));
 }

@@ -41,6 +41,7 @@ pub struct ActiveView {
     pub meta: SegmentMeta,
     pub batches: Vec<RecordBatch>,
     pub points: Vec<RecordBatch>,
+    pub scoped: crate::scoped_metrics::Metadata,
     pub names: BTreeMap<(String, String, &'static str), (i64, i64)>,
     pub environments: BTreeSet<SeriesEnvironment>,
     pub searcher: Searcher,
@@ -88,6 +89,7 @@ impl Core {
             .with_object_list_cache_limit(8 << 20)
             .build_arc()?;
         let journal = Journal::open(config)?;
+        crate::scoped_metrics::migrate(&journal)?;
         let rules = RuleSet::load(&journal.catalog.lock().unwrap().definitions()?)?;
         let mut key = [0; 32];
         key[..16].copy_from_slice(Uuid::new_v4().as_bytes());
@@ -174,6 +176,7 @@ struct ActiveSegment {
     point_rows: usize,
     point_min: i64,
     point_max: i64,
+    scoped: crate::scoped_metrics::Metadata,
     names: BTreeMap<(String, String, &'static str), (i64, i64)>,
     environments: BTreeSet<SeriesEnvironment>,
     series_path: String,
@@ -220,6 +223,7 @@ impl ActiveSegment {
             .series_points
             .fetch_add(points.len() as u64, Ordering::Relaxed);
         for point in &points {
+            self.scoped.point(point);
             self.names
                 .entry((
                     point.source.service.clone(),
@@ -478,6 +482,7 @@ impl Materializer {
         // Один снимок правил на пачку: изменение в середине пачки не разделяет её строки.
         let rules = self.core.rules.read().unwrap().clone();
         let active = self.active.as_mut().unwrap();
+        active.scoped.rows(rows);
         let batch = columns::encode(rows)?;
         for row in rows {
             active.index.add(row, active.meta.rows as u64)?;
@@ -541,6 +546,7 @@ impl Materializer {
             point_rows: 0,
             point_min: i64::MAX,
             point_max: i64::MIN,
+            scoped: Default::default(),
             names: BTreeMap::new(),
             environments: BTreeSet::new(),
             series_path,
@@ -555,6 +561,7 @@ impl Materializer {
                 meta: segment.meta.clone(),
                 batches: segment.batches.clone(),
                 points: segment.points.clone(),
+                scoped: segment.scoped.clone(),
                 names: segment.names.clone(),
                 environments: segment.environments.clone(),
                 searcher: segment.index.publish()?,
@@ -632,6 +639,9 @@ impl Materializer {
             )
             .collect();
         let environments: Vec<SeriesEnvironment> = segment.environments.iter().cloned().collect();
+        segment
+            .scoped
+            .save(&self.core.journal.catalog.lock().unwrap())?;
         self.checkpoint(
             Some(&segment.meta),
             sealed_series.as_ref().map(|file| &file.meta),
