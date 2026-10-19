@@ -1,4 +1,4 @@
-//! SQLite в каталоге данных: сессии, passkey, скрытые паттерны и статусы проблем.
+//! SQLite в каталоге данных: сессии, passkey, скрытые паттерны, статусы проблем и избранное метрик.
 //! Каталог блокируется одним процессом.
 
 use std::fs::{self, File};
@@ -67,6 +67,10 @@ const MIGRATIONS: &[&str] = &[
         checkpoint INTEGER NOT NULL
     );
 ",
+    "CREATE TABLE favorite_metrics (
+        server TEXT NOT NULL, service TEXT NOT NULL, name TEXT NOT NULL, origin TEXT NOT NULL,
+        PRIMARY KEY(server, service, name, origin)
+    );",
 ];
 
 /// Предел строк статусов: Dock передаёт решённые и вернувшиеся fingerprint в core.
@@ -109,6 +113,24 @@ pub struct Store {
 }
 
 impl Store {
+    pub async fn favorite_metrics(&self) -> Result<Vec<crate::series::MetricKey>, StoreError> {
+        self.call(|conn| {
+            conn.prepare("SELECT server,service,name,origin FROM favorite_metrics ORDER BY server,service,name,origin")?
+                .query_map([], |r| Ok(crate::series::MetricKey { server:r.get(0)?, service:r.get(1)?, name:r.get(2)?, origin:r.get(3)? }))?.collect()
+        }).await
+    }
+    pub async fn set_favorite_metric(
+        &self,
+        key: crate::series::MetricKey,
+        favorite: bool,
+    ) -> Result<(), StoreError> {
+        self.call(move |conn| {
+            let sql = if favorite { "INSERT OR IGNORE INTO favorite_metrics VALUES(?1,?2,?3,?4)" }
+                else { "DELETE FROM favorite_metrics WHERE server=?1 AND service=?2 AND name=?3 AND origin=?4" };
+            conn.execute(sql, rusqlite::params![key.server,key.service,key.name,key.origin])?;
+            Ok(())
+        }).await
+    }
     pub async fn hidden_patterns(&self, username: String) -> Result<Vec<String>, StoreError> {
         self.call(move |conn| {
             let mut statement = conn.prepare(
@@ -418,6 +440,31 @@ pub fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn favorite_metrics_survive_reopen_and_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let conn = Connection::open(dir.path().join("dock.sqlite3")).unwrap();
+            for sql in &MIGRATIONS[..MIGRATIONS.len() - 1] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.pragma_update(None, "user_version", MIGRATIONS.len() as i64 - 1)
+                .unwrap();
+        }
+        let key = crate::series::MetricKey {
+            server: "a".into(),
+            service: "api".into(),
+            name: "runs".into(),
+            origin: "counter".into(),
+        };
+        let store = Store::open(dir.path()).unwrap();
+        assert!(store.favorite_metrics().await.unwrap().is_empty());
+        store.set_favorite_metric(key.clone(), true).await.unwrap();
+        drop(store);
+        let reopened = Store::open(dir.path()).unwrap();
+        assert_eq!(reopened.favorite_metrics().await.unwrap(), vec![key]);
+    }
 
     #[test]
     fn second_process_cannot_open_same_dir() {

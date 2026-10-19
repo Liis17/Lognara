@@ -130,8 +130,11 @@ docker compose up -d
 | `POST /api/stats/group-by` | сессия + Origin | from/to/filters/group_by/limit; groups count и as_of |
 | `POST /api/stats/summary` | сессия + Origin | from/to/filters/text/interval_seconds/search_limit; согласованные total/buckets/levels/error_services/duration/actions/page/as_of |
 | `GET /api/series` | сессия | список метрик core (`GET /v1/series`) |
-| `GET /api/series?group_by=server` | сессия | метрики отдельно для каждого сервера |
-| `GET /api/series/sources` | сессия | сохранённые пары сервер/сервис и heartbeat |
+| `GET /api/series?group_by=server` | сессия | метрики по серверам; необязательные фильтры `server`, `service` |
+| `POST /api/series/lookup` | сессия + Origin | метаданные выбранных ключей `{keys:[{server,service,name,origin}]}` |
+| `GET /api/series/favorites` | сессия | общее избранное `{keys:[...]}`, хранится в Dock |
+| `PUT`, `DELETE /api/series/favorites` | сессия + Origin | идемпотентное добавление/удаление одного ключа, ответ 204 |
+| `GET /api/series/sources` | сессия | сохранённые пары сервер/сервис, heartbeat и определения без точек |
 | `POST /api/series/import/check`, `/apply` | сессия + Origin, admin | проверка переносимого набора, разрешение конфликтов и атомарное сохранение |
 | `POST /api/series/query` | сессия | значения серии по корзинам (`POST /v1/series/query`), таймаут 35 с |
 | `GET`, `POST /api/series/definitions` | сессия, admin | список и создание определений |
@@ -184,6 +187,6 @@ Lognara-dock/target/debug/lognara-dock
 
 ## Метрики по серверам
 
-Раздел `/metrics` показывает плитки по серверам и сервисам. Плитка открывает отдельную страницу с графиком и настройками этого источника. Создание доступно через модалку: ручное правило, JSON-набор или шаблоны nginx. Сначала выберите сервер, затем сервис.
+Раздел `/metrics` сначала загружает только общее избранное, сгруппированное по серверам и сервисам. Остальные метрики закрыты; список источников загружается после раскрытия раздела, каталог сервиса - после раскрытия сервера и сервиса. Звёздочка карточки добавляет/удаляет избранное без перехода, доступна при наведении, фокусе и на сенсорных устройствах. Избранное хранится в SQLite Dock и сохраняется после перезапуска. Плитка открывает отдельную страницу с графиком и настройками этого источника. Создание доступно через модалку: ручное правило, JSON-набор или шаблоны nginx. Сначала выберите сервер, затем сервис.
 
 [Контракт метрик и миграция Core](../docs/MetricsBundle.md), [инструкция для генерации JSON другим агентом](web/public/metrics-guide.md), [JSON Schema](web/public/metrics-schema.json). Статические файлы доступны в Dock по `/metrics-guide.md`, `/metrics-schema.json`, `/metrics-example.json`, `/metrics-nginx.json`.

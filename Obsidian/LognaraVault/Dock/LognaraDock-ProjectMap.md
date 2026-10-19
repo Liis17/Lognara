@@ -16,7 +16,7 @@ Lognara-dock/
     config.rs                 LOGNARA_DOCK_* и проверки
     api.rs                    App/AppState, ApiError, router, health, SPA
     htpasswd.rs               разбор, кэш по stamp, verify, атомарная перезапись
-    store.rs                  SQLite, миграции, lock каталога данных, скрытые паттерны, статусы проблем
+    store.rs                  SQLite, миграции, lock каталога данных, скрытые паттерны, статусы проблем, общее избранное метрик
     patterns.rs               DTO паттернов, proxy search/details и персональное скрытие
     issues.rs                 DTO проблем, proxy search/details, resolve/reopen, наблюдатель возвратов
     session.rs                Sessions, cookie, AuthUser, require_origin
@@ -27,7 +27,7 @@ Lognara-dock/
     infra.rs                  авторизованная сводка core/dock/узлов, свежесть и пороги
     query.rs                  typed DTO и авторизованные proxy search/trace/histogram/group-by/summary
     core_client.rs            клиент core: история/Trace/аналитика/паттерны/ошибки/status, серии/определения, admin CRUD; таймаут запросов 35 с
-    series.rs                 прокси /api/series*: серии, запрос, определения, предпросмотр
+    series.rs                 /api/series*: прокси каталога/lookup/графиков и редактирования, API общего избранного
     live.rs                   Live (poller + broadcast) на общем CoreClient, SSE stream
   tests/
     common/mod.rs             TestApp, запросы, htpasswd с cost 4, поддельный core с серийными маршрутами и поддельный admin API core
@@ -81,6 +81,6 @@ Lognara-dock/
 - `account::change_password` и `passkey::register_start/delete` подтверждают действие через `account::check_current_password` → `auth::check_password` (общая блокировка логина).
 - `passkey::login_finish` и `auth::login` создают сессию через `auth::start_session`.
 - `live::Live` использует `CoreClient`; `live::stream` перепроверяет сессию через `Sessions::lookup_hash`.
-- `series::*` (обработчики `/api/series*`) и `access::*` вызывают общий `App.core: Arc<CoreClient>`; ошибки превращаются в `ApiError` через единый `From<CoreError>` в `api.rs`. Все маршруты требуют `session::AuthUser`; запросы не GET/HEAD/OPTIONS проверяет `session::require_origin` (нужен `Origin` равный `LOGNARA_DOCK_PUBLIC_URL`).
+- `series::*` (кроме локального избранного через `App.store`) и `access::*` вызывают общий `App.core: Arc<CoreClient>`; ошибки превращаются в `ApiError` через единый `From<CoreError>` в `api.rs`. Все маршруты требуют `session::AuthUser`; запросы не GET/HEAD/OPTIONS проверяет `session::require_origin` (нужен `Origin` равный `LOGNARA_DOCK_PUBLIC_URL`).
 - `Metrics.tsx` вызывает `api.ts` (`api`, `SeriesReply`, `Definition`), график строит `components/Chart.tsx`, редактор открывается из `MetricDetail.tsx` и `MetricCreate.tsx` и сообщает о сохранении через `onDone`.
 - Admin-токен берётся из Config; Live использует тот же клиент с query-токеном. Реестр relay/агентов хранится только в core.

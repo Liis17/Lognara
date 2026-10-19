@@ -29,7 +29,12 @@ export default function Chart({ buckets, series, unit, compact = false }: Props)
     const theme = getComputedStyle(container);
     const ink = theme.getPropertyValue("--ink3").trim();
     const line = theme.getPropertyValue("--line").trim();
-    const axis = { stroke: ink, grid: { stroke: line }, ticks: { stroke: line } };
+    const axis = {
+      font: "12px Arial",
+      stroke: ink,
+      grid: { stroke: line },
+      ticks: { stroke: line },
+    };
     const data: uPlot.AlignedData = [
       buckets.map((bucket) => Date.parse(bucket) / 1000),
       ...series.map((line) => line.values),
@@ -49,7 +54,26 @@ export default function Chart({ buckets, series, unit, compact = false }: Props)
         cursor: { show: !compact },
         select: { show: !compact, left: 0, top: 0, width: 0, height: 0 },
         legend: { show: !compact },
-        axes: compact ? [{ show: false }, { show: false }] : [axis, { ...axis, values: (_, splits) => splits.map((value) => `${value} ${unit}`.trim()) }],
+        axes: compact
+          ? [{ show: false }, { show: false }]
+          : [
+              axis,
+              {
+                ...axis,
+                size: (self, values) => {
+                  self.ctx.save();
+                  self.ctx.font = "12px Arial";
+                  const width = Math.max(
+                    0,
+                    ...(values ?? []).map(
+                      (value) => self.ctx.measureText(String(value)).width,
+                    ),
+                  );
+                  self.ctx.restore();
+                  return Math.ceil(width + 18);
+                },
+              },
+            ],
       },
       data,
       container,
@@ -62,5 +86,10 @@ export default function Chart({ buckets, series, unit, compact = false }: Props)
     };
   }, [buckets, series, unit, compact]);
 
-  return <div ref={ref} />;
+  return (
+    <div className="metric-chart">
+      {!compact && unit && <div className="metric-chart-unit">{unit}</div>}
+      <div ref={ref} />
+    </div>
+  );
 }

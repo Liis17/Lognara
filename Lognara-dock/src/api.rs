@@ -221,6 +221,13 @@ pub fn router(app: AppState) -> Router {
         .route("/issues/{id}/resolve", post(issues::resolve))
         .route("/issues/{id}/reopen", post(issues::reopen))
         .route("/series", get(series::list))
+        .route("/series/lookup", post(series::lookup))
+        .route(
+            "/series/favorites",
+            get(series::favorites)
+                .put(series::add_favorite)
+                .delete(series::remove_favorite),
+        )
         .route("/series/sources", get(series::sources))
         .route("/series/import/check", post(series::import_check))
         .route("/series/import/apply", post(series::import_apply))

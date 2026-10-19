@@ -169,6 +169,7 @@ pub async fn me(t: &TestApp, cookie: &str) -> Reply {
 pub struct Call {
     pub method: Method,
     pub path: String,
+    pub query: Option<String>,
     pub authorization: Option<String>,
     pub body: Value,
 }
@@ -206,6 +207,7 @@ async fn observe(
     core.calls.lock().unwrap().push(Call {
         method: parts.method.clone(),
         path: path.clone(),
+        query: parts.uri.query().map(str::to_owned),
         authorization: authorization.clone(),
         body: serde_json::from_slice(&bytes).unwrap_or(Value::Null),
     });
@@ -335,6 +337,7 @@ pub async fn fake_core() -> (Arc<FakeCore>, String) {
         .route("/v1/admin/series/import/check", post(preview))
         .route("/v1/admin/series/import/apply", post(preview))
         .route("/v1/series/query", post(series_query))
+        .route("/v1/series/lookup", post(series_list))
         .route(
             "/v1/admin/series/definitions",
             get(list_definitions).post(create_definition),

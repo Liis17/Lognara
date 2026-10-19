@@ -385,12 +385,27 @@ impl CoreClient {
             .await
     }
 
-    pub async fn scoped_series(&self) -> Result<CoreReply, CoreError> {
+    pub async fn scoped_series(
+        &self,
+        server: Option<&str>,
+        service: Option<&str>,
+    ) -> Result<CoreReply, CoreError> {
+        let mut url = Url::parse("http://core/v1/series?group_by=server").expect("static URL");
+        if let Some(server) = server {
+            url.query_pairs_mut().append_pair("server", server);
+        }
+        if let Some(service) = service {
+            url.query_pairs_mut().append_pair("service", service);
+        }
+        let path = format!("v1/series?{}", url.query().unwrap());
+        self.call(Method::GET, &path, &self.query_token, None).await
+    }
+    pub async fn series_lookup(&self, body: &Value) -> Result<CoreReply, CoreError> {
         self.call(
-            Method::GET,
-            "v1/series?group_by=server",
+            Method::POST,
+            "v1/series/lookup",
             &self.query_token,
-            None,
+            Some(body),
         )
         .await
     }

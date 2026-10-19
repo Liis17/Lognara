@@ -373,21 +373,6 @@ async fn invalid_definitions_are_rejected_with_400() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
 
-    for index in 0..63 {
-        let body = json!({"service": "api", "name": format!("rule_{index}"), "kind": "delta", "rule": rule("x")});
-        let (status, _) = send(&router, "POST", DEFINITIONS, Some("admin"), Some(body)).await;
-        assert_eq!(status, StatusCode::CREATED);
-    }
-    let (status, body) = send(
-        &router,
-        "POST",
-        DEFINITIONS,
-        Some("admin"),
-        Some(json!({"service": "api", "name": "overflow", "kind": "delta", "rule": rule("x")})),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["error"], "at most 64 definitions may have a rule");
     core.shutdown().unwrap();
 }
 
@@ -939,7 +924,7 @@ async fn bundle_import_is_atomic_and_supports_conflicts_and_stale_revisions() {
     assert_eq!(reply["errors"][0]["field"], "name");
     assert_eq!(reply["errors"][0]["index"], 1);
     let mut over_quota = valid;
-    over_quota["bundle"]["metrics"]=Value::Array((0..63).map(|i|json!({"name":format!("extra_{i}"),"kind":"delta","rule":{"contains":"done","pattern":"done"}})).collect());
+    over_quota["bundle"]["metrics"]=Value::Array((0..1023).map(|i|json!({"name":format!("extra_{i}"),"kind":"delta","rule":{"contains":"done","pattern":"done"}})).collect());
     let (_, check) = send(
         &router,
         "POST",
@@ -956,7 +941,7 @@ async fn bundle_import_is_atomic_and_supports_conflicts_and_stale_revisions() {
             .any(|e| e["index"].is_null())
     );
     over_quota["revision"] = check["revision"].clone();
-    over_quota["actions"] = Value::Array((0..63).map(|_| json!({"action":"create"})).collect());
+    over_quota["actions"] = Value::Array((0..1023).map(|_| json!({"action":"create"})).collect());
     assert_eq!(
         send(
             &router,
@@ -971,6 +956,69 @@ async fn bundle_import_is_atomic_and_supports_conflicts_and_stale_revisions() {
     );
     assert_eq!(lognara_core::definitions::list(&core).unwrap().len(), 2);
     core.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn imports_hundreds_of_rules_per_source_and_reopens_catalog() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = config(dir.path(), 100);
+    let core = Core::open(cfg.clone()).unwrap();
+    let router = api::router(core.clone());
+    for (server, service) in [
+        ("a", "api"),
+        ("a", "worker"),
+        ("a", "web"),
+        ("a", "jobs"),
+        ("b", "api"),
+    ] {
+        let metrics: Vec<_> = (0..220).map(|i| json!({"name":format!("metric_{i}"),"kind":"delta","rule":{"contains":"done","pattern":"done"}})).collect();
+        let mut request = json!({"server":server,"service":service,"bundle":{"format":"lognara-metrics","version":1,"metrics":metrics}});
+        let (status, check) = send(
+            &router,
+            "POST",
+            "/v1/admin/series/import/check",
+            Some("admin"),
+            Some(request.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{check}");
+        assert_eq!(check["errors"], json!([]));
+        request["revision"] = check["revision"].clone();
+        request["actions"] = json!(vec![json!({"action":"create"}); 220]);
+        let (status, result) = send(
+            &router,
+            "POST",
+            "/v1/admin/series/import/apply",
+            Some("admin"),
+            Some(request),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        assert_eq!(result["created"], 220);
+    }
+    assert_eq!(lognara_core::definitions::list(&core).unwrap().len(), 1100);
+    core.shutdown().unwrap();
+    drop(router);
+    drop(core);
+    let reopened = Core::open(cfg).unwrap();
+    let definitions = lognara_core::definitions::list(&reopened).unwrap();
+    assert_eq!(definitions.len(), 1100);
+    let rules = lognara_core::definitions::RuleSet::load(&definitions).unwrap();
+    assert_eq!(rules.for_source("a", "api").len(), 220);
+    assert_eq!(rules.for_source("b", "api").len(), 220);
+    assert!(rules.for_source("unknown", "api").is_empty());
+    let mut source = source("api", None);
+    source.server = "a".into();
+    let row = lognara_core::model::StoredEvent {
+        sequence: 0,
+        core_received_at: now_nanos(),
+        source,
+        event: event(1, now_nanos(), "done"),
+    };
+    let (points, failed) = lognara_core::extract::rules(&row, &rules);
+    assert!(!failed);
+    assert_eq!(points.len(), 220);
+    reopened.shutdown().unwrap();
 }
 
 #[test]
@@ -1098,7 +1146,7 @@ fn migration_quota_failure_is_retryable_without_modifying_legacy_definitions() {
     {
         let db = rusqlite::Connection::open(&path).unwrap();
         db.execute_batch("DROP TABLE series_definitions; DROP TABLE metric_sources; DROP TABLE scoped_series; DROP TABLE metrics_backfill; DROP TABLE metrics_migration; CREATE TABLE series_definitions(id TEXT PRIMARY KEY,service TEXT NOT NULL,name TEXT NOT NULL,body TEXT NOT NULL,UNIQUE(service,name)); PRAGMA user_version=2;").unwrap();
-        for i in 0..65 {
+        for i in 0..1025 {
             let definition = json!({"id":Uuid::new_v4(),"service":"api","name":format!("rule_{i}"),"title":"","description":"","unit":"","kind":"delta","aggregation":"sum","enabled":true,"rule":{"contains":"done","pattern":"done"},"updated_at":"2026-01-01T00:00:00Z"});
             db.execute(
                 "INSERT INTO series_definitions VALUES(?1,'api',?2,?3)",
@@ -1119,7 +1167,7 @@ fn migration_quota_failure_is_retryable_without_modifying_legacy_definitions() {
                 r.get::<_, i64>(0)
             })
             .unwrap(),
-            65
+            1025
         );
         assert_eq!(
             db.query_row("SELECT count(*) FROM series_definitions", [], |r| r
@@ -1128,13 +1176,13 @@ fn migration_quota_failure_is_retryable_without_modifying_legacy_definitions() {
             0
         );
         db.execute(
-            "DELETE FROM legacy_series_definitions WHERE name='rule_64'",
+            "DELETE FROM legacy_series_definitions WHERE name='rule_1024'",
             [],
         )
         .unwrap();
     }
     let core = Core::open(config(dir.path(), 100)).unwrap();
-    assert_eq!(lognara_core::definitions::list(&core).unwrap().len(), 64);
+    assert_eq!(lognara_core::definitions::list(&core).unwrap().len(), 1024);
     core.shutdown().unwrap();
 }
 
@@ -1185,5 +1233,61 @@ async fn cumulative_rule_continues_across_legacy_migration() {
     let (status,reply)=send(&router,"POST","/v1/series/query",Some("query"),Some(json!({"server":"a","service":"api","name":"total","from":lognara_core::model::format_timestamp(time+minute),"to":lognara_core::model::format_timestamp(time+2*minute),"step_seconds":60}))).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(reply["series"][0]["values"], json!([5.0]));
+    core.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn scoped_catalog_and_lookup_return_only_requested_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = Core::open(config(dir.path(), 100)).unwrap();
+    let router = api::router(core.clone());
+    for (server, service) in [("a", "api"), ("b", "api"), ("a", "worker")] {
+        let (status, _) = send(&router, "POST", DEFINITIONS, Some("admin"), Some(json!({
+            "server":server,"service":service,"name":"requests","kind":"delta","rule":{"contains":"done","pattern":"done"}
+        }))).await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+    let (status, reply) = send(
+        &router,
+        "GET",
+        "/v1/series?group_by=server&server=a&service=api",
+        Some("query"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(reply["metrics"].as_array().unwrap().len(), 1);
+    assert_eq!(reply["metrics"][0]["server"], "a");
+    assert_eq!(reply["metrics"][0]["service"], "api");
+    let key = json!({"server":"b","service":"api","name":"requests","origin":"rule"});
+    let (_, reply) = send(&router,"POST","/v1/series/lookup",Some("query"),Some(json!({"keys":[key.clone(),key,{"server":"missing","service":"api","name":"requests","origin":"rule"}]}))).await;
+    assert_eq!(reply["metrics"].as_array().unwrap().len(), 1);
+    assert_eq!(reply["metrics"][0]["server"], "b");
+    for keys in [
+        json!([]),
+        json!([{"server":"a","service":"api","name":"requests","origin":"counter"}]),
+    ] {
+        let (status, reply) = send(
+            &router,
+            "POST",
+            "/v1/series/lookup",
+            Some("query"),
+            Some(json!({"keys":keys})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(reply["metrics"], json!([]));
+    }
+    let (status, _) = send(
+        &router,
+        "POST",
+        "/v1/series/lookup",
+        None,
+        Some(json!({"keys":[]})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (_, sources) = send(&router, "GET", "/v1/series/sources", Some("query"), None).await;
+    assert_eq!(sources["sources"].as_array().unwrap().len(), 3);
     core.shutdown().unwrap();
 }

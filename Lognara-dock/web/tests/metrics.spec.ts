@@ -22,14 +22,48 @@ const bundle = {
   ],
 };
 async function fixture(page: Page, conflict = false) {
+  let favorites = [metric, { ...metric, server: "server-b" }].map(
+    ({ server, service, name, origin }) => ({ server, service, name, origin }),
+  );
   await page.route("**/api/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
     if (path === "/api/me")
       return route.fulfill({ json: { username: "liis", passkeys: 0 } });
-    if (path === "/api/series")
-      return route.fulfill({
-        json: { metrics: [metric, { ...metric, server: "server-b" }] },
-      });
+    if (path === "/api/series/favorites") {
+      if (route.request().method() === "GET")
+        return route.fulfill({ json: { keys: favorites } });
+      const key = route.request().postDataJSON();
+      favorites = favorites.filter(
+        (k) => JSON.stringify(k) !== JSON.stringify(key),
+      );
+      if (route.request().method() === "PUT") favorites.push(key);
+      return route.fulfill({ status: 204 });
+    }
+    if (path === "/api/series" || path === "/api/series/lookup") {
+      const url = new URL(route.request().url());
+      let metrics = [metric, { ...metric, server: "server-b" }];
+      if (path.endsWith("lookup")) {
+        const keys = route.request().postDataJSON().keys;
+        metrics = metrics.filter((m) =>
+          keys.some(
+            (k: typeof metric) =>
+              k.server === m.server &&
+              k.service === m.service &&
+              k.name === m.name &&
+              k.origin === m.origin,
+          ),
+        );
+      } else {
+        metrics = metrics.filter(
+          (m) =>
+            (!url.searchParams.has("server") ||
+              m.server === url.searchParams.get("server")) &&
+            (!url.searchParams.has("service") ||
+              m.service === url.searchParams.get("service")),
+        );
+      }
+      return route.fulfill({ json: { metrics } });
+    }
     if (path === "/api/series/sources")
       return route.fulfill({
         json: {
@@ -97,7 +131,7 @@ test("server tiles link to reloadable detail pages and preserve query scope", as
     path: testInfo.outputPath("metrics-overview.png"),
     fullPage: true,
   });
-  await page.locator(".metric-tile").first().click();
+  await page.locator(".metric-tile-link").first().click();
   await expect(page).toHaveURL(
     /\/metrics\/detail\?server=server-a&service=billing&name=requests&origin=counter/,
   );
@@ -238,7 +272,17 @@ test("mini charts limit concurrent requests and load more as slots free", async 
   page,
 }) => {
   await fixture(page);
-  await page.route("**/api/series?group_by=server", (route) =>
+  await page.route("**/api/series/favorites", (route) =>
+    route.fulfill({
+      json: {
+        keys: Array.from({ length: 6 }, (_, i) => ({
+          ...metric,
+          name: "requests_" + i,
+        })),
+      },
+    }),
+  );
+  await page.route("**/api/series/lookup", (route) =>
     route.fulfill({
       json: {
         metrics: Array.from({ length: 6 }, (_, i) => ({
@@ -288,4 +332,275 @@ test("mini charts limit concurrent requests and load more as slots free", async 
   await expect(
     page.getByText("За 24 часа данных нет", { exact: true }),
   ).toHaveCount(6);
+});
+
+async function openService(
+  page: Page,
+  server = "server-a",
+  service = "billing",
+) {
+  const others = page.getByRole("region", {
+    name: "Остальные метрики",
+    exact: true,
+  });
+  await others.getByRole("button", { name: "Остальные метрики" }).click();
+  await others.getByRole("button", { name: server, exact: false }).click();
+  await others.getByRole("button", { name: service, exact: false }).click();
+  return others;
+}
+
+test("empty favorites do not fetch catalogs and stars persist without navigation", async ({
+  page,
+}) => {
+  await fixture(page);
+  const keys: (typeof metric)[] = [];
+  let failSave = false;
+  await page.route("**/api/series/favorites", async (route) => {
+    const method = route.request().method();
+    if (method === "GET") return route.fulfill({ json: { keys } });
+    if (failSave)
+      return route.fulfill({
+        status: 503,
+        json: { error: "core_unavailable" },
+      });
+    const key = route.request().postDataJSON();
+    if (method === "PUT") keys.push(key);
+    else
+      keys.splice(
+        keys.findIndex((k) => k.server === key.server && k.name === key.name),
+        1,
+      );
+    return route.fulfill({ status: 204 });
+  });
+  const calls: string[] = [];
+  page.on("request", (r) => {
+    if (r.url().includes("/api/series")) calls.push(r.url());
+  });
+  await page.goto("/metrics");
+  await expect(page.getByText(/Избранных метрик пока нет/)).toBeVisible();
+  expect([...new Set(calls.map((url) => new URL(url).pathname))]).toEqual([
+    "/api/series/favorites",
+  ]);
+  const others = await openService(page);
+  await expect(others.locator(".metric-tile")).toHaveCount(1);
+  const catalogs = calls.filter(
+    (url) => new URL(url).pathname === "/api/series",
+  );
+  expect(catalogs.length).toBeGreaterThan(0);
+  expect(new URL(catalogs[0]).searchParams.get("server")).toBe("server-a");
+  expect(new URL(catalogs[0]).searchParams.get("service")).toBe("billing");
+  const tile = others.locator(".metric-tile");
+  await tile.hover();
+  const star = tile.getByRole("button", { name: "Добавить в избранное" });
+  await expect(star).toHaveCSS("opacity", "1");
+  await star.focus();
+  await page.keyboard.press("Enter");
+  const favorites = page.getByRole("region", {
+    name: "Избранные метрики",
+    exact: true,
+  });
+  await expect(favorites.locator(".metric-tile")).toHaveCount(1);
+  await expect(others.locator(".metric-tile")).toHaveCount(0);
+  await expect(page).toHaveURL(/\/metrics$/);
+  await page.reload();
+  await expect(favorites.locator(".metric-tile")).toHaveCount(1);
+  await expect(
+    page.getByRole("button", { name: "Остальные метрики" }),
+  ).toHaveAttribute("aria-expanded", "false");
+  failSave = true;
+  await favorites.getByRole("button", { name: "Убрать из избранного" }).click();
+  await expect(page.getByRole("alert")).toBeVisible();
+  await expect(favorites.locator(".metric-tile")).toHaveCount(1);
+  failSave = false;
+  await favorites.getByRole("button", { name: "Убрать из избранного" }).click();
+  await expect(favorites.locator(".metric-tile")).toHaveCount(0);
+});
+
+test("missing favorites stay removable without chart requests", async ({
+  page,
+}) => {
+  await fixture(page);
+  await page.route("**/api/series/lookup", (route) =>
+    route.fulfill({ json: { metrics: [] } }),
+  );
+  let queries = 0;
+  page.on("request", (r) => {
+    if (r.url().endsWith("/api/series/query")) queries++;
+  });
+  await page.goto("/metrics");
+  await expect(
+    page.getByText("Метрика недоступна", { exact: true }),
+  ).toHaveCount(2);
+  expect(queries).toBe(0);
+  await page
+    .getByRole("button", { name: "Убрать из избранного" })
+    .first()
+    .click();
+  await expect(
+    page.getByText("Метрика недоступна", { exact: true }),
+  ).toHaveCount(1);
+});
+
+test("large catalogs remain lazy and refresh only expanded services", async ({
+  page,
+}) => {
+  await fixture(page);
+  await page.route("**/api/series/favorites", (route) =>
+    route.fulfill({ json: { keys: [] } }),
+  );
+  let catalogs = 0,
+    queries = 0;
+  await page.route("**/api/series?**", (route) => {
+    catalogs++;
+    const params = new URL(route.request().url()).searchParams;
+    expect(params.get("server")).toBe("server-a");
+    expect(params.get("service")).toBe("billing");
+    return route.fulfill({
+      json: {
+        metrics: Array.from({ length: 1100 }, (_, i) => ({
+          ...metric,
+          name: "requests_" + i,
+        })),
+      },
+    });
+  });
+  page.on("request", (r) => {
+    if (r.url().endsWith("/api/series/query")) queries++;
+  });
+  await page.goto("/metrics");
+  await expect(page.getByText(/Избранных метрик пока нет/)).toBeVisible();
+  expect(catalogs).toBe(0);
+  const others = await openService(page);
+  await expect(others.locator(".metric-tile")).toHaveCount(1100);
+  await expect.poll(() => queries).toBeGreaterThan(0);
+  expect(queries).toBeLessThan(30);
+  const beforeRefresh = catalogs;
+  await page.getByRole("button", { name: "Обновить", exact: true }).click();
+  await expect.poll(() => catalogs).toBe(beforeRefresh + 1);
+  await expect(others.locator(".metric-tile")).toHaveCount(1100);
+  await others.getByRole("button", { name: "billing", exact: false }).click();
+  await expect(others.locator(".metric-tile")).toHaveCount(0);
+  await page.getByRole("button", { name: "Обновить", exact: true }).click();
+  await expect(page.getByText(/Избранных метрик пока нет/)).toBeVisible();
+  expect(catalogs).toBe(beforeRefresh + 1);
+});
+
+test("collapsing a service aborts active charts and removes queued charts", async ({
+  page,
+}) => {
+  await fixture(page);
+  await page.route("**/api/series/favorites", (route) =>
+    route.fulfill({ json: { keys: [] } }),
+  );
+  await page.route("**/api/series?**", (route) =>
+    route.fulfill({
+      json: {
+        metrics: Array.from({ length: 6 }, (_, i) => ({
+          ...metric,
+          name: "requests_" + i,
+        })),
+      },
+    }),
+  );
+  const releases: (() => void)[] = [];
+  let started = 0,
+    failed = 0;
+  page.on("requestfailed", (r) => {
+    if (r.url().endsWith("/api/series/query")) failed++;
+  });
+  await page.route("**/api/series/query", async (route) => {
+    started++;
+    await new Promise<void>((resolve) => releases.push(resolve));
+    await route
+      .fulfill({
+        json: {
+          kind: "delta",
+          aggregation: "sum",
+          unit: "",
+          buckets: [],
+          series: [],
+        },
+      })
+      .catch(() => {});
+  });
+  await page.goto("/metrics");
+  const others = await openService(page);
+  await expect.poll(() => started).toBe(2);
+  await others.getByRole("button", { name: "billing", exact: false }).click();
+  await expect(others.locator(".metric-tile")).toHaveCount(0);
+  await expect.poll(() => failed).toBe(2);
+  releases.splice(0).forEach((resolve) => resolve());
+  await page.getByRole("button", { name: "Обновить", exact: true }).click();
+  await expect(page.getByText(/Избранных метрик пока нет/)).toBeVisible();
+  expect(started).toBe(2);
+});
+
+for (const unit of [
+  "микросекунд на обработку запроса",
+  "оченьдлиннаяединицаизмерениябезпробелов".repeat(4),
+  "",
+]) {
+  test(`chart unit wraps without overflow: ${unit.slice(0, 20) || "empty"}`, async ({
+    page,
+  }, testInfo) => {
+    await fixture(page);
+    await page.route("**/api/series/query", (route) =>
+      route.fulfill({
+        json: {
+          kind: "gauge",
+          aggregation: "avg",
+          unit,
+          buckets: ["2026-10-15T11:00:00Z", "2026-10-15T12:00:00Z"],
+          series: [{ label: "", values: [-123456789012345, 987654321098765] }],
+        },
+      }),
+    );
+    await page.goto(
+      "/metrics/detail?server=server-a&service=billing&name=requests&origin=counter",
+    );
+    for (const width of [390, 1280]) {
+      await page.setViewportSize({ width, height: 900 });
+      await expect(page.locator(".chart-panel canvas")).toBeVisible();
+      const label = page.locator(".metric-chart-unit");
+      if (unit) await expect(label).toHaveText(unit);
+      else await expect(label).toHaveCount(0);
+      await expect
+        .poll(() =>
+          page.evaluate(
+            () => document.documentElement.scrollWidth <= window.innerWidth,
+          ),
+        )
+        .toBe(true);
+      const sizes = await page
+        .locator(".metric-chart")
+        .evaluate((el) => ({ width: el.clientWidth, scroll: el.scrollWidth }));
+      expect(sizes.scroll).toBeLessThanOrEqual(sizes.width);
+      if (unit)
+        await page.screenshot({
+          path: testInfo.outputPath(`unit-${width}.png`),
+          fullPage: true,
+        });
+    }
+  });
+}
+
+test("favorite stars are visible on touch devices", async ({ browser }) => {
+  const context = await browser.newContext({
+    hasTouch: true,
+    viewport: { width: 390, height: 844 },
+  });
+  const page = await context.newPage();
+  await fixture(page);
+  await page.route("**/api/series/favorites", (route) =>
+    route.fulfill({ json: { keys: [] } }),
+  );
+  await page.route("**/api/series?**", route => route.fulfill({ json: { metrics: [{ ...metric, definition: { enabled: true, unit: "длиннаяединицаизмерениябезпробелов".repeat(5) } }] } }));
+  await page.goto("/metrics");
+  const others = await openService(page);
+  const star = others.getByRole("button", { name: "Добавить в избранное" });
+  await expect(star).toHaveCSS("opacity", "1");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  const sizes = await others.locator(".metric-tile").evaluate(el => ({ width: el.clientWidth, scroll: el.scrollWidth }));
+  expect(sizes.scroll).toBeLessThanOrEqual(sizes.width);
+  await context.close();
 });

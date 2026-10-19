@@ -16,7 +16,7 @@ use crate::{
     storage::Core,
 };
 
-const MAX_RULES: usize = 64;
+pub(crate) const MAX_RULES_PER_SOURCE: usize = 1024;
 const MAX_LABEL_GROUPS: usize = 4;
 /// Различных меток на правило за время жизни процесса.
 const LABEL_LIMIT: usize = 1000;
@@ -172,13 +172,10 @@ pub fn validate(
     }
     if let Some(rule) = &input.rule {
         validate_rule(rule)?;
-        if others
-            .iter()
-            .filter(|definition| definition.rule.is_some())
-            .count()
-            >= MAX_RULES
-        {
-            return Err(format!("at most {MAX_RULES} definitions may have a rule"));
+        if rule_count(others, &input.server, &input.service) >= MAX_RULES_PER_SOURCE {
+            return Err(format!(
+                "at most {MAX_RULES_PER_SOURCE} definitions per server/service may have a rule"
+            ));
         }
         if native {
             return Err(
@@ -188,6 +185,17 @@ pub fn validate(
         }
     }
     Ok(())
+}
+
+pub(crate) fn rule_count(definitions: &[Definition], server: &str, service: &str) -> usize {
+    definitions
+        .iter()
+        .filter(|definition| {
+            definition.server == server
+                && definition.service == service
+                && definition.rule.is_some()
+        })
+        .count()
 }
 
 /// Проверяет правило и возвращает его regex.
@@ -258,16 +266,28 @@ impl CompiledRule {
     }
 }
 
-/// Включённые правила по сервису. Core держит снимок и заменяет его после каждой записи.
+/// Включённые правила по сервису и серверу. Core заменяет снимок после каждой записи.
 pub struct RuleSet {
-    services: HashMap<String, Vec<CompiledRule>>,
+    services: HashMap<String, HashMap<String, Vec<CompiledRule>>>,
 }
 
 impl RuleSet {
     pub fn load(definitions: &[Definition]) -> Result<Self> {
-        let mut services: HashMap<String, Vec<CompiledRule>> = HashMap::new();
-        for definition in definitions.iter().filter(|definition| definition.enabled) {
+        let mut services: HashMap<String, HashMap<String, Vec<CompiledRule>>> = HashMap::new();
+        let mut counts = HashMap::new();
+        for definition in definitions {
             if let Some(rule) = &definition.rule {
+                let count = counts
+                    .entry((&definition.server, &definition.service))
+                    .or_insert(0);
+                *count += 1;
+                anyhow::ensure!(
+                    *count <= MAX_RULES_PER_SOURCE,
+                    "at most {MAX_RULES_PER_SOURCE} definitions per server/service may have a rule"
+                );
+                if !definition.enabled {
+                    continue;
+                }
                 let mut compiled = CompiledRule::new(
                     definition
                         .legacy_rule_id
@@ -280,14 +300,19 @@ impl RuleSet {
                 services
                     .entry(definition.service.clone())
                     .or_default()
+                    .entry(definition.server.clone())
+                    .or_default()
                     .push(compiled);
             }
         }
         Ok(Self { services })
     }
 
-    pub fn for_service(&self, service: &str) -> &[CompiledRule] {
-        self.services.get(service).map_or(&[], Vec::as_slice)
+    pub fn for_source(&self, server: &str, service: &str) -> &[CompiledRule] {
+        self.services
+            .get(service)
+            .and_then(|servers| servers.get(server))
+            .map_or(&[], Vec::as_slice)
     }
 }
 
@@ -404,6 +429,43 @@ pub(crate) fn has_native(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rule_quota_counts_disabled_rules_but_is_independent_per_source() {
+        let input = |server: &str, service: &str, name: &str| DefinitionInput {
+            server: server.into(),
+            service: service.into(),
+            name: name.into(),
+            title: String::new(),
+            description: String::new(),
+            unit: String::new(),
+            kind: Kind::Delta,
+            aggregation: None,
+            enabled: false,
+            rule: Some(Rule {
+                environment: None,
+                contains: "done".into(),
+                pattern: "done".into(),
+                value_group: None,
+                label_groups: vec![],
+            }),
+        };
+        let definitions: Vec<_> = (0..MAX_RULES_PER_SOURCE)
+            .map(|i| Definition::new(Uuid::new_v4(), input("a", "api", &format!("metric_{i}"))))
+            .collect();
+        assert!(validate(&input("a", "api", "extra"), &definitions, false).is_err());
+        assert!(validate(&input("b", "api", "extra"), &definitions, false).is_ok());
+        assert!(validate(&input("a", "worker", "extra"), &definitions, false).is_ok());
+        // Изменение существующего правила не занимает дополнительного места.
+        assert!(validate(&input("a", "api", "metric_0"), &definitions[1..], false).is_ok());
+        let mut native = input("a", "api", "native");
+        native.rule = None;
+        assert!(validate(&native, &definitions, true).is_ok());
+        assert!(RuleSet::load(&definitions).is_ok());
+        let mut overflow = definitions;
+        overflow.push(Definition::new(Uuid::new_v4(), input("a", "api", "extra")));
+        assert!(RuleSet::load(&overflow).is_err());
+    }
 
     #[test]
     fn label_guard_admits_known_labels_and_limits_new_ones_per_rule() {

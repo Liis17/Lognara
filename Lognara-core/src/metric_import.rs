@@ -76,10 +76,11 @@ fn parse(request: &Request) -> Result<Bundle, QueryError> {
             "bundle.format/version: expected lognara-metrics version 1".into(),
         ));
     }
-    if !(1..=64).contains(&bundle.metrics.len()) {
-        return Err(QueryError::Invalid(
-            "bundle.metrics: expected 1..64 metrics".into(),
-        ));
+    if !(1..=definitions::MAX_RULES_PER_SOURCE).contains(&bundle.metrics.len()) {
+        return Err(QueryError::Invalid(format!(
+            "bundle.metrics: expected 1..{} metrics",
+            definitions::MAX_RULES_PER_SOURCE
+        )));
     }
     Ok(bundle)
 }
@@ -147,14 +148,23 @@ pub fn check(core: &Core, request: Request) -> Result<Check, QueryError> {
             });
         }
     }
-    let additions = bundle.metrics.len().saturating_sub(result.conflicts.len());
-    if definitions.iter().filter(|d| d.rule.is_some()).count() + additions > 64 {
+    let additions = bundle.metrics.len().saturating_sub(
+        result
+            .conflicts
+            .iter()
+            .filter(|conflict| conflict.existing.rule.is_some())
+            .count(),
+    );
+    if definitions::rule_count(&definitions, &request.server, &request.service) + additions
+        > definitions::MAX_RULES_PER_SOURCE
+    {
         result.errors.push(Problem {
             index: None,
             field: "metrics".into(),
-            message:
-                "at most 64 definitions may have a rule; skip metrics or remove existing rules"
-                    .into(),
+            message: format!(
+                "at most {} definitions per server/service may have a rule; skip metrics or remove existing rules",
+                definitions::MAX_RULES_PER_SOURCE
+            ),
         });
     }
     Ok(result)

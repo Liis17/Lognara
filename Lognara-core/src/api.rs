@@ -47,6 +47,7 @@ pub fn router(core: Arc<Core>) -> Router {
         .route("/v1/series", get(list_series))
         .route("/v1/series/sources", get(series_sources))
         .route("/v1/series/query", post(query_series))
+        .route("/v1/series/lookup", post(lookup_series))
         .route_layer(middleware::from_fn_with_state(
             token_hash(&core.journal.config.query_token),
             authorize,
@@ -173,8 +174,45 @@ async fn list_series(
 ) -> Response {
     match query.get("group_by").map(String::as_str) {
         None => run_analytics(&core, series_query::list(core.clone())).await,
-        Some("server") => run_analytics(&core, crate::scoped_metrics::list(core.clone())).await,
+        Some("server") => {
+            run_analytics(
+                &core,
+                crate::scoped_metrics::selected(
+                    core.clone(),
+                    crate::scoped_metrics::Selection {
+                        server: query.get("server").cloned(),
+                        service: query.get("service").cloned(),
+                        keys: None,
+                    },
+                ),
+            )
+            .await
+        }
         _ => QueryError::Invalid("group_by must be server".into()).into_response(),
+    }
+}
+async fn lookup_series(
+    State(core): State<Arc<Core>>,
+    request: Result<
+        Json<crate::scoped_metrics::LookupRequest>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> Response {
+    match request {
+        Ok(Json(request)) => {
+            run_analytics(
+                &core,
+                crate::scoped_metrics::selected(
+                    core.clone(),
+                    crate::scoped_metrics::Selection {
+                        keys: Some(request.keys),
+                        ..Default::default()
+                    },
+                ),
+            )
+            .await
+        }
+        Err(error) => QueryError::Invalid(error.body_text()).into_response(),
     }
 }
 async fn series_sources(State(core): State<Arc<Core>>) -> Response {

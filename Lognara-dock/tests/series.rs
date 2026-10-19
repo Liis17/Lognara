@@ -51,6 +51,11 @@ fn query_routes() -> Vec<(Method, String, Option<Value>)> {
         (Method::GET, "/api/series?group_by=server".into(), None),
         (Method::GET, "/api/series/sources".into(), None),
         (Method::POST, "/api/series/query".into(), Some(query())),
+        (
+            Method::POST,
+            "/api/series/lookup".into(),
+            Some(json!({"keys":[]})),
+        ),
     ]
 }
 
@@ -459,4 +464,98 @@ async fn proxies_scoped_sources_and_import_with_safe_conflicts() {
     .await;
     assert_eq!(reply.status, StatusCode::CONFLICT);
     assert_eq!(reply.body, json!({"error":"import_conflict"}));
+}
+
+#[tokio::test]
+async fn favorite_metrics_are_shared_idempotent_and_scoped() {
+    let t = start(&[("alice", "password"), ("bob", "password")], &[]);
+    let alice = login(&t, "alice", "password").await.session();
+    let bob = login(&t, "bob", "password").await.session();
+    let path = "/api/series/favorites";
+    let key = json!({"server":"a","service":"api","name":"requests","origin":"counter"});
+    for _ in 0..2 {
+        assert_eq!(
+            call(&t, Method::PUT, path, &alice, Some(key.clone()))
+                .await
+                .status,
+            StatusCode::NO_CONTENT
+        );
+    }
+    let mut other = key.clone();
+    other["server"] = json!("b");
+    assert_eq!(
+        call(&t, Method::PUT, path, &bob, Some(other.clone()))
+            .await
+            .status,
+        StatusCode::NO_CONTENT
+    );
+    let mut gauge = key.clone();
+    gauge["origin"] = json!("gauge");
+    let mut worker = key.clone();
+    worker["service"] = json!("worker");
+    for variant in [&gauge, &worker] {
+        assert_eq!(
+            call(&t, Method::PUT, path, &alice, Some(variant.clone()))
+                .await
+                .status,
+            StatusCode::NO_CONTENT
+        );
+    }
+    let reply = call(&t, Method::GET, path, &bob, None).await;
+    assert_eq!(reply.body["keys"], json!([key, gauge, worker, other]));
+    for _ in 0..2 {
+        assert_eq!(
+            call(&t, Method::DELETE, path, &bob, Some(key.clone()))
+                .await
+                .status,
+            StatusCode::NO_CONTENT
+        );
+    }
+    assert_eq!(
+        call(&t, Method::GET, path, &alice, None).await.body["keys"],
+        json!([gauge, worker, other])
+    );
+    let mut invalid = key.clone();
+    invalid["origin"] = json!("unknown");
+    assert_eq!(
+        call(&t, Method::PUT, path, &alice, Some(invalid))
+            .await
+            .status,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        send(&t.router, request(Method::GET, path, None, None))
+            .await
+            .status,
+        StatusCode::UNAUTHORIZED
+    );
+    let mut req = request(Method::PUT, path, Some(&alice), Some(key));
+    req.headers_mut().remove(header::ORIGIN);
+    assert_eq!(send(&t.router, req).await.status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn scoped_catalog_filters_are_forwarded_without_losing_encoding() {
+    let (core, url) = fake_core().await;
+    let t = dock(&url);
+    let session = login(&t, "liis", "password").await.session();
+    let reply = call(
+        &t,
+        Method::GET,
+        "/api/series?group_by=server&server=a%26b&service=api%2Fworker",
+        &session,
+        None,
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    let requests = core.calls.lock().unwrap();
+    assert!(
+        requests
+            .last()
+            .unwrap()
+            .query
+            .as_ref()
+            .unwrap()
+            .contains("server=a%26b&service=api%2Fworker")
+    );
 }
