@@ -29,7 +29,7 @@ cargo run --example relay_fixture -- tests/fixtures/relay-batch.bin
 
 ## Профили relay и агентов
 
-Core запускается с обязательными разными `LOGNARA_ADMIN_TOKEN` и `LOGNARA_QUERY_TOKEN`. Dock использует admin-токен для страницы «Подключения» и определений метрик. Реестр хранится в отдельном `access.sqlite3` внутри каталога данных, WAL/FULL, под общей блокировкой `core.lock`. Plaintext возвращается только в ответе создания; в БД хранится SHA-256.
+Core запускается с обязательными разными `LOGNARA_ADMIN_TOKEN` и `LOGNARA_QUERY_TOKEN`. Dock использует admin-токен для страницы «Подключения» и определений метрик. Реестр хранится в отдельном `access.sqlite3` внутри каталога данных, WAL/FULL, под общей блокировкой `core.lock`. Plaintext возвращается только в ответе создания или перевыпуска токена; в БД хранится SHA-256.
 
 | Метод и путь | Токен | Тело / ответ |
 |---|---|---|
@@ -38,6 +38,7 @@ Core запускается с обязательными разными `LOGNAR
 | `DELETE /v1/admin/relays/{id}` | admin | `204`, `404 not_found`, `409 relay_has_agents` |
 | `GET /v1/admin/agents` | admin | `{"agents":[{"id":1,"name":"app","relay_id":1,"created_at":"RFC3339"}]}` |
 | `POST /v1/admin/agents` | admin | `{"name":"app","relay_id":1}` → `201 {"agent":{…},"token":"lna_…"}` |
+| `POST /v1/admin/agents/{id}/rotate-token` | admin | Без тела → `200 {"agent":{…},"token":"lna_…"}`, `Cache-Control: no-store`; `404 not_found` |
 | `DELETE /v1/admin/agents/{id}` | admin | `204`, `404 not_found` |
 | `POST /v1/heartbeat` | relay | JSON отчёт relay и его агентов → 204; hash агента сопоставляется только внутри relay |
 | `GET /v1/status` | query | ready/version/lag/WAL и текущий filesystem storage |

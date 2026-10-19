@@ -245,7 +245,9 @@ Relay с персональным токеном отправляет `POST /v1/
 
 `access.sqlite3` в `data_dir` хранит relay и агентов отдельно от `catalog.sqlite`. SQLite использует WAL, FULL, foreign keys и отдельный `user_version=1`. Реестр открывается после захвата `core.lock`. Идентификаторы i64 не переиспользуются, `created_at` — RFC3339 UTC.
 
-Токен: 32 системных случайных байта в hex с префиксом `lnr_` для relay или `lna_` для агента. Plaintext выдаётся только при создании; БД хранит SHA-256. Имя после trim: 1..64 символа, без управляющих. Relay-имена уникальны глобально, имена агентов внутри relay. Relay с агентами удалить нельзя.
+Токен: 32 системных случайных байта в hex с префиксом `lnr_` для relay или `lna_` для агента. Plaintext выдаётся только при создании или перевыпуске; БД хранит SHA-256. Имя после trim: 1..64 символа, без управляющих. Relay-имена уникальны глобально, имена агентов внутри relay. Relay с агентами удалить нельзя.
+
+POST `/v1/admin/agents/{id}/rotate-token` с admin Bearer, без тела, возвращает 200 `{agent, token}` с `Cache-Control: no-store`, неизвестный ID — 404 `not_found`. `Access::rotate_agent_token` одной транзакцией заменяет только token_hash; ID, имя, relay, created_at и heartbeat сохраняются. После commit новый хеш виден в `/v1/agents`, старый отсутствует; relay применяет замену при следующей успешной синхронизации (обычный интервал 10 секунд, при недоступном core работает по кешу). Повтор запроса выпускает ещё один новый токен; автоматические повторы клиента не используются.
 
 `LOGNARA_ADMIN_TOKEN` обязателен и отличается от `LOGNARA_QUERY_TOKEN`; `LOGNARA_INGEST_TOKEN` удалён. Admin API: GET/POST `/v1/admin/relays`, `/v1/admin/agents`, DELETE по `/{id}`. SQLite вызывается через `spawn_blocking`. Ошибки JSON `{"error":"code"}`: invalid_name/invalid_request (400), relay_not_found/not_found (404), name_taken/relay_has_agents (409).
 
