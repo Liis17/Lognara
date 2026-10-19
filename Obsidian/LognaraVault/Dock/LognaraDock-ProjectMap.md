@@ -59,7 +59,10 @@ Lognara-dock/
     src/pages/Analytics.tsx   единая сводка, stacked levels, p95/coverage/actions, сравнение и переход в логи
     src/pages/Infrastructure.tsx цепочка, узлы и диск, последовательный polling и stale-снимок
     src/pages/Access.tsx      профили relay/агентов, создание, одноразовый токен, удаление
-    src/pages/Metrics.tsx     список метрик, диапазон, разбиение и окружение, график
+    src/pages/Metrics.tsx     плитки по серверам/сервисам и очередь миниграфиков
+    src/pages/MetricDetail.tsx отдельная страница метрики с серверной областью
+    src/pages/MetricCreate.tsx модалка создания, импорт JSON, конфликты и nginx
+    src/metricBundles.ts      переносимые наборы, примеры и шаблоны nginx
     src/pages/MetricEditor.tsx определение метрики, предпросмотр regex, сохранение и удаление
     src/components/Chart.tsx  uPlot с цветами осей из общей тёмной палитры
     src/pages/Settings.tsx    смена пароля, список и добавление passkey
@@ -79,5 +82,5 @@ Lognara-dock/
 - `passkey::login_finish` и `auth::login` создают сессию через `auth::start_session`.
 - `live::Live` использует `CoreClient`; `live::stream` перепроверяет сессию через `Sessions::lookup_hash`.
 - `series::*` (обработчики `/api/series*`) и `access::*` вызывают общий `App.core: Arc<CoreClient>`; ошибки превращаются в `ApiError` через единый `From<CoreError>` в `api.rs`. Все маршруты требуют `session::AuthUser`; запросы не GET/HEAD/OPTIONS проверяет `session::require_origin` (нужен `Origin` равный `LOGNARA_DOCK_PUBLIC_URL`).
-- `Metrics.tsx` вызывает `api.ts` (`api`, `SeriesReply`, `Definition`), график строит `components/Chart.tsx`, редактор открывается из `Metrics.tsx` и сообщает о сохранении через `onDone`.
+- `Metrics.tsx` вызывает `api.ts` (`api`, `SeriesReply`, `Definition`), график строит `components/Chart.tsx`, редактор открывается из `MetricDetail.tsx` и `MetricCreate.tsx` и сообщает о сохранении через `onDone`.
 - Admin-токен берётся из Config; Live использует тот же клиент с query-токеном. Реестр relay/агентов хранится только в core.

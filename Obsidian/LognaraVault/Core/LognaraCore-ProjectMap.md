@@ -28,8 +28,10 @@ Parent: [[Core/LognaraCore]]
 | tests | issues.rs: группировка, статусы вкладок, fingerprint в search/summary, рестарт, возвраты после checkpoint; patterns.rs: counts, прошлое окно, скрытие, pattern_id в search/summary, рестарт, поздние события и неполная история; access.rs: CRUD, изоляция и отзыв токенов; контракт, HTTP, WAL, Parquet, поиск, аналитика, retention, аварийные subprocess и настоящие agent/relay и восстановление всей цепочки после недоступности core |
 | series | Схема и запись Parquet точек метрик (`timestamp`, источник, `name`, `origin`, `rule_id`, `labels`, `value`, `event_id`) |
 | extract | Точки из `attributes.Metrics` версии 2 и из правил regex |
+| scoped_metrics | Индекс источников/серий по серверам и возобновляемая миграция каталога |
+| metric_import | Проверка JSON-наборов, конфликты и атомарное применение |
 | definitions | Определения метрик, валидация, `RuleSet`, `LabelGuard` (лимит меток) |
-| series_query | `GET /v1/series` и `POST /v1/series/query`: корзины, split, `environment`, приращения, план чтения по суткам (агрегат или точки), до 20 серий |
+| series_query | `GET /v1/series` и `POST /v1/series/query`: корзины, split, `server`, `environment`, приращения, план чтения по суткам (агрегат или точки), до 20 серий |
 | rollup | Суточные агрегаты точек: уровни по возрасту, отпечаток, фоновый поток `lognara-rollups`, ночная перепроверка, восстановление при старте |
 | metrics | Счётчики и gauges Prometheus, включая `lognara_core_series_*` |
 | tests/series.rs | Точки из отчётов, сохранность файлов после рестарта, retention не трогает метрики, слияние дня, состояния незавершённого слияния (файлы и каталог) |

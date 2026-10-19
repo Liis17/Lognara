@@ -51,3 +51,5 @@ Cargo ограничен двумя параллельными заданиям�
 
 - Использует: [[Agent/LognaraAgent]], [[Relay/LognaraRelay]], [[Delivery/Spool]], [[Core/LognaraCore]], [[Dock/LognaraDock]].
 - Используется в: [[Architecture]], [[Repository/RootFiles]], `README.md`.
+
+Изменение `Lognara-dock/web/public/metrics-nginx.json` также запускает проверки Core: его тесты проверяют импортируемые nginx-регулярки тем же Rust regex, который использует извлечение.
