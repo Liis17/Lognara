@@ -59,9 +59,9 @@ export default function MetricDetail({
     setMetric(null);
     setError("");
     api<{ metrics: SeriesMetric[] }>(
-      "GET",
-      "/api/series?group_by=server",
-      undefined,
+      "POST",
+      "/api/series/lookup",
+      { keys: [{ server: params.get("server"), service: params.get("service"), name: params.get("name"), origin: params.get("origin") }] },
       { signal: controller.signal },
     )
       .then((reply) =>
