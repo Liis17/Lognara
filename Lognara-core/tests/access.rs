@@ -304,6 +304,115 @@ fn agent_report(server: &str) -> serde_json::Value {
     })
 }
 
+#[tokio::test]
+async fn rotating_agent_token_preserves_identity_and_revokes_old_hash_durably() {
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = Config::from_lookup(|key| match key {
+        "LOGNARA_ADMIN_TOKEN" => Some("admin".into()),
+        "LOGNARA_QUERY_TOKEN" => Some("query".into()),
+        _ => None,
+    })
+    .unwrap();
+    config.data_dir = dir.path().into();
+    let core = Core::open(config.clone()).unwrap();
+    let router = api::router(core.clone());
+    let nil = serde_json::Value::Null;
+    let (_, relay) = call(
+        &router,
+        "POST",
+        "/v1/admin/relays",
+        "admin",
+        json!({"name":"main"}),
+    )
+    .await;
+    let relay_id = relay["relay"]["id"].as_i64().unwrap();
+    let relay_token = relay["token"].as_str().unwrap();
+    let (_, agent) = call(
+        &router,
+        "POST",
+        "/v1/admin/agents",
+        "admin",
+        json!({"name":"api", "relay_id":relay_id}),
+    )
+    .await;
+    let (_, other) = call(
+        &router,
+        "POST",
+        "/v1/admin/agents",
+        "admin",
+        json!({"name":"worker", "relay_id":relay_id}),
+    )
+    .await;
+    let hash =
+        |token: &serde_json::Value| hex::encode(Sha256::digest(token.as_str().unwrap().as_bytes()));
+    let old_hash = hash(&agent["token"]);
+    let body = json!({"relay": relay_report(), "agents": [{"token_sha256": old_hash, "heartbeat_ms_ago": 0, "telemetry": agent_report("srv-1")}]});
+    assert_eq!(
+        call(&router, "POST", "/v1/heartbeat", relay_token, body)
+            .await
+            .0,
+        204
+    );
+    let (_, before) = call(&router, "GET", "/v1/admin/agents", "admin", nil.clone()).await;
+    let path = format!("/v1/admin/agents/{}/rotate-token", agent["agent"]["id"]);
+    for token in ["", "query", relay_token, agent["token"].as_str().unwrap()] {
+        assert_eq!(
+            call(&router, "POST", &path, token, nil.clone()).await.0,
+            401
+        );
+    }
+    assert_eq!(
+        call(
+            &router,
+            "POST",
+            "/v1/admin/agents/999/rotate-token",
+            "admin",
+            nil.clone()
+        )
+        .await,
+        (StatusCode::NOT_FOUND, json!({"error":"not_found"}))
+    );
+    assert_eq!(
+        call(
+            &router,
+            "POST",
+            "/v1/admin/agents/abc/rotate-token",
+            "admin",
+            nil.clone()
+        )
+        .await
+        .0,
+        400
+    );
+    let (status, rotated) = call(&router, "POST", &path, "admin", nil.clone()).await;
+    assert_eq!(status, 200);
+    assert_ne!(rotated["token"], agent["token"]);
+    assert!(rotated["token"].as_str().unwrap().starts_with("lna_"));
+    assert_eq!(rotated["agent"], before["agents"][0]);
+    let expected_hashes = {
+        let mut hashes = vec![hash(&rotated["token"]), hash(&other["token"])];
+        hashes.sort();
+        json!(hashes)
+    };
+    let (_, hashes) = call(&router, "GET", "/v1/agents", relay_token, nil.clone()).await;
+    assert_eq!(hashes["agents"], expected_hashes);
+    assert!(!hashes.to_string().contains(&old_hash));
+    let (_, after) = call(&router, "GET", "/v1/admin/agents", "admin", nil.clone()).await;
+    assert_eq!(before["agents"], after["agents"]);
+    assert!(!after.to_string().contains("token"));
+    core.shutdown().unwrap();
+    drop(router);
+    drop(core);
+    let core = Core::open(config).unwrap();
+    let router = api::router(core.clone());
+    let (_, hashes) = call(&router, "GET", "/v1/agents", relay_token, nil.clone()).await;
+    assert_eq!(hashes["agents"], expected_hashes);
+    let (_, persisted) = call(&router, "GET", "/v1/admin/agents", "admin", nil).await;
+    assert_eq!(persisted["agents"], before["agents"]);
+    core.shutdown().unwrap();
+}
+
 fn relay_report() -> serde_json::Value {
     serde_json::json!({
         "version": "0.1.0",

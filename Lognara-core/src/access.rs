@@ -170,6 +170,35 @@ impl Access {
         Ok(CreatedAgent { agent, token })
     }
 
+    pub fn rotate_agent_token(&self, id: i64) -> Result<CreatedAgent> {
+        let mut connection = self.connection.lock().unwrap();
+        let transaction = connection.transaction()?;
+        let agent = transaction
+            .query_row(
+                "SELECT id,name,relay_id,created_at,telemetry FROM agents
+                 LEFT JOIN heartbeats ON kind='agent' AND node_id=id WHERE id=?1",
+                [id],
+                |row| {
+                    Ok(Agent {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        relay_id: row.get(2)?,
+                        created_at: row.get(3)?,
+                        heartbeat: telemetry(row.get(4)?),
+                    })
+                },
+            )
+            .optional()?
+            .ok_or(AccessError::NotFound)?;
+        let (token, hash, _) = credentials("lna_")?;
+        transaction.execute(
+            "UPDATE agents SET token_hash=?1 WHERE id=?2",
+            params![hash.as_slice(), id],
+        )?;
+        transaction.commit()?;
+        Ok(CreatedAgent { agent, token })
+    }
+
     pub fn list_relays(&self) -> Result<Vec<Relay>> {
         let connection = self.connection.lock().unwrap();
         let mut statement = connection.prepare(

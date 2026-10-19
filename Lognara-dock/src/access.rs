@@ -75,6 +75,17 @@ pub async fn create_agent(
     Ok(issued(created))
 }
 
+pub async fn rotate_agent_token(
+    State(app): State<AppState>,
+    user: AuthUser,
+    id: Result<Path<i64>, PathRejection>,
+) -> Result<Response, ApiError> {
+    let Path(id) = id.map_err(|_| ApiError::BadRequest("invalid_request"))?;
+    let rotated = app.core.rotate_agent_token(id).await?;
+    tracing::info!(username = %user.username, id, "agent token rotated");
+    Ok((StatusCode::OK, [(CACHE_CONTROL, "no-store")], Json(rotated)).into_response())
+}
+
 pub async fn delete_agent(
     State(app): State<AppState>,
     user: AuthUser,

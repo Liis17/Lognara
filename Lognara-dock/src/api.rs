@@ -237,6 +237,10 @@ pub fn router(app: AppState) -> Router {
             get(access::list_agents).post(access::create_agent),
         )
         .route("/agents/{id}", delete(access::delete_agent))
+        .route(
+            "/agents/{id}/rotate-token",
+            post(access::rotate_agent_token),
+        )
         .route("/infrastructure", get(infra::overview))
         .layer(middleware::from_fn_with_state(
             app.clone(),

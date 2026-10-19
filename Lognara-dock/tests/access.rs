@@ -150,6 +150,7 @@ async fn requires_session() {
             Some(json!({ "name": "a", "relay_id": 1 })),
         ),
         (Method::DELETE, "/api/agents/1", None),
+        (Method::POST, "/api/agents/1/rotate-token", None),
     ] {
         let reply = send(&t.router, request(method, path, None, body)).await;
         assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "{path}");
@@ -169,6 +170,7 @@ async fn changes_require_origin() {
             json!({ "name": "a", "relay_id": 1 }),
         ),
         (Method::DELETE, "/api/agents/1", Value::Null),
+        (Method::POST, "/api/agents/1/rotate-token", Value::Null),
     ] {
         let builder = axum::http::Request::builder()
             .method(method)
@@ -272,5 +274,67 @@ async fn rejects_invalid_requests_without_calling_core() {
         assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{path}");
         assert_eq!(reply.body, json!({ "error": "invalid_request" }), "{path}");
     }
+    assert!(core.taken().is_empty());
+}
+
+#[tokio::test]
+async fn proxies_token_rotation_without_body_and_with_safe_errors() {
+    let (t, session, core) = setup().await;
+    let rotated = json!({
+        "agent": { "id": 4, "name": "worker", "relay_id": 1, "created_at": "2026-10-14T10:01:00Z" },
+        "token": AGENT_TOKEN,
+    });
+    core.reply_json(StatusCode::OK, rotated.clone());
+    let reply = call(
+        &t,
+        &session,
+        Method::POST,
+        "/api/agents/4/rotate-token",
+        None,
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.body, rotated);
+    assert_eq!(reply.headers[header::CACHE_CONTROL], "no-store");
+    let requests = core.taken();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method, Method::POST);
+    assert_eq!(requests[0].path, "/v1/admin/agents/4/rotate-token");
+    assert_eq!(
+        requests[0].authorization.as_deref(),
+        Some("Bearer admin-secret")
+    );
+    assert_eq!(requests[0].body, Value::Null);
+    for (status, body, expected_status, expected_code) in [
+        (404, json!({"error":"not_found"}), 404, "not_found"),
+        (
+            500,
+            json!({"error":"secret details"}),
+            502,
+            "core_unavailable",
+        ),
+    ] {
+        core.reply_json(StatusCode::from_u16(status).unwrap(), body);
+        let reply = call(
+            &t,
+            &session,
+            Method::POST,
+            "/api/agents/4/rotate-token",
+            None,
+        )
+        .await;
+        assert_eq!(reply.status.as_u16(), expected_status);
+        assert_eq!(reply.body, json!({"error": expected_code}));
+    }
+    core.taken();
+    let reply = call(
+        &t,
+        &session,
+        Method::POST,
+        "/api/agents/abc/rotate-token",
+        None,
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST);
     assert!(core.taken().is_empty());
 }
