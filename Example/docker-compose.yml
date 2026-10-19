@@ -1,0 +1,52 @@
+name: lognara
+
+services:
+  lognara-core:
+    image: docker.barkfluff.com/lognara-core:${LOGNARA_IMAGE_TAG:-master}
+    user: "1000:1000"
+    container_name: "lognara-core"
+    environment:
+      LOGNARA_LISTEN_ADDR: "0.0.0.0:7402"
+      LOGNARA_DATA_DIR: /var/lib/lognara-core
+      LOGNARA_ADMIN_TOKEN: ${LOGNARA_ADMIN_TOKEN:?Задайте LOGNARA_ADMIN_TOKEN}
+      LOGNARA_QUERY_TOKEN: ${LOGNARA_QUERY_TOKEN:?Задайте LOGNARA_QUERY_TOKEN}
+      LOGNARA_RETENTION_SECONDS: ${LOGNARA_RETENTION_SECONDS:-604800}
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      - ./core-data:/var/lib/lognara-core
+    ports:
+      - "127.0.0.1:7402:7402"
+    networks:
+      - lognara-network
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+  lognara-dock:
+    image: docker.barkfluff.com/lognara-dock:${LOGNARA_IMAGE_TAG:-master}
+    user: "1000:1000"
+    container_name: "lognara-dock"
+    environment:
+      LOGNARA_DOCK_PUBLIC_URL: https://dock.barkfluff.com
+      LOGNARA_DOCK_LISTEN_ADDR: "0.0.0.0:7403"
+      LOGNARA_DOCK_CORE_URL: http://lognara-core:7402
+      LOGNARA_DOCK_CORE_TOKEN: ${LOGNARA_QUERY_TOKEN:?Задайте LOGNARA_QUERY_TOKEN}
+      LOGNARA_DOCK_CORE_ADMIN_TOKEN: ${LOGNARA_ADMIN_TOKEN:?Задайте LOGNARA_ADMIN_TOKEN}
+      LOGNARA_DOCK_HTPASSWD_FILE: /etc/lognara-dock/auth/htpasswd
+      LOGNARA_DOCK_DATA_DIR: /var/lib/lognara-dock
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      - ./auth:/etc/lognara-dock/auth
+      - ./dock-data:/var/lib/lognara-dock
+    ports:
+      - "127.0.0.1:7403:7403"
+    networks:
+      - lognara-network
+    depends_on:
+      - lognara-core
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+networks:
+  lognara-network:
+    name: lognara-network
+    external: true
