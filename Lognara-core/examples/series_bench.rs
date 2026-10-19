@@ -242,6 +242,7 @@ async fn main() -> Result<()> {
         let mut shape = String::new();
         for _ in 0..3 {
             let request = QueryRequest {
+                server: None,
                 service: "api".into(),
                 name: "requests".into(),
                 from: from.into(),

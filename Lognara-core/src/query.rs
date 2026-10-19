@@ -97,6 +97,8 @@ pub struct SearchResponse {
 
 #[derive(Debug, thiserror::Error)]
 pub enum QueryError {
+    #[error("import_conflict")]
+    Conflict,
     #[error("{0}")]
     Invalid(String),
     #[error("cursor expired or its snapshot is no longer available")]

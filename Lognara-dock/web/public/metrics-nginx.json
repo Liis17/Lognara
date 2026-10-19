@@ -1,0 +1,106 @@
+{
+  "format": "lognara-metrics",
+  "version": 1,
+  "metrics": [
+    {
+      "name": "nginx.requests",
+      "title": "Запросы nginx",
+      "description": "Количество записей access-лога в стандартном формате combined.",
+      "unit": "запросов",
+      "kind": "delta",
+      "aggregation": "sum",
+      "enabled": true,
+      "rule": {
+        "environment": null,
+        "contains": "] \"",
+        "pattern": "^\\S+ - \\S+ \\[[^\\]\\r\\n]+\\] \"(?:[^\"\\\\\\r\\n]|\\\\.)*\" [1-5]\\d{2} (?:\\d+|-) \"(?:[^\"\\\\\\r\\n]|\\\\.)*\" \"(?:[^\"\\\\\\r\\n]|\\\\.)*\"$",
+        "value_group": null,
+        "label_groups": []
+      }
+    },
+    {
+      "name": "nginx.requests_by_status",
+      "title": "HTTP-статусы",
+      "description": "Количество запросов с разбиением по HTTP-статусу.",
+      "unit": "запросов",
+      "kind": "delta",
+      "aggregation": "sum",
+      "enabled": true,
+      "rule": {
+        "environment": null,
+        "contains": "] \"",
+        "pattern": "^\\S+ - \\S+ \\[[^\\]\\r\\n]+\\] \"(?:[^\"\\\\\\r\\n]|\\\\.)*\" (?P<status>[1-5]\\d{2}) (?:\\d+|-) \"(?:[^\"\\\\\\r\\n]|\\\\.)*\" \"(?:[^\"\\\\\\r\\n]|\\\\.)*\"$",
+        "value_group": null,
+        "label_groups": [
+          "status"
+        ]
+      }
+    },
+    {
+      "name": "nginx.responses_4xx",
+      "title": "Ошибки HTTP 4xx",
+      "description": "Запросы с клиентскими ошибками 400–499.",
+      "unit": "запросов",
+      "kind": "delta",
+      "aggregation": "sum",
+      "enabled": true,
+      "rule": {
+        "environment": null,
+        "contains": "] \"",
+        "pattern": "^\\S+ - \\S+ \\[[^\\]\\r\\n]+\\] \"(?:[^\"\\\\\\r\\n]|\\\\.)*\" 4\\d{2} (?:\\d+|-) \"(?:[^\"\\\\\\r\\n]|\\\\.)*\" \"(?:[^\"\\\\\\r\\n]|\\\\.)*\"$",
+        "value_group": null,
+        "label_groups": []
+      }
+    },
+    {
+      "name": "nginx.responses_5xx",
+      "title": "Ошибки HTTP 5xx",
+      "description": "Запросы с серверными ошибками 500–599.",
+      "unit": "запросов",
+      "kind": "delta",
+      "aggregation": "sum",
+      "enabled": true,
+      "rule": {
+        "environment": null,
+        "contains": "] \"",
+        "pattern": "^\\S+ - \\S+ \\[[^\\]\\r\\n]+\\] \"(?:[^\"\\\\\\r\\n]|\\\\.)*\" 5\\d{2} (?:\\d+|-) \"(?:[^\"\\\\\\r\\n]|\\\\.)*\" \"(?:[^\"\\\\\\r\\n]|\\\\.)*\"$",
+        "value_group": null,
+        "label_groups": []
+      }
+    },
+    {
+      "name": "nginx.body_bytes_sent",
+      "title": "Объём ответов",
+      "description": "Суммарный размер тела ответов body_bytes_sent, без HTTP-заголовков.",
+      "unit": "байт",
+      "kind": "delta",
+      "aggregation": "sum",
+      "enabled": true,
+      "rule": {
+        "environment": null,
+        "contains": "] \"",
+        "pattern": "^\\S+ - \\S+ \\[[^\\]\\r\\n]+\\] \"(?:[^\"\\\\\\r\\n]|\\\\.)*\" [1-5]\\d{2} (?P<bytes>\\d+) \"(?:[^\"\\\\\\r\\n]|\\\\.)*\" \"(?:[^\"\\\\\\r\\n]|\\\\.)*\"$",
+        "value_group": "bytes",
+        "label_groups": []
+      }
+    },
+    {
+      "name": "nginx.error_log",
+      "title": "Записи error-лога",
+      "description": "Количество записей стандартного error-лога по уровню severity; доступность уровней зависит от настройки error_log.",
+      "unit": "записей",
+      "kind": "delta",
+      "aggregation": "sum",
+      "enabled": true,
+      "rule": {
+        "environment": null,
+        "contains": "] ",
+        "pattern": "^\\d{4}/\\d{2}/\\d{2} \\d{2}:\\d{2}:\\d{2} \\[(?P<severity>emerg|alert|crit|error|warn|notice|info|debug)\\] \\d+#\\d+: .+$",
+        "value_group": null,
+        "label_groups": [
+          "severity"
+        ]
+      }
+    }
+  ]
+}

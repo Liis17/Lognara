@@ -222,6 +222,8 @@ pub async fn group_by(core: &Core, request: GroupRequest) -> Result<GroupRespons
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PreviewRequest {
+    #[serde(default)]
+    pub server: Option<String>,
     pub service: String,
     #[serde(default)]
     pub environment: Option<String>,
@@ -254,6 +256,7 @@ const PREVIEW_SAMPLES: usize = 50;
 /// Правило на последних строках сервиса за окно; извлечение то же, что при записи.
 pub async fn preview(core: &Core, request: PreviewRequest) -> Result<PreviewResponse, QueryError> {
     let PreviewRequest {
+        server,
         service,
         environment,
         rule,
@@ -276,6 +279,10 @@ pub async fn preview(core: &Core, request: PreviewRequest) -> Result<PreviewResp
     let from = format_timestamp(now - minutes as i64 * minute);
     let to = format_timestamp(now + minute);
     let mut filters = Filters::from([("service".to_owned(), vec![service])]);
+    if let Some(server) = server {
+        definitions::validate_service(&server).map_err(QueryError::Invalid)?;
+        filters.insert("server".to_owned(), vec![server]);
+    }
     if let Some(environment) = environment {
         filters.insert("environment".to_owned(), vec![environment]);
     }

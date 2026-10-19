@@ -331,6 +331,9 @@ pub async fn fake_core() -> (Arc<FakeCore>, String) {
     let router = Router::new()
         .route("/v1/logs/search", post(search))
         .route("/v1/series", get(series_list))
+        .route("/v1/series/sources", get(series_list))
+        .route("/v1/admin/series/import/check", post(preview))
+        .route("/v1/admin/series/import/apply", post(preview))
         .route("/v1/series/query", post(series_query))
         .route(
             "/v1/admin/series/definitions",

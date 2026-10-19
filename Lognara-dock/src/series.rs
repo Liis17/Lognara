@@ -2,7 +2,7 @@
 //! Тела запросов передаются core как есть, проверяет их core.
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use serde_json::Value;
 use uuid::Uuid;
@@ -12,9 +12,14 @@ use crate::session::AuthUser;
 
 pub async fn list(
     State(app): State<AppState>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
     _user: AuthUser,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    let (status, body) = app.core.series().await?;
+    let (status, body) = match query.get("group_by").map(String::as_str) {
+        None => app.core.series().await?,
+        Some("server") => app.core.scoped_series().await?,
+        _ => return Err(ApiError::Invalid("group_by must be server".into())),
+    };
     Ok((status, Json(body)))
 }
 
@@ -77,4 +82,28 @@ pub async fn preview(
 
 fn parse_id(raw: &str) -> Result<Uuid, ApiError> {
     Uuid::parse_str(raw).map_err(|_| ApiError::Invalid("id must be a UUID".into()))
+}
+
+pub async fn sources(
+    State(app): State<AppState>,
+    _user: AuthUser,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let (status, body) = app.core.series_sources().await?;
+    Ok((status, Json(body)))
+}
+pub async fn import_check(
+    State(app): State<AppState>,
+    _user: AuthUser,
+    Json(body): Json<Value>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let (status, body) = app.core.import_check(&body).await?;
+    Ok((status, Json(body)))
+}
+pub async fn import_apply(
+    State(app): State<AppState>,
+    _user: AuthUser,
+    Json(body): Json<Value>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let (status, body) = app.core.import_apply(&body).await?;
+    Ok((status, Json(body)))
 }

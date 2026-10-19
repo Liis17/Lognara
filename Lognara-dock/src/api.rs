@@ -126,6 +126,10 @@ impl From<CoreError> for ApiError {
                 detail,
             } => Self::Invalid(detail.unwrap_or_else(|| "core rejected the request".into())),
             CoreError::Status {
+                status: StatusCode::CONFLICT,
+                ..
+            } => Self::Conflict("import_conflict"),
+            CoreError::Status {
                 status: StatusCode::NOT_FOUND,
                 ..
             } => Self::NotFound,
@@ -217,6 +221,9 @@ pub fn router(app: AppState) -> Router {
         .route("/issues/{id}/resolve", post(issues::resolve))
         .route("/issues/{id}/reopen", post(issues::reopen))
         .route("/series", get(series::list))
+        .route("/series/sources", get(series::sources))
+        .route("/series/import/check", post(series::import_check))
+        .route("/series/import/apply", post(series::import_apply))
         .route("/series/query", post(series::query))
         .route(
             "/series/definitions",

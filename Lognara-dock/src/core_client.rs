@@ -385,6 +385,38 @@ impl CoreClient {
             .await
     }
 
+    pub async fn scoped_series(&self) -> Result<CoreReply, CoreError> {
+        self.call(
+            Method::GET,
+            "v1/series?group_by=server",
+            &self.query_token,
+            None,
+        )
+        .await
+    }
+    pub async fn series_sources(&self) -> Result<CoreReply, CoreError> {
+        self.call(Method::GET, "v1/series/sources", &self.query_token, None)
+            .await
+    }
+    pub async fn import_check(&self, body: &Value) -> Result<CoreReply, CoreError> {
+        self.call(
+            Method::POST,
+            "v1/admin/series/import/check",
+            &self.admin_token,
+            Some(body),
+        )
+        .await
+    }
+    pub async fn import_apply(&self, body: &Value) -> Result<CoreReply, CoreError> {
+        self.call(
+            Method::POST,
+            "v1/admin/series/import/apply",
+            &self.admin_token,
+            Some(body),
+        )
+        .await
+    }
+
     /// Серии за период: `POST /v1/series/query`.
     pub async fn series_query(&self, query: &Value) -> Result<CoreReply, CoreError> {
         self.call_within(

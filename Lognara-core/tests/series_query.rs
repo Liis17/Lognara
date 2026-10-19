@@ -51,8 +51,16 @@ async fn send(
     method: &str,
     uri: &str,
     token: Option<&str>,
-    body: Option<Value>,
+    mut body: Option<Value>,
 ) -> (StatusCode, Value) {
+    if uri.starts_with(DEFINITIONS)
+        && matches!(method, "POST" | "PUT")
+        && let Some(Value::Object(value)) = body.as_mut()
+    {
+        value
+            .entry("server")
+            .or_insert(json!(source("api", None).server));
+    }
     let mut request = Request::builder().method(method).uri(uri);
     if let Some(token) = token {
         request = request.header("authorization", format!("Bearer {token}"));
@@ -1252,5 +1260,164 @@ async fn open_points_of_a_rolled_up_day_are_read_from_raw_points() {
         json!([line("", sparse(24, &[(1, 1.0), (2, 10.0)]))])
     );
     drop(router);
+    core.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn server_filter_applies_to_open_raw_and_rollup_points() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = Core::open(rollup_config(dir.path(), 3)).unwrap();
+    let router = api::router(core.clone());
+    let day = day_ago(10);
+    let current = day_ago(0);
+    let mut a = source("api", None);
+    a.server = "a".into();
+    let mut b = a.clone();
+    b.server = "b".into();
+    core.journal
+        .accept(&batch(vec![
+            (
+                a.clone(),
+                vec![report(
+                    31001,
+                    &stamp(day, 100),
+                    json!({"runs":1}),
+                    json!({}),
+                )],
+            ),
+            (
+                b.clone(),
+                vec![
+                    report(31002, &stamp(day, 100), json!({"runs":9}), json!({})),
+                    report(31003, &stamp(day, 200), json!({"runs":0}), json!({})),
+                ],
+            ),
+        ]))
+        .unwrap();
+    wait(|| rollup_id(&core, day, HOURLY).is_some());
+    core.journal
+        .accept(&batch(vec![
+            (
+                a,
+                vec![report(
+                    31004,
+                    &stamp(current, 100),
+                    json!({"runs":3}),
+                    json!({}),
+                )],
+            ),
+            (
+                b,
+                vec![report(
+                    31005,
+                    &stamp(current, 100),
+                    json!({"runs":7}),
+                    json!({}),
+                )],
+            ),
+        ]))
+        .unwrap();
+    wait(|| {
+        core.snapshot()
+            .active
+            .as_ref()
+            .is_some_and(|active| active.meta.rows == 2)
+    });
+    for (server, expected) in [("a", 4.0), ("b", 16.0)] {
+        for step in [60, 3600] {
+            let body = query_with(
+                "runs",
+                &stamp(day, 0),
+                &stamp(current, 86400),
+                step,
+                json!({"server":server}),
+            );
+            if step == 60 {
+                // Raw-only narrow day query stays below the bucket limit.
+                let mut body = body;
+                body["to"] = json!(stamp(day, 86400));
+                let series = series_of(&router, body).await;
+                let total: f64 = series[0]["values"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(Value::as_f64)
+                    .sum();
+                assert_eq!(total, if server == "a" { 1.0 } else { 9.0 });
+            } else {
+                let series = series_of(&router, body).await;
+                let total: f64 = series[0]["values"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(Value::as_f64)
+                    .sum();
+                assert_eq!(total, expected);
+            }
+        }
+    }
+    core.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn effective_settings_include_unconfigured_servers_and_scoped_origins() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = Core::open(config(dir.path(), 2)).unwrap();
+    let router = api::router(core.clone());
+    let mut a = source("api", None);
+    a.server = "a".into();
+    let mut b = a.clone();
+    b.server = "b".into();
+    core.journal
+        .accept(&batch(vec![
+            (
+                a,
+                vec![report(41001, FROM, json!({"runs":10}), json!({"load":4}))],
+            ),
+            (
+                b,
+                vec![report(41002, FROM, json!({"runs":20,"load":9}), json!({}))],
+            ),
+        ]))
+        .unwrap();
+    wait(|| !core.snapshot().series_files.is_empty());
+    define(
+        &router,
+        json!({"server":"a","service":"api","name":"runs","kind":"cumulative"}),
+    )
+    .await;
+    let (status, error) = send(
+        &router,
+        "POST",
+        QUERY,
+        Some("query"),
+        Some(query_body("runs", FROM, TO, 60)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(error["error"], "server_required");
+    let (status, reply) = send(
+        &router,
+        "POST",
+        QUERY,
+        Some("query"),
+        Some(query_with("load", FROM, TO, 60, json!({"server":"a"}))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(reply["kind"], "gauge");
+    assert_eq!(reply["aggregation"], "avg");
+    assert_eq!(reply["series"][0]["values"], json!([4.0]));
+    define(&router,json!({"server":"other","service":"api","name":"load","kind":"delta","rule":{"contains":"done","pattern":"done"}})).await;
+    let (status, reply) = send(
+        &router,
+        "POST",
+        QUERY,
+        Some("query"),
+        Some(query_with("load", FROM, TO, 60, json!({"origin":"gauge"}))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(reply["kind"], "gauge");
     core.shutdown().unwrap();
 }

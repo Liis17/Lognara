@@ -68,6 +68,7 @@ jobs:
               - 'Lognara-spool/**'
             # Core e2e tests compile agent and relay, which both depend on spool.
             Lognara-core:
+              - 'Lognara-dock/web/public/metrics-nginx.json'
               - 'Lognara-core/**'
               - 'Lognara-agent/**'
               - 'Lognara-relay/**'
