@@ -507,6 +507,11 @@ impl CoreClient {
         self.admin(Method::POST, "agents".into(), Some(body)).await
     }
 
+    pub async fn rotate_agent_token(&self, id: i64) -> Result<Value, CoreError> {
+        self.admin(Method::POST, format!("agents/{id}/rotate-token"), None)
+            .await
+    }
+
     pub async fn delete_agent(&self, id: i64) -> Result<(), CoreError> {
         let path = format!("agents/{id}");
         self.admin(Method::DELETE, path, None).await.map(drop)

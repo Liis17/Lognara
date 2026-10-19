@@ -1,7 +1,7 @@
 //! Relay и агенты: dock проксирует управление учётными данными в admin API core.
 //!
-//! Admin-токен core остаётся в dock. Токен нового relay или агента core возвращает один
-//! раз; dock передаёт его браузеру и нигде не хранит и не логирует.
+//! Admin-токен core остаётся в dock. При создании или перевыпуске core возвращает токен
+//! один раз; dock передаёт его браузеру и нигде не хранит и не логирует.
 
 use axum::Json;
 use axum::extract::rejection::{JsonRejection, PathRejection};
@@ -73,6 +73,17 @@ pub async fn create_agent(
     let created = app.core.create_agent(&agent.name, agent.relay_id).await?;
     tracing::info!(username = %user.username, relay_id = agent.relay_id, "agent created");
     Ok(issued(created))
+}
+
+pub async fn rotate_agent_token(
+    State(app): State<AppState>,
+    user: AuthUser,
+    id: Result<Path<i64>, PathRejection>,
+) -> Result<Response, ApiError> {
+    let Path(id) = id.map_err(|_| ApiError::BadRequest("invalid_request"))?;
+    let rotated = app.core.rotate_agent_token(id).await?;
+    tracing::info!(username = %user.username, id, "agent token rotated");
+    Ok((StatusCode::OK, [(CACHE_CONTROL, "no-store")], Json(rotated)).into_response())
 }
 
 pub async fn delete_agent(
