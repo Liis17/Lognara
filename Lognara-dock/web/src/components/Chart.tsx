@@ -13,17 +13,19 @@ const palette = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300
 const overflow = "#898781";
 
 interface Props {
+  compact?: boolean;
   /** Моменты точек в формате RFC3339. */
   buckets: string[];
   series: SeriesLine[];
   unit: string;
 }
 
-export default function Chart({ buckets, series, unit }: Props) {
+export default function Chart({ buckets, series, unit, compact = false }: Props) {
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const container = ref.current!;
+    const height = compact ? 76 : HEIGHT;
     const theme = getComputedStyle(container);
     const ink = theme.getPropertyValue("--ink3").trim();
     const line = theme.getPropertyValue("--line").trim();
@@ -35,7 +37,7 @@ export default function Chart({ buckets, series, unit }: Props) {
     const plot = new uPlot(
       {
         width: container.clientWidth,
-        height: HEIGHT,
+        height,
         series: [
           {},
           ...series.map((line, i) => ({
@@ -44,18 +46,21 @@ export default function Chart({ buckets, series, unit }: Props) {
             width: 2,
           })),
         ],
-        axes: [axis, { ...axis, values: (_, splits) => splits.map((value) => `${value} ${unit}`.trim()) }],
+        cursor: { show: !compact },
+        select: { show: !compact, left: 0, top: 0, width: 0, height: 0 },
+        legend: { show: !compact },
+        axes: compact ? [{ show: false }, { show: false }] : [axis, { ...axis, values: (_, splits) => splits.map((value) => `${value} ${unit}`.trim()) }],
       },
       data,
       container,
     );
-    const observer = new ResizeObserver(() => plot.setSize({ width: container.clientWidth, height: HEIGHT }));
+    const observer = new ResizeObserver(() => plot.setSize({ width: container.clientWidth, height }));
     observer.observe(container);
     return () => {
       observer.disconnect();
       plot.destroy();
     };
-  }, [buckets, series, unit]);
+  }, [buckets, series, unit, compact]);
 
   return <div ref={ref} />;
 }

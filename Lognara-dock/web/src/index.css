@@ -422,3 +422,29 @@ table.preview .message { overflow-wrap: anywhere; min-width: 150px; }
   .metrics { grid-template-columns: minmax(0,1fr); gap: 16px; }
   .metrics .chart-panel { padding: 12px; }
 }
+
+/* Метрики: обзор по серверам и отдельная страница. */
+.metrics-overview, .metric-detail { display: block; min-width: 0; }
+.metric-server { margin: 24px 0; }
+.metric-server h2, .metric-service h3 { overflow-wrap: anywhere; }
+.metric-service h3 { color: var(--ink3); margin-bottom: 12px; }
+.metric-grid { display: grid; grid-template-columns: repeat(auto-fill,minmax(min(100%,260px),1fr)); gap: 14px; }
+.metric-tile { display: flex; flex-direction: column; gap: 8px; padding: 18px; min-width: 0; color: var(--ink); border: 1px solid var(--line); border-radius: 14px; background: var(--panel); text-decoration: none; overflow-wrap: anywhere; }
+.metric-tile:hover, .metric-tile:focus-visible { border-color: var(--accent); }
+.metric-tile.disabled { opacity: .65; }
+.metric-tile-heading { display: flex; justify-content: space-between; gap: 12px; align-items: start; }
+.metric-sparkline { height: 76px; min-width: 0; margin-top: 8px; }
+.metric-detail > a { display: inline-block; margin-bottom: 18px; }
+.metric-dialog { width: min(850px,calc(100vw - 32px)); max-height: calc(100dvh - 32px); padding: 24px; overflow: auto; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 16px; }
+.metric-dialog::backdrop { background: rgb(0 0 0 / .65); }
+.metric-dialog h2 { margin: 0; }
+.metric-create { display: grid; gap: 16px; }
+.metric-dialog .metric-editor { max-width: none; margin-bottom: 0; }
+.metric-source-selectors { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.metric-source-selectors label, .metric-create > label, .metric-conflict label { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.metric-dialog textarea { width: 100%; min-width: 0; }
+.metric-dialog .pattern, .metric-template code { font: 12px var(--mono); }
+.metric-template { display: flex; flex-direction: column; gap: 8px; border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+.metric-template code { overflow-wrap: anywhere; white-space: pre-wrap; }
+.metric-conflict { display: grid; gap: 10px; margin: 16px 0; }
+@media (max-width: 600px) { .metric-dialog { padding: 16px; } .metric-source-selectors { grid-template-columns: 1fr; } }

@@ -1,0 +1,24 @@
+{
+  "format": "lognara-metrics",
+  "version": 1,
+  "metrics": [
+    {
+      "name": "requests.completed",
+      "title": "Завершённые запросы",
+      "description": "Число сообщений request completed по HTTP-статусу.",
+      "unit": "запросов",
+      "kind": "delta",
+      "aggregation": "sum",
+      "enabled": true,
+      "rule": {
+        "environment": null,
+        "contains": "request completed",
+        "pattern": "request completed status=(?P<status>[1-5]\\d{2})",
+        "value_group": null,
+        "label_groups": [
+          "status"
+        ]
+      }
+    }
+  ]
+}

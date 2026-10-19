@@ -27,6 +27,7 @@ export const aggregationText: Record<Aggregation, string> = {
 
 /** Исходные значения для нового определения. */
 export interface EditorStart {
+  server: string;
   service: string;
   /** Пустое имя: пользователь введёт его сам. */
   name: string;
@@ -36,6 +37,7 @@ export interface EditorStart {
 }
 
 interface Form {
+  server: string;
   service: string;
   name: string;
   title: string;
@@ -58,6 +60,7 @@ const MAX_MESSAGE = 200;
 function initialForm(definition: Definition | null, start: EditorStart): Form {
   const rule = definition?.rule;
   return {
+    server: definition?.server ?? start.server,
     service: definition?.service ?? start.service,
     name: definition?.name ?? start.name,
     title: definition?.title ?? "",
@@ -90,6 +93,7 @@ function ruleOf(form: Form): Rule {
 
 function toInput(form: Form): DefinitionInput {
   return {
+    server: form.server,
     service: form.service.trim(),
     name: form.name.trim(),
     title: form.title.trim(),
@@ -130,7 +134,7 @@ export default function MetricEditor({ definition, start, onUnauthorized, onDone
       : "Новая метрика из текста логов";
 
   const set = <K extends keyof Form>(key: K, value: Form[K]) =>
-    setForm((current) => ({ ...current, [key]: value }));
+    { setForm((current) => ({ ...current, [key]: value })); setPreview(null); };
 
   const fail = (e: unknown) => {
     if (e instanceof ApiError && e.status === 401) onUnauthorized();
@@ -144,6 +148,7 @@ export default function MetricEditor({ definition, start, onUnauthorized, onDone
       const rule = ruleOf(form);
       setPreview(
         await api<PreviewReply>("POST", "/api/series/preview", {
+          server: form.server,
           service: form.service.trim(),
           environment: rule.environment,
           rule,
@@ -191,9 +196,10 @@ export default function MetricEditor({ definition, start, onUnauthorized, onDone
     <section className="metric-editor">
       <h2>{heading}</h2>
       <form onSubmit={save}>
+        <label>Сервер<input value={form.server} readOnly /></label>
         <label>
           Сервис
-          <input value={form.service} onChange={(e) => set("service", e.target.value)} />
+          <input value={form.service} readOnly />
         </label>
         <label>
           Имя
