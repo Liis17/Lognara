@@ -1,5 +1,5 @@
-//! Метрики core для браузера: серии через query-токен, определения через admin-токен.
-//! Тела запросов передаются core как есть, проверяет их core.
+//! Метрики core: query/admin-прокси и общее избранное в локальном Store.
+//! Тела проксируемых запросов передаются core как есть, проверяет их core.
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
@@ -17,7 +17,14 @@ pub async fn list(
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let (status, body) = match query.get("group_by").map(String::as_str) {
         None => app.core.series().await?,
-        Some("server") => app.core.scoped_series().await?,
+        Some("server") => {
+            app.core
+                .scoped_series(
+                    query.get("server").map(String::as_str),
+                    query.get("service").map(String::as_str),
+                )
+                .await?
+        }
         _ => return Err(ApiError::Invalid("group_by must be server".into())),
     };
     Ok((status, Json(body)))
@@ -106,4 +113,61 @@ pub async fn import_apply(
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let (status, body) = app.core.import_apply(&body).await?;
     Ok((status, Json(body)))
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MetricKey {
+    pub server: String,
+    pub service: String,
+    pub name: String,
+    pub origin: String,
+}
+impl MetricKey {
+    fn validate(&self) -> Result<(), ApiError> {
+        if self.server.len() > 128
+            || self.service.is_empty()
+            || self.service.len() > 128
+            || self.name.is_empty()
+            || self.name.len() > 128
+            || !matches!(self.origin.as_str(), "counter" | "gauge" | "rule")
+        {
+            return Err(ApiError::Invalid("invalid metric identity".into()));
+        }
+        Ok(())
+    }
+}
+pub async fn lookup(
+    State(app): State<AppState>,
+    _user: AuthUser,
+    Json(body): Json<Value>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    let (status, reply) = app.core.series_lookup(&body).await?;
+    Ok((status, Json(reply)))
+}
+pub async fn favorites(
+    State(app): State<AppState>,
+    _user: AuthUser,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        serde_json::json!({ "keys": app.store.favorite_metrics().await? }),
+    ))
+}
+pub async fn add_favorite(
+    State(app): State<AppState>,
+    _user: AuthUser,
+    Json(key): Json<MetricKey>,
+) -> Result<StatusCode, ApiError> {
+    key.validate()?;
+    app.store.set_favorite_metric(key, true).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+pub async fn remove_favorite(
+    State(app): State<AppState>,
+    _user: AuthUser,
+    Json(key): Json<MetricKey>,
+) -> Result<StatusCode, ApiError> {
+    key.validate()?;
+    app.store.set_favorite_metric(key, false).await?;
+    Ok(StatusCode::NO_CONTENT)
 }

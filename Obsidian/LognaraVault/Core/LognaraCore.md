@@ -147,7 +147,7 @@ Relay с персональным токеном отправляет `POST /v1/
 
 Необязательные `server` и `environment` сужают запрос сервером и окружением; `GET /v1/series` отдаёт окружения (`environments`) из `series_environments` и открытого сегмента. Для полных суток окна запрос берёт суточный агрегат вместо точек, если он актуален (раздел «Суточные агрегаты»).
 
-Определения уникальны по `(server, service, name)`. `scoped_metrics.rs` хранит индекс источников и серий по серверу; `GET /v1/series?group_by=server` и `GET /v1/series/sources` читают его вместе с открытым снимком. При отсутствии сервера несовместимые эффективные настройки дают `server_required`.
+Определения уникальны по `(server, service, name)`. `scoped_metrics.rs` хранит индекс источников и серий по серверу; `GET /v1/series?group_by=server` и `GET /v1/series/sources` читают его вместе с открытым снимком. При отсутствии сервера несовместимые эффективные настройки дают `server_required`. Серверный каталог поддерживает фильтры `server`, `service`; `POST /v1/series/lookup` возвращает метаданные выбранных составных ключей. Список источников включает определения без точек; контракт выборки и избранного Dock описан в [MetricsBundle](../../../docs/MetricsBundle.md#выборочные-метаданные-и-избранное).
 
 `metric_import.rs` проверяет переносимые наборы и применяет create/skip/rename/replace атомарно, с проверкой SHA-256 revision каталога. Каталог версии 3 переносит общие определения на известные серверы, удаляет определения без источника и сохраняет историческую идентичность правил. Подробности API, миграции и JSON: [контракт метрик](../../../docs/MetricsBundle.md).
 
@@ -159,12 +159,12 @@ Relay с персональным токеном отправляет `POST /v1/
 | `series::encode(points: &[Point]): Result<RecordBatch>` | Строит RecordBatch точек по схеме серий. |
 | `SeriesFileMeta::overlaps(&self, from: i64, to: i64): bool` | Есть ли у файла точки во времени `[from, to)`. |
 | `extract::native(row: &StoredEvent): (Vec<Point>, bool)` | Точки из `attributes.Metrics` (SchemaVersion 2); флаг - была ошибка разбора. |
-| `extract::rules(row: &StoredEvent, rules: &RuleSet): (Vec<Point>, bool)` | Точки всех правил сервиса строки. |
+| `extract::rules(row: &StoredEvent, rules: &RuleSet): (Vec<Point>, bool)` | Точки всех правил пары сервер/сервис строки. |
 | `extract::rule_point(rule: &CompiledRule, row: &StoredEvent): (Option<Point>, bool)` | Точка одного правила: окружение, подстрока, regex, значение, метки. |
 | `definitions::validate(input: &DefinitionInput, others: &[Definition], native: bool): Result<(), String>` | Проверяет имя, длины, уникальность, лимит правил и коллизию с native-метрикой. |
 | `definitions::validate_rule(rule: &Rule): Result<Regex, String>` | Лимиты правила, компиляция regex, проверка именованных групп. |
-| `RuleSet::load(definitions: &[Definition]): Result<RuleSet>` | Компилирует включённые правила по сервисам. |
-| `RuleSet::for_service(&self, service: &str): &[CompiledRule]` | Правила сервиса; пустой срез, если их нет. |
+| `RuleSet::load(definitions: &[Definition]): Result<RuleSet>` | Проверяет квоту правил каждого источника ([[Design/Metrics]]) и компилирует включённые правила по сервисам и серверам. |
+| `RuleSet::for_source(&self, server: &str, service: &str): &[CompiledRule]` | Правила источника без перебора других серверов; пустой срез, если их нет. |
 | `LabelGuard::admit(&mut self, rule_id: &str, labels: &str): bool` | Пропускает до 1000 различных наборов меток на правило за время жизни процесса. |
 | `definitions::list(core: &Core): Result<Vec<Definition>, QueryError>` | Все определения из каталога. |
 | `definitions::create(core: &Core, input: DefinitionInput): Result<Definition, QueryError>` | Проверка, запись и замена набора правил под одной блокировкой каталога. |

@@ -57,11 +57,11 @@ pub fn native(row: &StoredEvent) -> (Vec<Point>, bool) {
     (points, invalid)
 }
 
-/// Точки всех правил сервиса строки и признак ошибки разбора значения.
+/// Точки всех правил источника строки и признак ошибки разбора значения.
 pub fn rules(row: &StoredEvent, rules: &RuleSet) -> (Vec<Point>, bool) {
     let mut points = vec![];
     let mut invalid = false;
-    for rule in rules.for_service(&row.source.service) {
+    for rule in rules.for_source(&row.source.server, &row.source.service) {
         let (point, failed) = rule_point(rule, row);
         points.extend(point);
         invalid |= failed;
