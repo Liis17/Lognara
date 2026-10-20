@@ -8,16 +8,16 @@ from select_ci import COMPONENTS, CRATES, select
 
 class SelectTests(unittest.TestCase):
     def test_docs_skip_projects_and_images(self):
-        self.assertEqual(select([]), {"rust": [], "web": False, "images": []})
+        self.assertEqual(select([]), {"rust": [], "web": False, "dotnet": False, "images": []})
 
     def test_core_change_selects_only_core(self):
         self.assertEqual(select(["Lognara-core"]), {
-            "rust": ["Lognara-core"], "web": False, "images": ["core"],
+            "rust": ["Lognara-core"], "web": False, "dotnet": False, "images": ["core"],
         })
 
     def test_web_change_publishes_dock_without_rust_checks(self):
         self.assertEqual(select(["web"]), {
-            "rust": [], "web": True, "images": ["dock"],
+            "rust": [], "web": True, "dotnet": False, "images": ["dock"],
         })
 
     def test_spool_dependents_do_not_select_dock(self):
@@ -28,7 +28,7 @@ class SelectTests(unittest.TestCase):
 
     def test_manual_run_checks_and_releases_everything(self):
         self.assertEqual(select([], full=True), {
-            "rust": CRATES, "web": True, "images": COMPONENTS,
+            "rust": CRATES, "web": True, "dotnet": True, "images": COMPONENTS,
         })
 
     def test_shared_toolchain_requires_all_checks(self):
@@ -36,7 +36,12 @@ class SelectTests(unittest.TestCase):
 
     def test_image_workflow_change_rebuilds_images_only(self):
         self.assertEqual(select(["image-build"]), {
-            "rust": [], "web": False, "images": COMPONENTS,
+            "rust": [], "web": False, "dotnet": False, "images": COMPONENTS,
+        })
+
+    def test_dotnet_change_does_not_select_rust_web_or_images(self):
+        self.assertEqual(select(["dotnet"]), {
+            "rust": [], "web": False, "dotnet": True, "images": [],
         })
 
 

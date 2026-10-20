@@ -43,35 +43,24 @@ flowchart LR
 
 ### Serilog (.NET)
 
-Приложения на .NET отправляют логи через Serilog.Sinks.Http с форматтером из Serilog.Expressions (`ExpressionTemplate`). Установите пакеты `Serilog.Sinks.Http` и `Serilog.Expressions`. Агент работает в контейнере приложения, поэтому адрес всегда `http://127.0.0.1:7400/v1/logs`.
+Приложения на .NET 8+ отправляют логи через пакет `Serilog.Sinks.Lognara`. Для дискового буфера на Windows нужна версия 0.1.2 или новее.
 
-Каждое событие должно быть в каноническом JSON Lognara: relay раскладывает по полям только канонические ключи, остальные уходят в `attributes`. Массив JSON агент делит на записи, по одной на элемент. Пачку держите меньше 1 MiB (`batchSizeLimitBytes`): агент принимает тело не больше 2 MiB.
+```sh
+dotnet add package Serilog.Sinks.Lognara
+```
 
 ```csharp
 using Serilog;
-using Serilog.Templates;
-using Serilog.Sinks.Http.BatchFormatters;
 
 Log.Logger = new LoggerConfiguration()
-    .WriteTo.Http(
-        requestUri: "http://127.0.0.1:7400/v1/logs",
-        queueLimitBytes: null,
-        batchSizeLimitBytes: 1024 * 1024,
-        textFormatter: new ExpressionTemplate(
-            "{ {timestamp: UtcDateTime(@t), level: @l, message: @m, exception: @x, attributes: @p} }\n"),
-        batchFormatter: new ArrayBatchFormatter())
+    .WriteTo.Lognara("http://127.0.0.1:7400/v1/logs")
     .CreateLogger();
+
+Log.Information("Заказ {OrderId} сохранён", 42);
+await Log.CloseAndFlushAsync();
 ```
 
-Пример C# в этом репозитории не компилировался и не запускался. Перед использованием проверьте его в вашем приложении.
-
-| Поле Lognara | Откуда в шаблоне | Что попадает |
-|---|---|---|
-| `timestamp` | `@t` через `UtcDateTime` | время события |
-| `level` | `@l` | `Verbose`, `Information`, `Warning` и `Critical` понимаются как `trace`, `info`, `warn` и `fatal`; `Debug`, `Error`, `Fatal` совпадают с каноническими |
-| `message` | `@m` | текст события с подставленными значениями |
-| `attributes` | `@p` | все свойства Serilog; у сервисов с `ServiceMetrics` здесь окажется объект `Metrics` |
-| прочие ключи | `exception` (`@x`) | не канонические ключи уходят в `attributes` как есть |
+Пакет формирует канонический JSON, отправляет HTTP-пачки и поддерживает необязательный дисковый буфер. `127.0.0.1` подходит, когда агент и приложение работают на одном хосте или в одном контейнере; для отдельного контейнера укажите сетевой адрес агента. Подключение, лимиты, восстановление и настройка автопубликации: [Lognara-dotnet/README.md](Lognara-dotnet/README.md).
 
 ## Возможности
 

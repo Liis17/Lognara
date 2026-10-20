@@ -9,6 +9,7 @@ Parent: [[Index]]
 | Язык и runtime | Rust (edition 2024) и tokio подтверждены для `Lognara-agent/` и `Lognara-relay/`. Core также использует Rust 2024 и tokio; MSRV 1.94. |
 | Зависимости | `Lognara-agent/Cargo.toml`: axum, reqwest, tokio, tokio-util, serde, serde_json, rmp-serde, serde_bytes, zstd, tracing, http-body, glob, regex, sha2, libc, общий lognara-spool. Подробности в [[Agent/LognaraAgent]]. `Lognara-relay/Cargo.toml`: общие HTTP/runtime/serde/zstd зависимости, reqwest с rustls, а также uuid, time, base64, bytes, http-body для ограниченного чтения, sha2 для проверки хешей агентов из core. Подробности в [[Relay/LognaraRelay]]. |
 | Веб-интерфейс | `Lognara-dock/Cargo.toml`: axum, tower-http (ServeDir), reqwest, rusqlite (bundled), bcrypt, webauthn-rs 0.5 (`conditional-ui`, требует OpenSSL), fs2, time. Фронтенд `Lognara-dock/web/`: React, react-router, TypeScript, Vite, uPlot; локальные Commissioner и IBM Plex Mono с лицензиями OFL. Подробности в [[Dock/LognaraDock]]. |
+| .NET-клиент | `Lognara-dotnet/`: .NET 8+, Serilog 4.4 и Serilog.Sinks.Http 9.2.1; [[Agent/Serilog]]. Сборка и тесты на Ubuntu/Windows, публикация NuGet через OIDC в [[Repository/CI]]. |
 | Хранилище core | `Lognara-core/Cargo.toml`: DataFusion, Parquet с ZSTD, Tantivy, rusqlite, rand, а также regex (правила метрик, лимит размера выражения 1 MiB). Подробности в [[Core/LognaraCore]]. |
 | Лицензия | MIT, см. `LICENSE`. |
 | Локальный стенд | Docker Compose и Python 3.13 (стандартная библиотека без сторонних Python-пакетов) в `Example/`; сборка Rust-сервисов в Docker на Rust 1.94. Подробнее в [[Repository/LocalExample]]. |
@@ -22,6 +23,7 @@ Parent: [[Index]]
 | [[Core/LognaraCore]] | `Lognara-core/` | Реализованы реестр подключений access.sqlite3 и admin API, авторизация relay, HTTP-приём, WAL, Arrow/Parquet, каталог SQLite, поиск Tantivy, аналитика DataFusion, retention, точки метрик из ServiceMetrics и правил regex, суточные агрегаты метрик в фоновом потоке, API серий, паттерны, проблемы ошибок и heartbeat. Структура в [[Core/LognaraCore-ProjectMap]]. |
 | [[Dock/LognaraDock]] | `Lognara-dock/` | Реализованы вход по htpasswd/passkey, сессии в SQLite, смена пароля, регистрация relay/агентов, исторический поиск/cursor/Trace, отдельная SSE-лента и согласованная аналитика, инфраструктура и метрики с редактором правил (uPlot). React использует общий дизайн и локальные шрифты. Структура в [[Dock/LognaraDock-ProjectMap]]. |
 | [[Delivery/Spool]] | `Lognara-spool/` | Общая атомарная файловая очередь; оба процесса подтверждают приём только после durable commit. |
+| [[Agent/Serilog]] | `Lognara-dotnet/` | Библиотека `WriteTo.Lognara(...)` для HTTP-входа агента; очередь в памяти или на диске. |
 | [[Repository/LocalExample]] | `Example/` | Локальный Compose: Python-сервер на 8881 и agent в одном контейнере, relay, core и dock отдельно; веб-логи на localhost:7403. |
 
 Корневые файлы описаны в [[Repository/RootFiles]].
