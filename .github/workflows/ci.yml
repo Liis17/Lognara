@@ -247,7 +247,8 @@ jobs:
 
   publish-nuget:
     name: Publish Serilog to NuGet.org
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master' && needs.changes.outputs.dotnet == 'true'
+    # Override implicit success(): optional Rust/web jobs may be skipped upstream.
+    if: ${{ !cancelled() && needs.ci.result == 'success' && needs.changes.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/master' && needs.changes.outputs.dotnet == 'true' }}
     needs: [ci, changes]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
