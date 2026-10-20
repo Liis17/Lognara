@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="Assets/lognara-icon.png" alt="Lognara" width="128">
+
 # Lognara
 
 **Сбор, хранение, поиск и аналитика логов на Rust**
