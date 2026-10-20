@@ -141,6 +141,8 @@ enum Payload { Text(String), Json(String), Binary(Vec<u8>) }
 
 ## Зависимости
 
+.NET-приложения подключаются к HTTP-входу через [[Agent/Serilog]]; библиотека сохраняет существующий контракт агента.
+
 - Использует: `tokio`, `tokio-util`, `axum`, `reqwest` (без TLS), `serde`, `serde_json` (`raw_value`), `rmp-serde`, `serde_bytes`, `zstd`, `tracing`, `tracing-subscriber`, `http-body`, `glob`, `regex` (байтовые regex с ограниченным размером), `sha2`, `libc`, общий `lognara-spool`.
 - Отправляет пачки в: [[Relay/LognaraRelay]].
 - Используется в: [[Architecture]].

@@ -12,6 +12,7 @@ Lognara — система сбора логов: агент в контейне
 |------|-----------|----------|
 | [[Agent/LognaraAgent]] | lognara-agent | HTTP, файлы, stdout/stderr, durable spool, отправка сжатых пачек в relay с персональным токеном; параметры `LOGNARA_*` и контракт пачки. |
 | [[Agent/LogSources]] | источники логов | JSON, форматы, checkpoint, ротация, потоки, потери и lifecycle программы. |
+| [[Agent/Serilog]] | .NET-клиент | Serilog sink, HTTP-пачки, буфер и NuGet-публикация. |
 | [[Agent/LognaraAgent-ProjectMap]] | lognara-agent | Карта модулей, публичных интерфейсов и проверок. |
 
 ### Relay
