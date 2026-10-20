@@ -12,12 +12,13 @@ def select(changed, full=False):
     full_checks = full or "ci" in changed
     rust = CRATES if full_checks else [crate for crate in CRATES if crate in changed]
     web = full_checks or "web" in changed
+    dotnet = full_checks or "dotnet" in changed
     images = [
         component for component in COMPONENTS
         if full_checks or "image-build" in changed or f"Lognara-{component}" in changed
         or (component == "dock" and "web" in changed)
     ]
-    return {"rust": rust, "web": web, "images": images}
+    return {"rust": rust, "web": web, "dotnet": dotnet, "images": images}
 
 
 if __name__ == "__main__":
