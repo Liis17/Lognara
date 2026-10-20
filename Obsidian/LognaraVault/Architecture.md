@@ -39,7 +39,7 @@ Parent: [[Index]]
 | `Example/entrypoint.py` | Запускает agent и Python-сервер внутри `app`, передаёт остановку обоим процессам. |
 | `Example/server.py` | Любой корректный HTTP-метод и путь; данные клиента в JSON/stdout и на локальный agent. |
 | `Lognara-dock/src/main.rs` | Точка входа веб-интерфейса; конфигурация `LOGNARA_DOCK_*`, порт `7403`, фронтенд из `LOGNARA_DOCK_WEB_DIR`. |
-| `README.md` | Обзор проекта: схема потока, быстрый старт, порты и параметры, метрики, API core и dock, статус. |
+| `README.md` | Обзор проекта: схема потока, Serilog-клиент, быстрый старт, токены, образы и фрагменты Compose, краткие метрики и API со ссылками на документацию компонентов и vault, статус. |
 | `.gitignore` | Исключает сборки Cargo (`target`) и артефакты агента в корневом `/build/`, резервные файлы rustfmt, PDB, Cargo Mutants, `default.profraw`, `.DS_Store`, локальный `.env` с ключом. |
 | `.env.example` | Центральные admin/query-токены и данные core; персональные LOGNARA_RELAY_CORE_TOKEN/LOGNARA_AGENT_TOKEN из dock, LOGNARA_RELAY_MEMORY_MB=2048 и данные agent/relay на машине приложений. |
 | `LICENSE` | Текст лицензии MIT. |
