@@ -27,6 +27,8 @@ pub struct Config {
     pub series_hourly_days: u64,
     pub series_rollup_hour_utc: u8,
     pub series_rollup_pause: Duration,
+    /// Срок хранения точек и агрегатов метрик по времени точек; None - без удаления.
+    pub series_retention: Option<Duration>,
     pub query_memory_bytes: usize,
     pub search_memory_bytes: usize,
     pub query_timeout: Duration,
@@ -55,6 +57,7 @@ impl Config {
                 },
             }
         };
+        let optional = |key| get(key).map(|_| number(key, 1)).transpose();
         let config = Self {
             listen_addr: get("LOGNARA_LISTEN_ADDR")
                 .unwrap_or_else(|| "127.0.0.1:7402".into())
@@ -96,6 +99,8 @@ impl Config {
                 "LOGNARA_SERIES_ROLLUP_PAUSE_MS",
                 1000,
             )?),
+            series_retention: optional("LOGNARA_SERIES_RETENTION_SECONDS")?
+                .map(Duration::from_secs),
             query_memory_bytes: number("LOGNARA_QUERY_MEMORY_BYTES", 1 << 30)? as usize,
             search_memory_bytes: number("LOGNARA_SEARCH_MEMORY_BYTES", 128 << 20)? as usize,
             query_timeout: Duration::from_secs(number("LOGNARA_QUERY_TIMEOUT_SECONDS", 30)?),
@@ -125,8 +130,12 @@ impl Config {
         if config.pattern_catalog_bytes < (1 << 20) || config.pattern_query_bytes < 4096 {
             bail!("pattern catalog must be >= 1 MiB and query budget >= 4096 bytes");
         }
-        if config.retention.as_secs() > i64::MAX as u64 / 1_000_000_000 {
-            bail!("LOGNARA_RETENTION_SECONDS is too large");
+        if config.retention.as_secs() > i64::MAX as u64 / 1_000_000_000
+            || config
+                .series_retention
+                .is_some_and(|retention| retention.as_secs() > i64::MAX as u64 / 1_000_000_000)
+        {
+            bail!("LOGNARA_RETENTION_SECONDS or LOGNARA_SERIES_RETENTION_SECONDS is too large");
         }
         if config.series_compact_quiet.as_secs() > i64::MAX as u64 / 1_000_000_000 {
             bail!("LOGNARA_SERIES_COMPACT_QUIET_SECONDS is too large");

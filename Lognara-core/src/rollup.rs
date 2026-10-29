@@ -350,7 +350,19 @@ impl Worker {
         self.schedule_nightly();
         let snapshot = self.core.snapshot();
         let now = now_nanos() as i128;
-        for day in candidate_days(&snapshot.series_files)? {
+        let days = candidate_days(&snapshot.series_files)?;
+        // Сутки без файлов точек остаются только после срока хранения метрик: агрегат снимается.
+        let keys: HashSet<String> = days.iter().map(|day| key(*day)).collect();
+        let orphan = self
+            .files
+            .iter()
+            .find(|file| !keys.contains(&file.meta.day))
+            .map(|file| file.meta.day.clone());
+        if let Some(orphan) = orphan {
+            self.replace(&orphan, None)?;
+            return Ok(Step::Built);
+        }
+        for day in days {
             let key = key(day);
             let force = self.forced.contains(&key);
             let digest = fingerprint(&snapshot.series_files, window(day));
@@ -388,13 +400,6 @@ impl Worker {
         target: Option<u32>,
         digest: String,
     ) -> Result<()> {
-        let key = key(day);
-        let ids: Vec<String> = self
-            .files
-            .iter()
-            .filter(|file| file.meta.day == key)
-            .map(|file| file.meta.id.clone())
-            .collect();
         let new = match target {
             Some(resolution) => {
                 let batches = self
@@ -404,6 +409,17 @@ impl Worker {
             }
             None => None,
         };
+        self.replace(&key(day), new)
+    }
+
+    /// Публикует замену агрегатов суток `key`: старые становятся deleting, новый - ready.
+    fn replace(&mut self, key: &str, new: Option<RollupFile>) -> Result<()> {
+        let ids: Vec<String> = self
+            .files
+            .iter()
+            .filter(|file| file.meta.day == key)
+            .map(|file| file.meta.id.clone())
+            .collect();
         self.core
             .journal
             .catalog

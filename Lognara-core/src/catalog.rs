@@ -336,6 +336,16 @@ impl Catalog {
         Ok(())
     }
 
+    /// Срок хранения метрик: файлы точек переходят в deleting одной транзакцией.
+    pub fn mark_series_deleting(&mut self, ids: &[String]) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        for id in ids {
+            transaction.execute("UPDATE series_files SET state='deleting' WHERE id=?1", [id])?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn finish_deleting(&self, id: &str) -> Result<()> {
         self.connection.execute(
             "DELETE FROM segments WHERE id=?1 AND state='deleting'",

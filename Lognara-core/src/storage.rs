@@ -376,7 +376,11 @@ impl Materializer {
             series_files.push(Arc::new(SeriesFile { meta, path }));
         }
         let registered: HashSet<_> = series_files.iter().map(|file| file.path.clone()).collect();
-        for day in nested_directories(&series_root, 3)? {
+        // Файлы лежат в каталогах дней, слитые по месяцам - прямо в каталоге месяца.
+        let directories = nested_directories(&series_root, 2)?
+            .into_iter()
+            .chain(nested_directories(&series_root, 3)?);
+        for day in directories {
             let mut removed = false;
             for entry in fs::read_dir(&day)? {
                 let path = entry?.path();
@@ -791,6 +795,7 @@ impl Materializer {
             self.generation += 1;
             self.publish()?;
         }
+        self.retain_series(now)?;
         self.finish_deletions()?;
         let first_retained = self
             .closed
@@ -891,29 +896,18 @@ impl Materializer {
         self.finish_series_deletions()
     }
 
-    /// Сливает файлы серий одного дня, если все они старше порога тишины; за проход один день.
+    /// Сливает файлы серий одной группы за проход: сначала день, все файлы которого старше
+    /// порога тишины, затем прошедший месяц UTC в один файл `metrics/YYYY/MM/<id>.parquet`.
     fn compact(&mut self) -> Result<()> {
         let quiet = self.core.journal.config.series_compact_quiet.as_nanos() as i64;
-        let cutoff = now_nanos().saturating_sub(quiet);
-        let mut days: BTreeMap<&str, Vec<&Arc<SeriesFile>>> = BTreeMap::new();
-        for file in &self.series_files {
-            let (day, _) = file
-                .meta
-                .path
-                .rsplit_once('/')
-                .context("series file outside day directory")?;
-            days.entry(day).or_default().push(file);
-        }
-        // Ключи упорядочены по строке YYYY/MM/DD: первым идёт самый старый день.
-        let Some((day, files)) = days.into_iter().find(|(_, files)| {
-            files.len() >= 2 && files.iter().all(|file| file.meta.closed_at < cutoff)
-        }) else {
+        let now = now_nanos();
+        let Some((directory, sources)) =
+            series_group(&self.series_files, now.saturating_sub(quiet), now)?
+        else {
             return Ok(());
         };
-        let day = day.to_owned();
-        let sources: Vec<Arc<SeriesFile>> = files.into_iter().cloned().collect();
         let id = Uuid::now_v7().to_string();
-        let relative = format!("{day}/{id}.parquet");
+        let relative = format!("{directory}/{id}.parquet");
         let path = self.core.journal.config.data_dir.join(&relative);
         let mut writer = columns::ParquetWriter::create(&path, series::schema())?;
         for source in &sources {
@@ -958,6 +952,33 @@ impl Materializer {
             .metrics
             .series_compactions
             .fetch_add(1, Ordering::Relaxed);
+        self.core.wake_rollups();
+        Ok(())
+    }
+
+    /// Срок хранения метрик: файлы, все точки которых старше срока, исключаются из снимков
+    /// и удаляются после освобождения; агрегаты их суток снимает поток lognara-rollups.
+    fn retain_series(&mut self, now: i64) -> Result<()> {
+        let Some(retention) = self.core.journal.config.series_retention else {
+            return Ok(());
+        };
+        let before = now.saturating_sub(retention.as_nanos() as i64);
+        let (expired, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.series_files)
+            .into_iter()
+            .partition(|file| file.meta.max_timestamp < before);
+        self.series_files = kept;
+        if expired.is_empty() {
+            return Ok(());
+        }
+        let ids: Vec<String> = expired.iter().map(|file| file.meta.id.clone()).collect();
+        self.core
+            .journal
+            .catalog
+            .lock()
+            .unwrap()
+            .mark_series_deleting(&ids)?;
+        self.retired_series.extend(expired);
+        self.publish()?;
         self.core.wake_rollups();
         Ok(())
     }
@@ -1036,4 +1057,117 @@ pub(crate) fn nested_directories(root: &Path, depth: usize) -> Result<Vec<PathBu
         level = next;
     }
     Ok(level)
+}
+
+/// Группа файлов серий для слияния и её каталог: самый старый день (`metrics/YYYY/MM/DD`)
+/// из двух и более файлов, иначе самый старый прошедший месяц UTC (`metrics/YYYY/MM`).
+/// Все файлы группы должны быть закрыты раньше `cutoff`. Месяц берётся из пути, то есть
+/// по времени поступления, как и день.
+fn series_group(
+    files: &[Arc<SeriesFile>],
+    cutoff: i64,
+    now: i64,
+) -> Result<Option<(String, Vec<Arc<SeriesFile>>)>> {
+    let mut days: BTreeMap<&str, Vec<&Arc<SeriesFile>>> = BTreeMap::new();
+    let mut months: BTreeMap<&str, Vec<&Arc<SeriesFile>>> = BTreeMap::new();
+    for file in files {
+        let (directory, _) = file
+            .meta
+            .path
+            .rsplit_once('/')
+            .context("series file outside metrics directory")?;
+        // metrics/YYYY/MM - 15 байт; каталог дня длиннее, файл месяца лежит прямо в нём.
+        let month = directory.get(..15).context("series file outside month")?;
+        if directory.len() > month.len() {
+            days.entry(directory).or_default().push(file);
+        }
+        months.entry(month).or_default().push(file);
+    }
+    let date = OffsetDateTime::from_unix_timestamp_nanos(now as i128)?;
+    let current = format!("metrics/{:04}/{:02}", date.year(), date.month() as u8);
+    let ready = |files: &Vec<&Arc<SeriesFile>>| {
+        files.len() >= 2 && files.iter().all(|file| file.meta.closed_at < cutoff)
+    };
+    // Ключи упорядочены по строке пути: первым идёт самый старый день или месяц.
+    let group = days
+        .into_iter()
+        .find(|(_, files)| ready(files))
+        .or_else(|| {
+            months
+                .into_iter()
+                .find(|(month, files)| *month < current.as_str() && ready(files))
+        });
+    Ok(
+        group
+            .map(|(directory, files)| (directory.to_owned(), files.into_iter().cloned().collect())),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(path: &str, closed_at: i64) -> Arc<SeriesFile> {
+        Arc::new(SeriesFile {
+            meta: SeriesFileMeta {
+                version: 1,
+                id: path.into(),
+                path: path.into(),
+                rows: 1,
+                min_timestamp: 0,
+                max_timestamp: 0,
+                closed_at,
+            },
+            path: path.into(),
+        })
+    }
+
+    fn selected(files: &[Arc<SeriesFile>], cutoff: i64, now: i64) -> Option<(String, Vec<String>)> {
+        series_group(files, cutoff, now)
+            .unwrap()
+            .map(|(directory, files)| {
+                (
+                    directory,
+                    files.iter().map(|file| file.meta.id.clone()).collect(),
+                )
+            })
+    }
+
+    #[test]
+    fn series_group_merges_days_first_then_only_past_months() {
+        // 2026-10-15T00:00:00Z
+        let now = 1_792_022_400_000_000_000;
+        let files = vec![
+            file("metrics/2026/09/30/a.parquet", 1),
+            file("metrics/2026/09/02/b.parquet", 1),
+            file("metrics/2026/10/01/c.parquet", 1),
+            file("metrics/2026/10/01/d.parquet", 1),
+        ];
+        assert_eq!(
+            selected(&files, 10, now),
+            Some((
+                "metrics/2026/10/01".into(),
+                vec![
+                    "metrics/2026/10/01/c.parquet".into(),
+                    "metrics/2026/10/01/d.parquet".into()
+                ]
+            ))
+        );
+        // Дни слиты: прошедший сентябрь собирается в файл месяца, текущий октябрь - нет.
+        let files = vec![
+            file("metrics/2026/09/30/a.parquet", 1),
+            file("metrics/2026/09/02/b.parquet", 1),
+            file("metrics/2026/10/01/c.parquet", 1),
+            file("metrics/2026/10/02/d.parquet", 1),
+        ];
+        assert_eq!(selected(&files, 10, now).unwrap().0, "metrics/2026/09");
+        assert!(selected(&files[2..], 10, now).is_none());
+        // Поздний файл в уже слитом месяце сливается с файлом месяца; тишина не прошла - ждать.
+        let files = vec![
+            file("metrics/2026/09/m.parquet", 1),
+            file("metrics/2026/09/30/late.parquet", 20),
+        ];
+        assert!(selected(&files, 10, now).is_none());
+        assert_eq!(selected(&files, 30, now).unwrap().1.len(), 2);
+    }
 }

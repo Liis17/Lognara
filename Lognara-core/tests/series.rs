@@ -513,3 +513,56 @@ fn crash_after_mark_keeps_only_the_merged_file_after_restart() {
     let catalog = Catalog::open(&dir.path().join("catalog.sqlite")).unwrap();
     assert!(catalog.series_files("deleting").unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn series_retention_removes_old_files_and_their_rollups() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = config(dir.path());
+    cfg.segment_rows = 1;
+    let recent = lognara_core::model::format_timestamp(now_nanos());
+    let core = Core::open(cfg.clone()).unwrap();
+    core.journal
+        .accept(&batch(&[
+            Some(report_at("2020-01-01T10:00:00Z", 1)),
+            Some(report_at(&recent, 2)),
+        ]))
+        .unwrap();
+    // Сутки 2020-01-01 старше LOGNARA_SERIES_HOURLY_DAYS и получают агрегат.
+    wait(|| {
+        core.snapshot().series_files.len() == 2
+            && core
+                .rollups
+                .read()
+                .unwrap()
+                .iter()
+                .any(|file| file.meta.day == "2020-01-01")
+    });
+    let old = core
+        .snapshot()
+        .series_files
+        .iter()
+        .find(|file| file.meta.max_timestamp < REPORT_NANOS)
+        .unwrap()
+        .path
+        .clone();
+    core.shutdown().unwrap();
+    drop(core);
+    // Файл точек месяца без строки в каталоге удаляется при старте.
+    let stray = dir.path().join("metrics/2020/01/stray.parquet.tmp");
+    std::fs::create_dir_all(stray.parent().unwrap()).unwrap();
+    std::fs::write(&stray, b"partial").unwrap();
+    cfg.series_retention = Some(Duration::from_secs(86_400));
+    let core = Core::open(cfg.clone()).unwrap();
+    assert!(!stray.exists());
+    wait(|| {
+        core.snapshot().series_files.len() == 1
+            && core.rollups.read().unwrap().is_empty()
+            && !old.exists()
+    });
+    assert!(core.snapshot().series_files[0].meta.max_timestamp > REPORT_NANOS);
+    core.shutdown().unwrap();
+    drop(core);
+    let core = Core::open(cfg).unwrap();
+    assert_eq!(core.snapshot().series_files.len(), 1);
+    core.shutdown().unwrap();
+}
