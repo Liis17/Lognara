@@ -204,12 +204,14 @@ impl DiskCatalog {
         let connection = Connection::open(path)?;
         connection.busy_timeout(Duration::from_secs(1))?;
         let version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        ensure!(version <= 2, "unsupported patterns schema");
-        if version < 2 {
-            // Производные данные v1 без проблем пересобираются из сохранённых raw событий.
-            connection
-                .execute_batch("DROP TABLE IF EXISTS progress; DROP TABLE IF EXISTS patterns;")?;
-        }
+        ensure!(version <= 3, "unsupported patterns schema");
+        // Новые правила объединяют старые ID; производные метаданные пересобираются
+        // из raw, иначе накопленные временные метки продолжат занимать весь каталог.
+        let reset = if version < 3 {
+            "DROP TABLE IF EXISTS progress; DROP TABLE IF EXISTS patterns; DROP TABLE IF EXISTS issues;"
+        } else {
+            ""
+        };
         let page_size: usize = connection.query_row("PRAGMA page_size", [], |row| row.get(0))?;
         let page_count: usize = connection.query_row("PRAGMA page_count", [], |row| row.get(0))?;
         ensure!(
@@ -221,14 +223,15 @@ impl DiskCatalog {
             "max_page_count",
             config.pattern_catalog_bytes / page_size,
         )?;
-        connection.execute_batch(
-            "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;
+        connection.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;")?;
+        connection.execute_batch(&format!(
+            "BEGIN IMMEDIATE; {reset}
             CREATE TABLE IF NOT EXISTS progress(singleton INTEGER PRIMARY KEY CHECK(singleton=1), checkpoint INTEGER NOT NULL, as_of INTEGER NOT NULL, history_from INTEGER, complete INTEGER NOT NULL);
             INSERT OR IGNORE INTO progress VALUES(1,0,0,NULL,1);
             CREATE TABLE IF NOT EXISTS patterns(id TEXT PRIMARY KEY, metadata TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS issues(id TEXT PRIMARY KEY, metadata TEXT NOT NULL);
-            PRAGMA user_version=2;",
-        )?;
+            PRAGMA user_version=3; COMMIT;",
+        ))?;
         let mut state = connection.query_row(
             "SELECT checkpoint,as_of,history_from,complete FROM progress WHERE singleton=1",
             [],
@@ -348,7 +351,10 @@ impl DiskCatalog {
                 if known.len() + issues.len() > config.pattern_max_entries
                     || next.bytes > config.pattern_catalog_bytes
                 {
-                    return Err(anyhow::anyhow!("pattern catalog capacity exhausted").into());
+                    return Err(anyhow::anyhow!(
+                        "pattern catalog capacity exhausted: patterns={}, issues={}, entries_limit={}, estimated_bytes={}, bytes_limit={}",
+                        known.len(), issues.len(), config.pattern_max_entries, next.bytes, config.pattern_catalog_bytes
+                    ).into());
                 }
             }
         }

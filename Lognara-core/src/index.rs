@@ -154,14 +154,21 @@ impl ActiveIndex {
     }
 
     pub fn publish(&mut self) -> Result<Searcher> {
-        self.writer.commit()?;
+        self.commit()?;
         self.reader.reload()?;
         Ok(self.reader.searcher())
     }
 
     pub fn finish(mut self) -> Result<()> {
-        self.writer.commit()?;
+        self.commit()?;
         self.writer.wait_merging_threads()?;
+        Ok(())
+    }
+
+    fn commit(&mut self) -> Result<()> {
+        let mut commit = self.writer.prepare_commit()?;
+        commit.set_payload(crate::pattern_identity::INDEX_PAYLOAD);
+        commit.commit()?;
         Ok(())
     }
 }
@@ -207,6 +214,10 @@ impl IndexCache {
 fn open(segment: &Path, rows: usize) -> Result<IndexReader> {
     let index = Index::open_in_dir(segment.join("index"))?;
     ensure!(index.schema() == schema(), "incompatible index schema");
+    ensure!(
+        index.load_metas()?.payload.as_deref() == Some(crate::pattern_identity::INDEX_PAYLOAD),
+        "incompatible pattern normalization"
+    );
     ensure!(
         index.validate_checksum()?.is_empty(),
         "index checksum mismatch"

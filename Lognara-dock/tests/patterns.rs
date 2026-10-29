@@ -228,6 +228,37 @@ async fn search_excludes_hidden_patterns_unless_requested() {
 }
 
 #[tokio::test]
+async fn structured_variable_types_survive_search_and_details_proxy() {
+    let (t, liis, _, core) = setup().await;
+    for kind in ["timestamp", "number"] {
+        let mut search = response(&[&id(1)]);
+        let part = json!({"kind": "variable", "name": format!("{kind}_1"), "variable_type": kind});
+        search["patterns"][0]["parts"][1] = part;
+        *core.reply.lock().unwrap() = (StatusCode::OK, search.to_string());
+        let reply = call(
+            &t,
+            Method::POST,
+            "/api/patterns/search",
+            &liis,
+            Some(json!({"from": FROM, "to": TO})),
+        )
+        .await;
+        assert_eq!((reply.status, reply.body), (StatusCode::OK, search.clone()));
+        let details = json!({"as_of": TO, "pattern": search["patterns"][0], "variables": [{"name": format!("{kind}_1"), "variable_type": kind, "total": 3, "values": [{"value": "42", "count": 3}], "other_count": 0}], "examples": []});
+        *core.reply.lock().unwrap() = (StatusCode::OK, details.to_string());
+        let reply = call(
+            &t,
+            Method::POST,
+            &format!("/api/patterns/{}/details", id(1)),
+            &liis,
+            Some(json!({"from": FROM, "to": TO})),
+        )
+        .await;
+        assert_eq!((reply.status, reply.body), (StatusCode::OK, details));
+    }
+}
+
+#[tokio::test]
 async fn details_proxy_and_pattern_specific_errors() {
     let (t, liis, _, core) = setup().await;
     let path = format!("/api/patterns/{}/details", id(7));
