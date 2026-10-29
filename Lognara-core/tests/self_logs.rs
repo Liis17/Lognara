@@ -127,11 +127,18 @@ async fn diagnostics_are_authorized_durable_searchable_and_deduplicated() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     assert_eq!(core.snapshot().watermark, 1);
-    let (_, found) = call(&router, "POST", "/v1/logs/search", "query", json!({
-        "from":lognara_core::model::format_timestamp(timestamp - 1_000_000_000),
-        "to":lognara_core::model::format_timestamp(timestamp + 1_000_000_000),
-        "filters":{"service":["lognara-relay"]},"limit":10
-    })).await;
+    let (_, found) = call(
+        &router,
+        "POST",
+        "/v1/logs/search",
+        "query",
+        json!({
+            "from":lognara_core::model::format_timestamp(timestamp - 1_000_000_000),
+            "to":lognara_core::model::format_timestamp(timestamp + 1_000_000_000),
+            "filters":{"service":["lognara-relay"]},"limit":10
+        }),
+    )
+    .await;
     assert_eq!(found["events"].as_array().unwrap().len(), 1);
     assert_eq!(found["events"][0]["message"], "core unavailable");
     assert_eq!(

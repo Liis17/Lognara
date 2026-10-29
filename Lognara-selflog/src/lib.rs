@@ -188,6 +188,41 @@ fn batches(records: &[Record]) -> io::Result<Vec<(Vec<u8>, u64)>> {
     result.extend(batches(right)?);
     Ok(result)
 }
+
+// Preserve rejected diagnostics before advancing the delivery queue. This archive
+// is bounded separately and never deletes old records to make space.
+fn archive_rejected(dir: &Path, entry: &lognara_spool::Entry, body: &[u8]) -> io::Result<()> {
+    let archive = dir.join("rejected");
+    std::fs::create_dir_all(&archive)?;
+    std::fs::File::open(dir)?.sync_all()?;
+    let name = format!("{:020}-{:020}.json", entry.seq, entry.part);
+    match std::fs::File::open(archive.join(&name)) {
+        Ok(file) => {
+            file.sync_all()?;
+            let mut saved = Vec::new();
+            file.take(MAX_BODY as u64 + 1).read_to_end(&mut saved)?;
+            if saved == body {
+                std::fs::File::open(&archive)?.sync_all()?;
+                return Ok(());
+            }
+            return Err(io::Error::other("conflicting rejected self-log record"));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let (mut bytes, mut count) = (0u64, 0usize);
+    for file in std::fs::read_dir(&archive)? {
+        let file = file?;
+        if file.path().extension().is_some_and(|ext| ext == "json") {
+            bytes = bytes.saturating_add(file.metadata()?.len());
+            count += 1;
+        }
+    }
+    if count >= 4096 || bytes.saturating_add(body.len() as u64) > (8 << 20) {
+        return Err(io::Error::other("rejected self-log archive is full"));
+    }
+    lognara_spool::atomic_file(&archive, &name, body)
+}
 pub struct Worker {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -259,10 +294,24 @@ impl Collector {
                     self.capture.enabled.store(settings.enabled(self.capture.service), Ordering::Relaxed);
                 }
                 let mut busy = false;
+                let mut sender_alive = true;
                 let mut pending: Option<lognara_spool::Entry> = None;
                 loop {
                     let stop = stopping.load(Ordering::Acquire);
-                    if let Ok(reply) = results.try_recv() {
+                    let reply = match results.try_recv() {
+                        Ok(reply) => Some(reply),
+                        Err(mpsc::TryRecvError::Empty) => None,
+                        Err(mpsc::TryRecvError::Disconnected) => {
+                            if sender_alive {
+                                eprintln!("self-log sender stopped unexpectedly; capture continues, queued logs require restart for delivery");
+                                sender_alive = false;
+                                busy = false;
+                                pending = None;
+                            }
+                            None
+                        }
+                    };
+                    if let Some(reply) = reply {
                         busy = false;
                         match reply {
                             Reply::Settings(Ok(current)) => {
@@ -279,10 +328,19 @@ impl Collector {
                             Reply::Settings(Err(_)) => {},
                             Reply::Sent(result) => {
                                 let entry = pending.take().expect("one outstanding delivery");
-                                if result.as_ref().is_err_and(|error| error.kind() == io::ErrorKind::InvalidData) {
-                                    self.capture.dropped.fetch_add(entry.events, Ordering::Relaxed);
-                                }
-                                if result.is_ok() || result.as_ref().is_err_and(|error| error.kind() == io::ErrorKind::InvalidData) {
+                                let archived = if result.as_ref().is_err_and(|error| error.kind() == io::ErrorKind::InvalidData) {
+                                    let saved = queue.as_ref().ok_or_else(|| io::Error::other("self-log queue unavailable"))
+                                        .and_then(|queue| queue.read(&entry, MAX_BODY).map_err(io::Error::other))
+                                        .and_then(|body| archive_rejected(&dir, &entry, &body));
+                                    match saved {
+                                        Ok(()) => {
+                                            eprintln!("self-log batch permanently rejected; {} records retained in {}", entry.events, dir.join("rejected").display());
+                                            true
+                                        }
+                                        Err(error) => { eprintln!("self-log rejection could not be archived; queue retained: {error}"); false }
+                                    }
+                                } else { false };
+                                if result.is_ok() || archived {
                                     if let Some(active) = queue.as_mut()
                                         && let Err(error) = active.ack(&[entry]) {
                                         eprintln!("self-log acknowledgement failed; reopening queue: {error}");
@@ -317,16 +375,16 @@ impl Collector {
                         if !saved { self.capture.dropped.fetch_add(records.len() as u64, Ordering::Relaxed); }
                     }
                     let dropped = self.capture.dropped.swap(0, Ordering::Relaxed);
-                    if dropped != 0 { eprintln!("self-log capture dropped {dropped} records (queue limit, rejection or disk error)"); }
+                    if dropped != 0 { eprintln!("self-log capture dropped {dropped} records (queue limit or disk error)"); }
                     if stop {
                         if records.is_empty() { break; }
                         continue;
                     }
-                    if !busy && Instant::now() >= poll {
+                    if sender_alive && !busy && Instant::now() >= poll {
                         if jobs.send(Job::Settings).is_err() { break; }
                         busy = true;
                         poll = Instant::now() + Duration::from_secs(10);
-                    } else if !busy && Instant::now() >= retry
+                    } else if sender_alive && !busy && Instant::now() >= retry
                         && let Some(active) = queue.as_mut()
                         && let Some(entry) = active.entries().front().cloned() {
                             match active.read(&entry, MAX_BODY) {
@@ -336,16 +394,8 @@ impl Collector {
                                     busy = true;
                                 }
                                 Err(error) => {
-                                    eprintln!("self-log queue read failed: {error}");
-                                    let permanent = match &error {
-                                        lognara_spool::Error::TooLarge => true,
-                                        lognara_spool::Error::Io(error) => matches!(error.kind(), io::ErrorKind::InvalidData | io::ErrorKind::NotFound),
-                                        _ => false,
-                                    };
-                                    if permanent {
-                                        self.capture.dropped.fetch_add(entry.events, Ordering::Relaxed);
-                                        if active.ack(&[entry]).is_err() { queue = None; }
-                                    } else { queue = None; }
+                                    eprintln!("self-log queue read failed; persisted files retained: {error}");
+                                    queue = None;
                                     reopen = Instant::now() + Duration::from_secs(5);
                                     retry = reopen;
                                 }
@@ -590,6 +640,72 @@ mod tests {
         wait_until(|| groups(dir.path()) == 0);
         worker.stop();
         assert!(received.try_recv().is_err());
+        let archived: Vec<_> = std::fs::read_dir(dir.path().join("rejected"))
+            .unwrap()
+            .collect();
+        assert_eq!(archived.len(), 1);
+        assert_eq!(
+            std::fs::read(archived[0].as_ref().unwrap().path()).unwrap(),
+            first
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn rejected_archive_is_idempotent_and_never_evicts_records_at_its_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue =
+            lognara_spool::Queue::open_limited(dir.path(), 32 << 20, 100_000, 4096).unwrap();
+        let body = b"[]";
+        queue.append_group([Ok((body.to_vec(), 1))]).unwrap();
+        let first = queue.entries().front().unwrap().clone();
+        archive_rejected(dir.path(), &first, body).unwrap();
+        archive_rejected(dir.path(), &first, body).unwrap();
+        assert_eq!(
+            std::fs::read_dir(dir.path().join("rejected"))
+                .unwrap()
+                .count(),
+            1
+        );
+        let filler = std::fs::File::create(dir.path().join("rejected/filler.json")).unwrap();
+        filler.set_len(8 << 20).unwrap();
+        queue.append_group([Ok((body.to_vec(), 1))]).unwrap();
+        let second = queue.entries().back().unwrap();
+        assert!(archive_rejected(dir.path(), second, body).is_err());
+        assert_eq!(queue.events(), 2);
+        assert_eq!(queue.read(&first, MAX_BODY).unwrap(), body);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn sender_panic_preserves_capture_and_pending_delivery_for_restart() {
+        struct Sink(mpsc::Sender<()>);
+        impl Destination for Sink {
+            fn settings(&mut self) -> io::Result<Settings> {
+                Ok(Settings::default())
+            }
+            fn send(&mut self, _: &[u8]) -> io::Result<()> {
+                self.0.send(()).unwrap();
+                panic!("injected sender failure");
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let collector = Collector::new("lognara-core");
+        let subscriber = Arc::new(tracing_subscriber::registry().with(collector.layer()));
+        tracing::subscriber::with_default(
+            subscriber.clone(),
+            || tracing::error!(target: "lognara_core", "first"),
+        );
+        let (started, ready) = mpsc::channel();
+        let worker = collector.start(dir.path(), Sink(started)).unwrap();
+        ready.recv_timeout(Duration::from_secs(5)).unwrap();
+        tracing::subscriber::with_default(
+            subscriber,
+            || tracing::error!(target: "lognara_core", "after sender failure"),
+        );
+        wait_until(|| groups(dir.path()) == 2);
+        worker.stop();
+        let queue =
+            lognara_spool::Queue::open_limited(dir.path(), 32 << 20, 100_000, 4096).unwrap();
+        assert_eq!(queue.events(), 2);
     }
     #[test]
     fn relay_remote_uses_sibling_endpoints_and_classifies_http_responses() {
