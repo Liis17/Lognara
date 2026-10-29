@@ -201,3 +201,7 @@ struct LogId(Uuid); struct TraceId([u8; 16]); struct SpanId([u8; 8]);  // bin 16
 Unit/e2e: неизвестный токен отклоняется до тела, добавление и отзыв в фоне, кеш при рестарте и недоступном core, отсутствие кеша закрывает приём, сбой записи кеша не сохраняет отозванные права в памяти.
 
 `LOGNARA_RELAY_MEMORY_MB` заменяет прежний лимит резервов в байтах. `Config::memory_mb` — RAM всего процесса/контейнера; `Config::reserve_bytes(): Option<usize>` вычисляет `MB * MiB - RUNTIME_RESERVE` с checked arithmetic. По умолчанию резерв равен прежним 1792 MiB.
+
+## Собственные логи
+
+Встроенный сбор, управление из Dock и ограничения доставки описаны в [[Delivery/SelfLogs]].

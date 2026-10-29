@@ -48,3 +48,5 @@ Job `publish-images` в `.github/workflows/ci.yml` при push в `master` по�
 - [[Repository/CI]] — проверки, предшествующие публикации.
 - [[Core/LognaraCore]], [[Relay/LognaraRelay]], [[Dock/LognaraDock]] — поставляемые сервисы.
 - [[Agent/LognaraAgent]] — встраиваемый в контейнер приложения агент.
+
+Общий сборщик [[Delivery/SelfLogs]] включён во все три образа вместе с Lognara-spool. Все Dockerfile используют корень репозитория как build context, включая dock.

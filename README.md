@@ -136,7 +136,7 @@ Core, relay и dock публикуются из `master` после CI в `docke
 ```sh
 docker build -f Lognara-core/Dockerfile -t lognara-core .
 docker build -f Lognara-relay/Dockerfile -t lognara-relay .
-docker build -f Lognara-dock/Dockerfile -t lognara-dock Lognara-dock
+docker build -f Lognara-dock/Dockerfile -t lognara-dock .
 ```
 
 ### Центральный сервер: core + dock
@@ -255,3 +255,9 @@ LICENSE                   MIT
 ## Лицензия
 
 [MIT](LICENSE)
+
+## Собственные логи Lognara
+
+Core, dock и relay автоматически собирают свои сообщения в сервисы `lognara-core`, `lognara-dock` и `lognara-relay` (backend `lognara`). В Dock откройте «Настройки → Собственные логи Lognara»: переключатели действуют для всех экземпляров компонента. Там же есть ссылка на поиск собственных логов.
+
+Агент в контейнер устанавливать не нужно; существующие серверные токены и тома данных используются автоматически. Сначала обновляйте core, затем dock и relay. При временной недоступности core сохраняется ограниченная дисковая очередь; новый сбор после переполнения может терять события. Консольные логи сохраняются. Контракты, квоты и поведение отключения: [собственные логи](Obsidian/LognaraVault/Delivery/SelfLogs.md).

@@ -30,7 +30,7 @@ Job `changes` использует `dorny/paths-filter@v4` после checkout �
 
 ## Проверки
 
-- Job `rust`: динамическая матрица затронутых crate из `Lognara-agent`, `Lognara-relay`, `Lognara-spool`, `Lognara-core`, `Lognara-dock`; при пустом списке job пропускается. Rust stable с rustfmt и Clippy. Проверяет форматирование, все targets/features через Clippy с `-D warnings`, обычную сборку без тестовых features и весь набор unit, интеграционных, e2e и doc-тестов с `--all-features`. Для сборки, Clippy и тестов используется `--locked`.
+- Job `rust`: динамическая матрица затронутых crate из `Lognara-agent`, `Lognara-relay`, `Lognara-spool`, `Lognara-core`, `Lognara-selflog`, `Lognara-dock`; при пустом списке job пропускается. Rust stable с rustfmt и Clippy. Проверяет форматирование, все targets/features через Clippy с `-D warnings`, обычную сборку без тестовых features и весь набор unit, интеграционных, e2e и doc-тестов с `--all-features`. Для сборки, Clippy и тестов используется `--locked`.
 - Feature `crash-tests` у core активна в тестах, но не в обычной сборке.
 - В матрице agent и relay дополнительно запускаются `tests/check-memory-profile.py`: нагрузочные тесты, пропускаемые обычным `cargo test`, с ограничением пикового RSS 256 MiB и 2048 MiB соответственно.
 - Для agent также запускаются `tests/test_release_agent.py`: изолированные Git-истории для changelog, выбора предыдущего релиза и latest, первого выпуска и повторной публикации. Эти проверки выполняются и в PR.
@@ -56,3 +56,5 @@ Cargo ограничен двумя параллельными заданиям�
 - Используется в: [[Architecture]], [[Repository/RootFiles]], `README.md`.
 
 Изменение `Lognara-dock/web/public/metrics-nginx.json` также запускает проверки Core: его тесты проверяют импортируемые nginx-регулярки тем же Rust regex, который использует извлечение.
+
+Изменения `Lognara-selflog/**` выбирают проверки общего сборщика, core, relay и dock и выпуск всех трёх образов. Spool также используется selflog и dock; все Dockerfile используют корневой build context.

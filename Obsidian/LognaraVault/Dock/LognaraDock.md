@@ -196,3 +196,7 @@ API GET/POST `/api/relays`, `/api/agents`, DELETE по `/{id}` и POST `/api/age
 | `access::delete_agent(State<AppState>, AuthUser, Path<i64>): Result<StatusCode, ApiError>` | Проксирует удаление агента. |
 
 Обработчики принимают JSON/Path как Result и возвращают JSON invalid_request вместо plain-text rejection. tests/access.rs проверяет admin Bearer/path/body, no-store, сессию, Origin, 409/404 и 502.
+
+## Собственные логи
+
+Встроенный сбор, управление из Dock и ограничения доставки описаны в [[Delivery/SelfLogs]].
