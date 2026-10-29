@@ -118,7 +118,7 @@ impl PatternCatalog {
             .name("lognara-patterns".into())
             .spawn(move || {
                 if let Err(error) = Self::run(&core) {
-                    tracing::error!(%error, "pattern catalog unavailable; ingestion and ordinary queries remain available");
+                    tracing::error!(error = %format_args!("{error:#}"), "pattern catalog unavailable; ingestion and ordinary queries remain available");
                     let mut state = (*core.patterns.state.read().unwrap().clone()).clone();
                     state.failed = true;
                     *core.patterns.state.write().unwrap() = Arc::new(state);
