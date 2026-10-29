@@ -243,15 +243,7 @@ fn rebuild(segment: &Path, memory: usize) -> Result<()> {
     if temp.exists() {
         fs::remove_dir_all(&temp)?;
     }
-    let mut writer = ActiveIndex::create(&temp, memory)?;
-    let mut row_id = 0;
-    for batch in columns::read_all(&segment.join("logs.parquet"))? {
-        for row in columns::decode(&batch)? {
-            writer.add(&row, row_id)?;
-            row_id += 1;
-        }
-    }
-    writer.finish()?;
+    build(&segment.join("logs.parquet"), &temp, memory, &|| false)?;
     let path = segment.join("index");
     let old = segment.join("index-old");
     if old.exists() {
@@ -266,4 +258,27 @@ fn rebuild(segment: &Path, memory: usize) -> Result<()> {
         fs::remove_dir_all(old)?;
     }
     Ok(())
+}
+
+/// Строит индекс Parquet-файла в `dir`; row_id - позиция строки в файле.
+/// Читает по одной пачке; false - `stop` прервал сборку, индекс неполон.
+pub(crate) fn build(
+    parquet: &Path,
+    dir: &Path,
+    memory: usize,
+    stop: &dyn Fn() -> bool,
+) -> Result<bool> {
+    let mut writer = ActiveIndex::create(dir, memory)?;
+    let mut row_id = 0;
+    for batch in columns::stream_batches(parquet)? {
+        if stop() {
+            return Ok(false);
+        }
+        for row in columns::decode(&batch?)? {
+            writer.add(&row, row_id)?;
+            row_id += 1;
+        }
+    }
+    writer.finish()?;
+    Ok(true)
 }

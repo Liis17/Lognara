@@ -250,10 +250,15 @@ pub struct ParquetWriter {
 
 impl ParquetWriter {
     pub fn create(path: &Path, schema: SchemaRef) -> Result<Self> {
+        Self::with_level(path, schema, 3)
+    }
+
+    /// Как `create`, но с заданным уровнем ZSTD (слияние старых данных пишет плотнее).
+    pub fn with_level(path: &Path, schema: SchemaRef, level: i32) -> Result<Self> {
         let temp = path.with_extension("parquet.tmp");
         let file = File::create(&temp)?;
         let props = WriterProperties::builder()
-            .set_compression(Compression::ZSTD(ZstdLevel::try_new(3)?))
+            .set_compression(Compression::ZSTD(ZstdLevel::try_new(level)?))
             .set_dictionary_enabled(true)
             .set_max_row_group_row_count(Some(16_384))
             .build();

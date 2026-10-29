@@ -113,6 +113,17 @@ impl PatternCatalog {
         self.view().ok().map(|state| state.checkpoint)
     }
 
+    /// Граница слияния сегментов: обработанный sequence, без границы при отказе каталога,
+    /// None до первичного прохода.
+    pub(crate) fn compaction_limit(&self) -> Option<u64> {
+        let state = self.state.read().unwrap();
+        if state.failed {
+            Some(u64::MAX)
+        } else {
+            state.ready.then_some(state.checkpoint)
+        }
+    }
+
     pub(crate) fn start(core: Arc<Core>) -> Result<JoinHandle<()>> {
         Ok(thread::Builder::new()
             .name("lognara-patterns".into())

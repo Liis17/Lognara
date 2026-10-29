@@ -19,6 +19,7 @@ pub struct Config {
     pub segment_rows: usize,
     pub segment_bytes: usize,
     pub segment_age: Duration,
+    pub segment_compact: Duration,
     pub refresh_interval: Duration,
     pub retention: Duration,
     pub series_compact_quiet: Duration,
@@ -75,6 +76,7 @@ impl Config {
             segment_rows: number("LOGNARA_SEGMENT_ROWS", 250_000)? as usize,
             segment_bytes: number("LOGNARA_SEGMENT_BYTES", 256 << 20)? as usize,
             segment_age: Duration::from_secs(number("LOGNARA_SEGMENT_SECONDS", 300)?),
+            segment_compact: Duration::from_secs(number("LOGNARA_SEGMENT_COMPACT_SECONDS", 86400)?),
             refresh_interval: Duration::from_millis(number("LOGNARA_REFRESH_MS", 1000)?),
             retention: Duration::from_secs(number("LOGNARA_RETENTION_SECONDS", 7 * 86400)?),
             series_compact_quiet: Duration::from_secs(number(
@@ -137,6 +139,12 @@ impl Config {
             || config.segment_age.as_secs() > i64::MAX as u64 / 1_000_000_000
         {
             bail!("query/refresh must be <= 3600 seconds; segment age must fit i64 nanoseconds");
+        }
+        // Тишина слияния равна двум segment age: обе длительности должны помещаться в i64 ns.
+        if config.segment_age.as_secs() > i64::MAX as u64 / 2_000_000_000
+            || config.segment_compact.as_secs() > i64::MAX as u64 / 1_000_000_000
+        {
+            bail!("LOGNARA_SEGMENT_SECONDS and LOGNARA_SEGMENT_COMPACT_SECONDS are too large");
         }
         Ok(config)
     }

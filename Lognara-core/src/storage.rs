@@ -22,7 +22,7 @@ use std::{
     fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock, RwLock, atomic::Ordering},
+    sync::{Arc, Mutex, OnceLock, RwLock, atomic::Ordering, mpsc::Receiver},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -97,6 +97,7 @@ pub struct Core {
     /// Готовые суточные агрегаты; публикует поток lognara-rollups.
     pub rollups: RwLock<Arc<Vec<Arc<RollupFile>>>>,
     rollup_worker: Mutex<Option<JoinHandle<()>>>,
+    compaction_worker: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Core {
@@ -136,8 +137,10 @@ impl Core {
             pattern_worker: Mutex::new(None),
             rollups: RwLock::new(Arc::new(vec![])),
             rollup_worker: Mutex::new(None),
+            compaction_worker: Mutex::new(None),
         });
-        let mut worker = Materializer::recover(core.clone())?;
+        let (requests, compactions) = std::sync::mpsc::channel();
+        let mut worker = Materializer::recover(core.clone(), compactions)?;
         while worker.next()? {}
         worker.publish()?;
         let handle = thread::Builder::new().name("lognara-segments".into()).spawn(move || {
@@ -152,6 +155,8 @@ impl Core {
         *core.pattern_worker.lock().unwrap() = Some(PatternCatalog::start(core.clone())?);
         let rollups = rollup::spawn(core.clone())?;
         *core.rollup_worker.lock().unwrap() = Some(rollups);
+        let compaction = crate::compaction::spawn(core.clone(), requests)?;
+        *core.compaction_worker.lock().unwrap() = Some(compaction);
         Ok(core)
     }
 
@@ -172,6 +177,13 @@ impl Core {
             handle.thread().unpark();
             if handle.join().is_err() {
                 tracing::error!("rollup worker panicked; rollups are derived and rebuilt on start");
+            }
+        }
+        let compaction = self.compaction_worker.lock().unwrap().take();
+        if let Some(handle) = compaction {
+            handle.thread().unpark();
+            if handle.join().is_err() {
+                tracing::error!("compaction worker panicked; source segments remain registered");
             }
         }
         let handle = self.worker.lock().unwrap().take();
@@ -289,10 +301,11 @@ struct Materializer {
     last_publish: Instant,
     last_retention: Instant,
     last_compaction: Instant,
+    compactions: Receiver<crate::compaction::Request>,
 }
 
 impl Materializer {
-    fn recover(core: Arc<Core>) -> Result<Self> {
+    fn recover(core: Arc<Core>, compactions: Receiver<crate::compaction::Request>) -> Result<Self> {
         let (position, _, _) = core.journal.catalog.lock().unwrap().progress()?;
         let mut closed = vec![];
         let root = core.journal.config.data_dir.join("segments");
@@ -327,6 +340,8 @@ impl Materializer {
             );
             closed.push(Arc::new(DiskSegment::new(meta, path)));
         }
+        // id слитого сегмента новее источников: порядок задаёт sequence, а не id.
+        closed.sort_by_key(|segment| segment.meta.first_sequence);
         let retained: HashSet<_> = closed.iter().map(|segment| segment.path.clone()).collect();
         for path in nested_directories(&root, 4)? {
             if !retained.contains(&path) {
@@ -403,6 +418,7 @@ impl Materializer {
             last_publish: Instant::now(),
             last_retention: Instant::now() - Duration::from_secs(60),
             last_compaction: Instant::now() - Duration::from_secs(60),
+            compactions,
         })
     }
 
@@ -430,6 +446,11 @@ impl Materializer {
             if self.last_compaction.elapsed() >= compact_every {
                 self.compact()?;
                 self.last_compaction = Instant::now();
+            }
+            while let Ok(request) = self.compactions.try_recv() {
+                let applied = self.replace_segments(request.merged, &request.sources);
+                let _ = request.reply.send(matches!(applied, Ok(true)));
+                applied?;
             }
             if !worked {
                 if self.core.journal.stopping.load(Ordering::Acquire) {
@@ -637,13 +658,7 @@ impl Materializer {
         segment.index.finish()?;
         segment.meta.closed_at = now_nanos();
         segment.meta.checkpoint = self.position;
-        let mut file = File::create(segment.path.join("meta.json.tmp"))?;
-        file.write_all(&serde_json::to_vec_pretty(&segment.meta)?)?;
-        file.sync_all()?;
-        fs::rename(
-            segment.path.join("meta.json.tmp"),
-            segment.path.join("meta.json"),
-        )?;
+        write_manifest(&segment.path, &segment.meta)?;
         sync_ancestors(
             &segment.path.join("index"),
             &self.core.journal.config.data_dir,
@@ -802,6 +817,54 @@ impl Materializer {
         Ok(())
     }
 
+    /// Заменяет источники слитым сегментом; false - источник уже удалён, новый каталог снят.
+    /// Видимые строки не меняются, поэтому поколение курсоров остаётся прежним.
+    fn replace_segments(
+        &mut self,
+        merged: DiskSegment,
+        sources: &[Arc<DiskSegment>],
+    ) -> Result<bool> {
+        let present = sources.iter().all(|source| {
+            self.closed
+                .iter()
+                .any(|segment| Arc::ptr_eq(segment, source))
+        });
+        if !present {
+            fs::remove_dir_all(&merged.path)?;
+            sync_dir(
+                merged
+                    .path
+                    .parent()
+                    .context("segment outside day directory")?,
+            )?;
+            return Ok(false);
+        }
+        let old_ids: Vec<String> = sources
+            .iter()
+            .map(|source| source.meta.id.clone())
+            .collect();
+        self.core
+            .journal
+            .catalog
+            .lock()
+            .unwrap()
+            .replace_segments(&merged.meta, &old_ids)?;
+        failpoint("segment_compact_after_mark");
+        self.closed
+            .retain(|segment| !sources.iter().any(|source| Arc::ptr_eq(segment, source)));
+        self.closed.push(Arc::new(merged));
+        self.closed
+            .sort_by_key(|segment| segment.meta.first_sequence);
+        self.retired.extend(sources.iter().cloned());
+        self.publish()?;
+        self.core
+            .journal
+            .metrics
+            .segment_compactions
+            .fetch_add(1, Ordering::Relaxed);
+        Ok(true)
+    }
+
     fn finish_deletions(&mut self) -> Result<()> {
         let mut waiting = vec![];
         for segment in self.retired.drain(..) {
@@ -933,8 +996,17 @@ fn estimated_bytes(row: &StoredEvent) -> usize {
         + row.event.request_id.as_ref().map_or(0, String::len)
 }
 
+/// Долговечно публикует meta.json сегмента через `.tmp`, fsync и rename.
+pub(crate) fn write_manifest(dir: &Path, meta: &SegmentMeta) -> Result<()> {
+    let mut file = File::create(dir.join("meta.json.tmp"))?;
+    file.write_all(&serde_json::to_vec_pretty(meta)?)?;
+    file.sync_all()?;
+    fs::rename(dir.join("meta.json.tmp"), dir.join("meta.json"))?;
+    Ok(())
+}
+
 /// Синхронизирует каталог и его предков до корня данных, чтобы новые имена пережили сбой.
-fn sync_ancestors(start: &Path, root: &Path) -> Result<()> {
+pub(crate) fn sync_ancestors(start: &Path, root: &Path) -> Result<()> {
     let mut parent = start.to_path_buf();
     loop {
         sync_dir(&parent)?;

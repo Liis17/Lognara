@@ -295,6 +295,24 @@ impl Catalog {
         Ok(())
     }
 
+    /// Слияние логов: новый сегмент становится ready, исходные - deleting, одной транзакцией.
+    pub fn replace_segments(&mut self, new: &SegmentMeta, old_ids: &[String]) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO segments VALUES(?1,?2,'ready')",
+            params![new.id, serde_json::to_string(new)?],
+        )?;
+        for id in old_ids {
+            let changed = transaction.execute(
+                "UPDATE segments SET state='deleting' WHERE id=?1 AND state='ready'",
+                [id],
+            )?;
+            ensure!(changed == 1, "compaction source {id} is not ready");
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Слияние серий: новый файл становится ready, исходные - deleting, одной транзакцией.
     pub fn replace_series(&mut self, new: &SeriesFileMeta, old_ids: &[String]) -> Result<()> {
         let transaction = self.connection.transaction()?;
