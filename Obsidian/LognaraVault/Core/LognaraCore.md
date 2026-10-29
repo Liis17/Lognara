@@ -62,7 +62,7 @@ WAL хранит одну версионированную запись на ф�
 | `columns::read_rows_with_budget(path, ids, remaining): Result<Vec<StoredEvent>>` | Читает выбранные строки по одной, проверяя бюджет до разбора attributes. |
 | `columns::charge_row(batch, row, remaining): Result<()>` | Резервирует память модели и JSON-ответа для строки Arrow/Parquet. |
 | `Catalog::publish(segment, series, names, environments, checkpoint, receipts, next_ids): Result<()>` | Атомарно фиксирует сегмент, файл точек, имена серий, окружения серий и дедупликацию. |
-| `IndexCache::searcher(segment: &Path, rows: usize): Result<Searcher>` | Открывает или восстанавливает индекс; LRU ограничен. |
+| `IndexCache::searcher(segment: &Path, rows: usize): Result<Searcher>` | Открывает или восстанавливает индекс; LRU (по умолчанию 256), полная проверка checksum один раз за процесс и повторно после `invalidate`. |
 
 Структура файлов: [[Core/LognaraCore-ProjectMap]].
 
@@ -137,7 +137,7 @@ Retention смотрит max core_received_at, исключает expired сег
 
 Relay с персональным токеном отправляет `POST /v1/heartbeat`; `Access::record_heartbeat(relay_id: i64, heartbeat: RelayHeartbeat): Result<usize>` одной транзакцией сохраняет последний отчёт relay и отчёты агентов с hash, зарегистрированным за ним. `heartbeats` в access.sqlite3 переживает рестарт; более старые отчёты не заменяют новые. Списки admin API добавляют heartbeat и as_of core; до первого отчёта поле может отсутствовать. Относительные возраста ограничены 100*365 днями, перевод в наносекунды выполняется через i128.
 
-`status::status(core: &Core): io::Result<Status>` обслуживает query-защищённый `GET /v1/status`: версия, ready, visible sequence/lag, WAL и лимит, число закрытых сегментов, Parquet, индексы включая активный сегмент, oldest event и настроенный retention, total/available filesystem data_dir. Lag публикации не является p95 доставки; размеры не означают квоту процесса. Snapshot удерживает сегменты от retention во время подсчёта. Полный [контракт инфраструктуры](../../../docs/DockInfrastructureContract.md).
+`status::status(core: &Core): io::Result<Status>` обслуживает query-защищённый `GET /v1/status`: версия, ready, visible sequence/lag, WAL и лимит, число закрытых сегментов, Parquet, индексы включая активный сегмент, oldest event и настроенный retention, total/available filesystem data_dir. Lag публикации не является p95 доставки; размеры не означают квоту процесса. Размеры закрытого сегмента считаются один раз (`DiskSegment::sizes`), повторно обходится только индекс активного сегмента. Snapshot удерживает сегменты от retention во время подсчёта. Полный [контракт инфраструктуры](../../../docs/DockInfrastructureContract.md).
 
 ## Метрики
 

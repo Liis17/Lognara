@@ -22,7 +22,7 @@ use std::{
     fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, RwLock, atomic::Ordering},
+    sync::{Arc, Mutex, OnceLock, RwLock, atomic::Ordering},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -34,6 +34,30 @@ use uuid::Uuid;
 pub struct DiskSegment {
     pub meta: SegmentMeta,
     pub path: PathBuf,
+    sizes: OnceLock<(u64, u64)>,
+}
+
+impl DiskSegment {
+    pub fn new(meta: SegmentMeta, path: PathBuf) -> Self {
+        Self {
+            meta,
+            path,
+            sizes: OnceLock::new(),
+        }
+    }
+
+    /// Размеры Parquet и индекса; закрытый сегмент неизменен, поэтому считаются один раз.
+    /// После редкой пересборки индекса из Parquet размер индекса может быть устаревшим.
+    pub fn sizes(&self) -> std::io::Result<(u64, u64)> {
+        if let Some(sizes) = self.sizes.get() {
+            return Ok(*sizes);
+        }
+        let sizes = (
+            crate::status::size(&self.path.join("logs.parquet"))?,
+            crate::status::size(&self.path.join("index"))?,
+        );
+        Ok(*self.sizes.get_or_init(|| sizes))
+    }
 }
 
 #[derive(Clone)]
@@ -301,7 +325,7 @@ impl Materializer {
                     && manifest.checkpoint == meta.checkpoint,
                 "segment manifest disagrees with catalog"
             );
-            closed.push(Arc::new(DiskSegment { meta, path }));
+            closed.push(Arc::new(DiskSegment::new(meta, path)));
         }
         let retained: HashSet<_> = closed.iter().map(|segment| segment.path.clone()).collect();
         for path in nested_directories(&root, 4)? {
@@ -651,10 +675,8 @@ impl Materializer {
         if let Some(file) = sealed_series {
             self.series_files.push(Arc::new(file));
         }
-        self.closed.push(Arc::new(DiskSegment {
-            meta: segment.meta,
-            path: segment.path,
-        }));
+        self.closed
+            .push(Arc::new(DiskSegment::new(segment.meta, segment.path)));
         self.publish()?;
         self.core
             .journal

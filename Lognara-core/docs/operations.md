@@ -32,7 +32,7 @@
 | `LOGNARA_SEARCH_MEMORY_BYTES` | `134217728` | Бюджет модели и JSON-ответа одного поиска |
 | `LOGNARA_QUERY_TIMEOUT_SECONDS` | `30` | Таймаут поиска и аналитики |
 | `LOGNARA_INDEX_MEMORY_BYTES` | `67108864` | Бюджет одного writer Tantivy, минимум 15000000 |
-| `LOGNARA_INDEX_CACHE_ENTRIES` | `32` | Максимум кешированных читателей закрытых индексов |
+| `LOGNARA_INDEX_CACHE_ENTRIES` | `256` | Максимум кешированных читателей закрытых индексов; checksum индекса полностью проверяется один раз за процесс и повторно после ошибки чтения |
 | `LOGNARA_PATTERN_MAX_ENTRIES` | `100000` | Максимум паттернов и проблем вместе в каталоге `patterns.sqlite` |
 | `LOGNARA_PATTERN_CATALOG_BYTES` | `268435456` | Бюджет каталога паттернов и проблем на диске и в памяти, минимум 1 MiB |
 | `LOGNARA_PATTERN_QUERY_BYTES` | `67108864` | Бюджет одного запроса паттернов или проблем, минимум 4096 |

@@ -98,7 +98,7 @@ impl Config {
             search_memory_bytes: number("LOGNARA_SEARCH_MEMORY_BYTES", 128 << 20)? as usize,
             query_timeout: Duration::from_secs(number("LOGNARA_QUERY_TIMEOUT_SECONDS", 30)?),
             index_memory_bytes: number("LOGNARA_INDEX_MEMORY_BYTES", 64 << 20)? as usize,
-            index_cache_entries: number("LOGNARA_INDEX_CACHE_ENTRIES", 32)? as usize,
+            index_cache_entries: number("LOGNARA_INDEX_CACHE_ENTRIES", 256)? as usize,
             pattern_max_entries: number("LOGNARA_PATTERN_MAX_ENTRIES", 100_000)? as usize,
             pattern_catalog_bytes: number("LOGNARA_PATTERN_CATALOG_BYTES", 256 << 20)? as usize,
             pattern_query_bytes: number("LOGNARA_PATTERN_QUERY_BYTES", 64 << 20)? as usize,

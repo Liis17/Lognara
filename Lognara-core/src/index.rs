@@ -3,6 +3,7 @@ use crate::{columns, model::StoredEvent, wal::sync_dir};
 use anyhow::{Result, ensure};
 use lru::LruCache;
 use std::{
+    collections::HashSet,
     fs,
     num::NonZeroUsize,
     path::{Path, PathBuf},
@@ -175,6 +176,8 @@ impl ActiveIndex {
 
 pub struct IndexCache {
     readers: Mutex<LruCache<PathBuf, IndexReader>>,
+    /// Закрытые индексы неизменны: полная проверка checksum нужна один раз за процесс.
+    verified: Mutex<HashSet<PathBuf>>,
     memory: usize,
 }
 
@@ -184,6 +187,7 @@ impl IndexCache {
             readers: Mutex::new(LruCache::new(
                 NonZeroUsize::new(entries).expect("nonzero config"),
             )),
+            verified: Mutex::new(HashSet::new()),
             memory,
         }
     }
@@ -193,14 +197,16 @@ impl IndexCache {
         if let Some(reader) = readers.get(segment) {
             return Ok(reader.searcher());
         }
-        let reader = match open(segment, rows) {
+        let verified = self.verified.lock().unwrap().contains(segment);
+        let reader = match open(segment, rows, !verified) {
             Ok(reader) => reader,
             Err(error) => {
                 tracing::warn!(%error, path = %segment.display(), "rebuilding index from Parquet");
                 rebuild(segment, self.memory)?;
-                open(segment, rows)?
+                open(segment, rows, true)?
             }
         };
+        self.verified.lock().unwrap().insert(segment.into());
         let searcher = reader.searcher();
         readers.put(segment.into(), reader);
         Ok(searcher)
@@ -208,10 +214,11 @@ impl IndexCache {
 
     pub fn invalidate(&self, segment: &Path) {
         self.readers.lock().unwrap().pop(segment);
+        self.verified.lock().unwrap().remove(segment);
     }
 }
 
-fn open(segment: &Path, rows: usize) -> Result<IndexReader> {
+fn open(segment: &Path, rows: usize, checksum: bool) -> Result<IndexReader> {
     let index = Index::open_in_dir(segment.join("index"))?;
     ensure!(index.schema() == schema(), "incompatible index schema");
     ensure!(
@@ -219,7 +226,7 @@ fn open(segment: &Path, rows: usize) -> Result<IndexReader> {
         "incompatible pattern normalization"
     );
     ensure!(
-        index.validate_checksum()?.is_empty(),
+        !checksum || index.validate_checksum()?.is_empty(),
         "index checksum mismatch"
     );
     configure(&index);
