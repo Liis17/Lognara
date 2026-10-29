@@ -128,6 +128,8 @@ pub enum VariableType {
     Id,
     Duration,
     Hex,
+    Timestamp,
+    Number,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

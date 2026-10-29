@@ -1,10 +1,17 @@
 //! Консервативная нормализация v1: заменяются только UUID, IP, длинные hex-ID,
-//! явно обозначенные ID и длительности. Слова, статусы и коды ошибок сохраняются.
+//! явно обозначенные ID и длительности; в access-log и ServiceMetrics также
+//! время и числовые измерения. Слова, статусы и коды ошибок сохраняются.
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::{
+    net::{Ipv4Addr, Ipv6Addr},
+    sync::LazyLock,
+};
 
 pub const VERSION: u8 = 1;
+/// Отдельная ревизия производных индексов; не меняет ID незатронутых сообщений.
+pub(crate) const INDEX_PAYLOAD: &str = "lognara-pattern-normalization-2";
 const MAX_MESSAGE: usize = 16 << 10;
 const MAX_VARIABLES: usize = 64;
 const PREVIEW_BYTES: usize = 4096;
@@ -17,6 +24,8 @@ pub enum VariableType {
     Id,
     Duration,
     Hex,
+    Timestamp,
+    Number,
 }
 
 impl VariableType {
@@ -27,6 +36,8 @@ impl VariableType {
             Self::Id => "id",
             Self::Duration => "duration",
             Self::Hex => "hex",
+            Self::Timestamp => "timestamp",
+            Self::Number => "number",
         }
     }
 }
@@ -155,10 +166,14 @@ fn normalize(message: &str) -> Option<(Vec<Part>, Vec<Variable>)> {
     let mut variables: Vec<Variable> = vec![];
     let mut literal = 0;
     let mut i = 0;
+    let spans = format_variables(message);
+    let mut spans = spans.into_iter().peekable();
     while i < bytes.len() {
         // Совпадения начинаются только на границе слова и на ASCII-символе.
-        let found = if (i == 0 || !word(bytes[i - 1])) && bytes[i].is_ascii() {
-            matcher(message, i)
+        let found = if spans.peek().is_some_and(|span| span.0 == i) {
+            spans.next()
+        } else if (i == 0 || !word(bytes[i - 1])) && bytes[i].is_ascii() {
+            matcher(message, i).filter(|found| spans.peek().is_none_or(|span| found.1 <= span.0))
         } else {
             None
         };
@@ -198,6 +213,70 @@ fn normalize(message: &str) -> Option<(Vec<Part>, Vec<Variable>)> {
         });
     }
     Some((parts, variables))
+}
+
+/// Только подтверждённые структурные форматы: произвольные числа остаются литералами.
+fn format_variables(message: &str) -> Vec<(usize, usize, VariableType)> {
+    static ACCESS: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+        r#"^\S+ \S+ \S+ \[(?<timestamp>[0-9]{2}/[A-Za-z]{3}/[0-9]{4}:[0-9]{2}:[0-9]{2}:[0-9]{2} [+-][0-9]{4})\] "(?:[^"\\]|\\.)*" [0-9]{3} (?<size>[0-9]+|-)(?: |$)"#,
+    ).expect("fixed access-log expression")
+    });
+    static METRICS: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+        r#"^ServiceMetrics \{ ServiceName: "(?:[^"\\]|\\.)*", Metrics: \[(?<metrics>.*)\], Timestamp: (?<timestamp>[0-9]{1,2}/[0-9]{1,2}/[0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2}) \}$"#,
+    ).expect("fixed ServiceMetrics expression")
+    });
+    static METRIC: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"\("(?:[^"\\]|\\.)+": (?<number>-?[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)\)"#)
+            .expect("fixed metric expression")
+    });
+    let span = |value: regex::Match<'_>, kind| (value.start(), value.end(), kind);
+    if message.starts_with("ServiceMetrics {") {
+        let Some(captures) = METRICS.captures(message) else {
+            return vec![];
+        };
+        let metrics = captures.name("metrics").unwrap();
+        let mut result = vec![];
+        let mut end = 0;
+        for pair in METRIC.captures_iter(metrics.as_str()) {
+            let whole = pair.get(0).unwrap();
+            let separator = if end == 0 { "" } else { ", " };
+            if &metrics.as_str()[end..whole.start()] != separator {
+                return vec![];
+            }
+            let number = pair.name("number").unwrap();
+            result.push((
+                metrics.start() + number.start(),
+                metrics.start() + number.end(),
+                VariableType::Number,
+            ));
+            end = whole.end();
+        }
+        if end != metrics.as_str().len() {
+            return vec![];
+        }
+        result.push(span(
+            captures.name("timestamp").unwrap(),
+            VariableType::Timestamp,
+        ));
+        return result;
+    }
+    // Не запускаем regexp access-log для обычных сообщений без квадратных скобок.
+    if message.contains("] \"")
+        && let Some(captures) = ACCESS.captures(message)
+    {
+        let mut result = vec![span(
+            captures.name("timestamp").unwrap(),
+            VariableType::Timestamp,
+        )];
+        let size = captures.name("size").unwrap();
+        if size.as_str() != "-" {
+            result.push(span(size, VariableType::Number));
+        }
+        return result;
+    }
+    vec![]
 }
 
 /// Возвращает границы значения переменной; ключ и разделитель остаются литералом.
@@ -459,6 +538,89 @@ mod tests {
                 }]
             ))
         );
+    }
+
+    #[test]
+    fn access_log_timestamps_and_sizes_do_not_create_patterns() {
+        let first = r#"10.0.0.1 - - [19/Oct/2026:22:28:55 +0000] "POST /v1/batches HTTP/1.1" 204 0 "-" "-" "10.0.0.2""#;
+        let second = first
+            .replace("19/Oct/2026:22:28:55 +0000", "20/Oct/2026:00:13:32 +0300")
+            .replace("204 0", "204 179");
+        let a = identify(None, "nginx", "unknown", first);
+        let b = identify(None, "nginx", "unknown", &second);
+        assert_eq!(a.id, b.id);
+        assert_ne!(a.variables, b.variables);
+        for message in [
+            first.replace("204 0", "500 0"),
+            first.replace("POST", "GET"),
+            first.replace("/v1/batches", "/v1/agents"),
+        ] {
+            assert_ne!(a.id, identify(None, "nginx", "unknown", &message).id);
+        }
+    }
+
+    #[test]
+    fn service_metrics_values_and_timestamp_do_not_create_patterns() {
+        let first = r#"ServiceMetrics { ServiceName: "BarkCloud.Identity", Metrics: [("grpc_request_duration_ms_total": 4), ("grpc_requests_total": 4), ("service_started_unix": 1792529771)], Timestamp: 10/23/2026 12:14:47 }"#;
+        let second = first
+            .replace(": 4)", ": 5)")
+            .replace("1792529771", "1792529981")
+            .replace("10/23/2026 12:14:47", "10/24/2026 13:25:27");
+        let a = identify(None, "cloud-identity", "info", first);
+        let b = identify(None, "cloud-identity", "info", &second);
+        assert_eq!(a.id, b.id);
+        assert_ne!(a.variables, b.variables);
+        assert_ne!(
+            a.id,
+            identify(
+                None,
+                "cloud-identity",
+                "info",
+                &first.replace("grpc_requests_total", "grpc_errors_total")
+            )
+            .id
+        );
+        assert_ne!(
+            a.id,
+            identify(
+                None,
+                "cloud-identity",
+                "info",
+                &first.replace("BarkCloud.Identity", "BarkCloud.Users")
+            )
+            .id
+        );
+    }
+
+    #[test]
+    fn structured_numbers_require_complete_formats_and_keep_limits() {
+        let metric = r#"ServiceMetrics { ServiceName: "api", Metrics: [("latency_ms": -1.25e+3)], Timestamp: 10/23/2026 12:14:47 }"#;
+        let result = identify(None, "api", "info", metric);
+        assert_eq!(result.variables[0].variable_type, VariableType::Number);
+        assert_eq!(result.variables[0].value, "-1.25e+3");
+        assert_eq!(result.variables[1].variable_type, VariableType::Timestamp);
+        for invalid in [
+            metric.replace("-1.25e+3", "123oops"),
+            metric.replace("Timestamp:", "Date:"),
+        ] {
+            assert!(
+                !identify(None, "api", "info", &invalid)
+                    .variables
+                    .iter()
+                    .any(|v| matches!(
+                        v.variable_type,
+                        VariableType::Number | VariableType::Timestamp
+                    ))
+            );
+        }
+        let metrics = (0..64)
+            .map(|i| format!("(\"counter_{i}\": {i})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let long = format!(
+            "ServiceMetrics {{ ServiceName: \"api\", Metrics: [{metrics}], Timestamp: 10/23/2026 12:14:47 }}"
+        );
+        assert!(identify(None, "api", "info", &long).exact);
     }
 
     #[test]

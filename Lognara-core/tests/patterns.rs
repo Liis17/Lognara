@@ -22,6 +22,89 @@ use tower::ServiceExt;
 const TS: i64 = 1_790_678_400_000_000_000;
 const SECOND: i64 = 1_000_000_000;
 
+#[tokio::test]
+async fn structured_logs_fit_capacity_and_rebuild_old_catalog_and_indexes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = config(dir.path());
+    cfg.pattern_max_entries = 4;
+    let core = Core::open(cfg.clone()).unwrap();
+    let messages: Vec<_> = (0..40).map(|i| {
+        if i % 2 == 0 {
+            format!(r#"10.0.0.1 - - [19/Oct/2026:22:28:{i:02} +0000] "POST /v1/batches HTTP/1.1" 204 {i} "-" "-""#)
+        } else {
+            format!(r#"ServiceMetrics {{ ServiceName: "api", Metrics: [("requests_total": {i})], Timestamp: 10/23/2026 12:14:{i:02} }}"#)
+        }
+    }).collect();
+    let events: Vec<_> = messages
+        .iter()
+        .enumerate()
+        .map(|(i, message)| (LogLevel::Info, message.as_str(), i as i64))
+        .collect();
+    core.journal.accept(&batch(&events)).unwrap();
+    processed(&core, 40).await;
+    let response = patterns::search(&core, request(100, Sort::Count, &[]))
+        .await
+        .unwrap();
+    assert_eq!((response.total_events, response.total_patterns), (40, 2));
+    let id = response.patterns[0].pattern_id.clone();
+    core.shutdown().unwrap();
+    let closed = core.snapshot().closed.clone();
+    drop(core);
+
+    // Эмулируем старый каталог, переполненный до загрузки, и индекс без ревизии.
+    let db = rusqlite::Connection::open(dir.path().join("patterns.sqlite")).unwrap();
+    db.execute_batch("PRAGMA user_version=2;").unwrap();
+    for i in 0..8 {
+        db.execute(
+            "INSERT INTO patterns VALUES(?1,?2)",
+            rusqlite::params![format!("stale-{i}"), "invalid old metadata"],
+        )
+        .unwrap();
+    }
+    drop(db);
+    for segment in &closed {
+        let path = segment.path.join("index/meta.json");
+        let mut meta: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        meta.as_object_mut().unwrap().remove("payload");
+        std::fs::write(path, serde_json::to_vec(&meta).unwrap()).unwrap();
+    }
+    let core = Core::open(cfg).unwrap();
+    processed(&core, 40).await;
+    let response = patterns::search(&core, request(100, Sort::Count, &[]))
+        .await
+        .unwrap();
+    assert_eq!((response.total_events, response.total_patterns), (40, 2));
+    assert!(response.patterns.iter().all(|p| p.count == 20));
+    let found = query::search(
+        &core,
+        SearchRequest {
+            from: format_timestamp(TS),
+            to: format_timestamp(TS + 100 * SECOND),
+            filters: BTreeMap::from([("pattern_id".into(), vec![id])]),
+            text: None,
+            limit: 100,
+            cursor: None,
+        },
+        false,
+        Instant::now() + Duration::from_secs(20),
+    )
+    .unwrap();
+    assert_eq!(found.events.len(), 20);
+    assert!(!closed.is_empty());
+    for segment in &closed {
+        assert_eq!(
+            tantivy::Index::open_in_dir(segment.path.join("index"))
+                .unwrap()
+                .load_metas()
+                .unwrap()
+                .payload
+                .as_deref(),
+            Some("lognara-pattern-normalization-2")
+        );
+    }
+    core.shutdown().unwrap();
+}
+
 fn config(path: &std::path::Path) -> Config {
     let mut cfg = Config::from_lookup(|key| match key {
         "LOGNARA_ADMIN_TOKEN" => Some("admin".into()),

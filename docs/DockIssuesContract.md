@@ -15,7 +15,7 @@ Fingerprint вычисляется детерминированно в инде�
 
 ## Core
 
-Каталог `patterns.sqlite` версии 2 хранит в таблице `issues` lifetime-метаданные проблем с тем же checkpoint, что и паттерны: scope, тип исключения, фреймы, pattern_id и шаблон первого обработанного события, first/last. Каталог версии 1 удаляется и пересобирается из оставшихся raw событий; пропуск из-за retention помечает историю неполной. `LOGNARA_PATTERN_MAX_ENTRIES` и `LOGNARA_PATTERN_CATALOG_BYTES` ограничивают паттерны и проблемы вместе.
+Каталог `patterns.sqlite` версии 3 хранит в таблице `issues` lifetime-метаданные проблем с тем же checkpoint, что и паттерны: scope, тип исключения, фреймы, pattern_id и шаблон первого обработанного события, first/last. Производные таблицы версий 1/2 пересобираются из оставшихся raw событий с актуальной нормализацией; пропуск из-за retention помечает историю неполной. `LOGNARA_PATTERN_MAX_ENTRIES` и `LOGNARA_PATTERN_CATALOG_BYTES` ограничивают паттерны и проблемы вместе. Совместимость обновления описана в [контракте паттернов](DockPatternsContract.md).
 
 `POST /v1/issues/search` (query token):
 

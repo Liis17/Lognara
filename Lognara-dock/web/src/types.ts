@@ -73,7 +73,7 @@ export interface SummaryResponse {
   page: SearchResponse | null;
 }
 
-export type PatternVariableType = "ip" | "uuid" | "id" | "duration" | "hex";
+export type PatternVariableType = "ip" | "uuid" | "id" | "duration" | "hex" | "timestamp" | "number";
 export type PatternPart = { kind: "literal"; text: string } |
   { kind: "variable"; name: string; variable_type: PatternVariableType };
 export type PatternSort = "count" | "growth" | "last_seen";
