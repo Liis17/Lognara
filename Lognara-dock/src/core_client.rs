@@ -532,7 +532,6 @@ impl CoreClient {
         self.admin(Method::DELETE, path, None).await.map(drop)
     }
 
-    /// Ответ core как JSON; `Null` для 204.
     pub async fn self_log_settings(&self) -> Result<lognara_selflog::Settings, CoreError> {
         let value = self
             .admin(Method::GET, "self-logs/settings".into(), None)
@@ -553,6 +552,7 @@ impl CoreClient {
         .map(drop)
     }
 
+    /// Ответ core как JSON; `Null` для 204.
     async fn admin(
         &self,
         method: Method,

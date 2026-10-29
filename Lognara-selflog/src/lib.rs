@@ -91,7 +91,11 @@ impl fmt::Write for Text {
             end -= 1;
         }
         self.0.push_str(&text[..end]);
-        Ok(())
+        if end < text.len() || self.0.len() == MAX_TEXT {
+            Err(fmt::Error)
+        } else {
+            Ok(())
+        }
     }
 }
 #[derive(Default)]
@@ -102,7 +106,8 @@ struct Fields {
 }
 impl Visit for Fields {
     fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
-        if self.values.len() >= MAX_FIELDS && field.name() != "message" {
+        if (self.values.len() >= MAX_FIELDS || self.bytes >= MAX_TEXT) && field.name() != "message"
+        {
             return;
         }
         let mut text = Text(String::new());
@@ -227,12 +232,25 @@ impl Collector {
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
         let thread = thread::Builder::new().name("lognara-selflog".into()).spawn(move || {
-            // Includes transport/runtime diagnostics: never collect delivery's own logs.
             tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || {
-                let mut queue = match lognara_spool::Queue::open_limited(&dir, 32 << 20, 100_000, 4096) {
-                    Ok(queue) => queue,
-                    Err(error) => { eprintln!("self-log queue unavailable: {error}"); return; }
+                let (jobs, work) = mpsc::sync_channel(1);
+                let (replies, results) = mpsc::channel();
+                let sender = match thread::Builder::new().name("lognara-selflog-send".into()).spawn(move || {
+                    tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || {
+                        while let Ok(job) = work.recv() {
+                            let reply = match job {
+                                Job::Settings => Reply::Settings(destination.settings()),
+                                Job::Send(body) => Reply::Sent(destination.send(&body)),
+                            };
+                            if replies.send(reply).is_err() { break; }
+                        }
+                    });
+                }) {
+                    Ok(sender) => sender,
+                    Err(error) => { eprintln!("self-log sender unavailable: {error}"); return; }
                 };
+                let mut queue: Option<lognara_spool::Queue> = None;
+                let mut reopen = Instant::now();
                 let mut poll = Instant::now();
                 let mut retry = Instant::now();
                 let cache = dir.join("settings.json");
@@ -240,19 +258,49 @@ impl Collector {
                 if let Some(settings) = &settings {
                     self.capture.enabled.store(settings.enabled(self.capture.service), Ordering::Relaxed);
                 }
+                let mut busy = false;
+                let mut pending: Option<lognara_spool::Entry> = None;
                 loop {
                     let stop = stopping.load(Ordering::Acquire);
-                    if !stop && Instant::now() >= poll {
-                        if let Ok(current) = destination.settings() {
-                            self.capture.enabled.store(current.enabled(self.capture.service), Ordering::Relaxed);
-                            if settings.as_ref() != Some(&current) {
-                                if let Ok(bytes) = serde_json::to_vec(&current) {
-                                    let _ = lognara_spool::atomic_file(&dir, "settings.json", &bytes);
+                    if let Ok(reply) = results.try_recv() {
+                        busy = false;
+                        match reply {
+                            Reply::Settings(Ok(current)) => {
+                                self.capture.enabled.store(current.enabled(self.capture.service), Ordering::Relaxed);
+                                if settings.as_ref() != Some(&current) {
+                                    let saved = serde_json::to_vec(&current).map_err(io::Error::other)
+                                        .and_then(|bytes| lognara_spool::atomic_file(&dir, "settings.json", &bytes));
+                                    match saved {
+                                        Ok(()) => settings = Some(current),
+                                        Err(error) => eprintln!("self-log settings cache unavailable: {error}"),
+                                    }
                                 }
-                                settings = Some(current);
+                            }
+                            Reply::Settings(Err(_)) => {},
+                            Reply::Sent(result) => {
+                                let entry = pending.take().expect("one outstanding delivery");
+                                if result.as_ref().is_err_and(|error| error.kind() == io::ErrorKind::InvalidData) {
+                                    self.capture.dropped.fetch_add(entry.events, Ordering::Relaxed);
+                                }
+                                if result.is_ok() || result.as_ref().is_err_and(|error| error.kind() == io::ErrorKind::InvalidData) {
+                                    if let Some(active) = queue.as_mut()
+                                        && let Err(error) = active.ack(&[entry]) {
+                                        eprintln!("self-log acknowledgement failed; reopening queue: {error}");
+                                        queue = None;
+                                        reopen = Instant::now() + Duration::from_secs(5);
+                                    }
+                                } else { retry = Instant::now() + Duration::from_secs(5); }
                             }
                         }
-                        poll = Instant::now() + Duration::from_secs(10);
+                    }
+                    if queue.is_none() && Instant::now() >= reopen {
+                        match lognara_spool::Queue::open_limited(&dir, 32 << 20, 100_000, 4096) {
+                            Ok(opened) => queue = Some(opened),
+                            Err(error) => {
+                                eprintln!("self-log queue unavailable: {error}");
+                                reopen = Instant::now() + Duration::from_secs(5);
+                            }
+                        }
                     }
                     let mut records = Vec::new();
                     for _ in 0..16 {
@@ -263,31 +311,50 @@ impl Collector {
                         }
                     }
                     if !records.is_empty() {
-                        match batches(&records) {
-                            Ok(parts) => {
-                                if queue.append_group(parts.into_iter().map(Ok)).is_err() {
-                                    self.capture.dropped.fetch_add(records.len() as u64, Ordering::Relaxed);
-                                }
-                            }
-                            _ => { self.capture.dropped.fetch_add(records.len() as u64, Ordering::Relaxed); }
-                        }
+                        let saved = batches(&records).ok().is_some_and(|parts| {
+                            queue.as_mut().is_some_and(|queue| queue.append_group(parts.into_iter().map(Ok)).is_ok())
+                        });
+                        if !saved { self.capture.dropped.fetch_add(records.len() as u64, Ordering::Relaxed); }
                     }
                     let dropped = self.capture.dropped.swap(0, Ordering::Relaxed);
-                    if dropped != 0 { eprintln!("self-log capture dropped {dropped} records (queue limit or disk error)"); }
+                    if dropped != 0 { eprintln!("self-log capture dropped {dropped} records (queue limit, rejection or disk error)"); }
                     if stop {
                         if records.is_empty() { break; }
                         continue;
                     }
-                    if Instant::now() >= retry
-                        && let Some(entry) = queue.entries().front().cloned() {
-                            let sent = queue.read(&entry, MAX_BODY).map_err(io::Error::other)
-                                .and_then(|body| destination.send(&body));
-                            if sent.is_ok() {
-                                if let Err(error) = queue.ack(&[entry]) { eprintln!("self-log acknowledgement failed: {error}"); break; }
-                            } else { retry = Instant::now() + Duration::from_secs(5); }
+                    if !busy && Instant::now() >= poll {
+                        if jobs.send(Job::Settings).is_err() { break; }
+                        busy = true;
+                        poll = Instant::now() + Duration::from_secs(10);
+                    } else if !busy && Instant::now() >= retry
+                        && let Some(active) = queue.as_mut()
+                        && let Some(entry) = active.entries().front().cloned() {
+                            match active.read(&entry, MAX_BODY) {
+                                Ok(body) => {
+                                    if jobs.send(Job::Send(body)).is_err() { break; }
+                                    pending = Some(entry);
+                                    busy = true;
+                                }
+                                Err(error) => {
+                                    eprintln!("self-log queue read failed: {error}");
+                                    let permanent = match &error {
+                                        lognara_spool::Error::TooLarge => true,
+                                        lognara_spool::Error::Io(error) => matches!(error.kind(), io::ErrorKind::InvalidData | io::ErrorKind::NotFound),
+                                        _ => false,
+                                    };
+                                    if permanent {
+                                        self.capture.dropped.fetch_add(entry.events, Ordering::Relaxed);
+                                        if active.ack(&[entry]).is_err() { queue = None; }
+                                    } else { queue = None; }
+                                    reopen = Instant::now() + Duration::from_secs(5);
+                                    retry = reopen;
+                                }
+                            }
                     }
                     thread::sleep(Duration::from_millis(100));
                 }
+                drop(jobs);
+                let _ = sender.join();
             });
         })?;
         Ok(Worker {
@@ -295,6 +362,15 @@ impl Collector {
             thread: Some(thread),
         })
     }
+}
+
+enum Job {
+    Settings,
+    Send(Vec<u8>),
+}
+enum Reply {
+    Settings(io::Result<Settings>),
+    Sent(io::Result<()>),
 }
 
 pub struct Remote {
@@ -311,7 +387,7 @@ impl Remote {
             base,
             token,
             prefix: if relay {
-                "v1/self-logs"
+                "self-logs"
             } else {
                 "v1/admin/self-logs"
             },
@@ -362,6 +438,15 @@ impl Destination for Remote {
             .body(body.to_vec())
             .send()
             .map_err(io::Error::other)?;
+        if matches!(
+            response.status(),
+            reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::PAYLOAD_TOO_LARGE
+        ) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "self-log batch permanently rejected",
+            ));
+        }
         if response.status() != reqwest::StatusCode::NO_CONTENT {
             return Err(io::Error::other("self-log delivery not acknowledged"));
         }
@@ -373,6 +458,213 @@ impl Destination for Remote {
 mod tests {
     use super::*;
     use tracing_subscriber::prelude::*;
+    #[test]
+    fn formatting_stops_when_output_budget_is_exhausted() {
+        struct Large(Arc<AtomicU64>);
+        impl fmt::Debug for Large {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                for _ in 0..100_000 {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                    formatter.write_str("12345678")?;
+                }
+                Ok(())
+            }
+        }
+        let writes = Arc::new(AtomicU64::new(0));
+        let mut text = Text(String::new());
+        assert!(write!(text, "{:?}", Large(writes.clone())).is_err());
+        assert_eq!(text.0.len(), MAX_TEXT);
+        assert_eq!(writes.load(Ordering::Relaxed), (MAX_TEXT / 8) as u64);
+    }
+    #[cfg(unix)]
+    fn wait_until(mut predicate: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !predicate() {
+            assert!(
+                Instant::now() < deadline,
+                "observable queue state timed out"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    #[cfg(unix)]
+    fn groups(dir: &Path) -> usize {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "group"))
+            .count()
+    }
+    #[cfg(unix)]
+    #[test]
+    fn stalled_network_does_not_block_durable_capture() {
+        struct Sink {
+            started: mpsc::Sender<()>,
+            release: Receiver<()>,
+        }
+        impl Destination for Sink {
+            fn settings(&mut self) -> io::Result<Settings> {
+                Ok(Settings::default())
+            }
+            fn send(&mut self, _: &[u8]) -> io::Result<()> {
+                self.started.send(()).unwrap();
+                self.release
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(io::Error::other)?;
+                Ok(())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let collector = Collector::new("lognara-core");
+        let capture = collector.layer();
+        let subscriber = Arc::new(tracing_subscriber::registry().with(capture.clone()));
+        tracing::subscriber::with_default(
+            subscriber.clone(),
+            || tracing::error!(target: "lognara_core", "initial"),
+        );
+        let (started, ready) = mpsc::channel();
+        let (release, blocked) = mpsc::channel();
+        let worker = collector
+            .start(
+                dir.path(),
+                Sink {
+                    started,
+                    release: blocked,
+                },
+            )
+            .unwrap();
+        ready.recv_timeout(Duration::from_secs(5)).unwrap();
+        tracing::subscriber::with_default(subscriber.clone(), || {
+            for n in 0..64 {
+                tracing::error!(target: "lognara_core", n, "during outage");
+            }
+        });
+        wait_until(|| groups(dir.path()) >= 5);
+        assert_eq!(capture.dropped.load(Ordering::Relaxed), 0);
+        // Stop before releasing the in-flight call, so no further network call is scheduled.
+        worker.stop.store(true, Ordering::Release);
+        release.send(()).unwrap();
+        worker.stop();
+    }
+    #[cfg(unix)]
+    #[test]
+    fn permanent_rejection_does_not_block_later_records() {
+        struct Sink {
+            sent: mpsc::Sender<Vec<u8>>,
+            first: bool,
+        }
+        impl Destination for Sink {
+            fn settings(&mut self) -> io::Result<Settings> {
+                Ok(Settings::default())
+            }
+            fn send(&mut self, body: &[u8]) -> io::Result<()> {
+                self.sent.send(body.to_vec()).unwrap();
+                if std::mem::take(&mut self.first) {
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "permanent rejection",
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let collector = Collector::new("lognara-relay");
+        let subscriber = Arc::new(tracing_subscriber::registry().with(collector.layer()));
+        tracing::subscriber::with_default(
+            subscriber.clone(),
+            || tracing::warn!(target: "lognara_relay", "first"),
+        );
+        let (sent, received) = mpsc::channel();
+        let worker = collector
+            .start(dir.path(), Sink { sent, first: true })
+            .unwrap();
+        let first = received.recv_timeout(Duration::from_secs(5)).unwrap();
+        tracing::subscriber::with_default(
+            subscriber,
+            || tracing::warn!(target: "lognara_relay", "second"),
+        );
+        let second = received.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_ne!(first, second);
+        wait_until(|| groups(dir.path()) == 0);
+        worker.stop();
+        assert!(received.try_recv().is_err());
+    }
+    #[test]
+    fn relay_remote_uses_sibling_endpoints_and_classifies_http_responses() {
+        use std::{
+            io::{BufRead, BufReader},
+            net::TcpListener,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1/batches", listener.local_addr().unwrap());
+        let (sent, received) = mpsc::channel();
+        let server = thread::spawn(move || {
+            for (status, body) in [
+                (200, r#"{"core":true,"dock":true,"relay":false}"#),
+                (204, ""),
+                (400, ""),
+                (413, ""),
+                (503, ""),
+            ] {
+                let (stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
+                let mut input = BufReader::new(stream);
+                let mut headers = String::new();
+                loop {
+                    let mut line = String::new();
+                    input.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    assert!(!line.is_empty());
+                    headers.push_str(&line);
+                }
+                let length: usize = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|n| n.trim().parse().unwrap())
+                    })
+                    .unwrap_or(0);
+                let mut data = vec![0; length];
+                input.read_exact(&mut data).unwrap();
+                std::io::Write::write_all(input.get_mut(), format!("HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).unwrap();
+                sent.send((headers, data)).unwrap();
+            }
+        });
+        let mut remote = Remote::new(url.parse().unwrap(), "test-relay-token".into(), true);
+        assert!(!remote.settings().unwrap().relay);
+        remote.send(b"[]").unwrap();
+        let bad = remote.send(b"[]").unwrap_err();
+        let large = remote.send(b"[]").unwrap_err();
+        let unavailable = remote.send(b"[]").unwrap_err();
+        let calls: Vec<_> = (0..5)
+            .map(|_| received.recv_timeout(Duration::from_secs(3)).unwrap())
+            .collect();
+        server.join().unwrap();
+        assert!(
+            calls[0]
+                .0
+                .starts_with("GET /v1/self-logs/settings HTTP/1.1")
+        );
+        for (headers, body) in &calls[1..] {
+            assert!(headers.starts_with("POST /v1/self-logs HTTP/1.1"));
+            assert_eq!(body, b"[]");
+        }
+        assert!(calls.iter().all(|(headers, _)| {
+            headers
+                .to_lowercase()
+                .contains("authorization: bearer test-relay-token")
+        }));
+        assert_eq!(bad.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(large.kind(), io::ErrorKind::InvalidData);
+        assert_ne!(unavailable.kind(), io::ErrorKind::InvalidData);
+    }
     #[test]
     fn escaped_large_messages_split_without_loss() {
         let collector = Collector::new("lognara-core");
@@ -433,6 +725,7 @@ mod tests {
             received.recv_timeout(Duration::from_secs(5)).unwrap(),
             first
         );
+        wait_until(|| groups(dir.path()) == 0);
         worker.stop();
         assert!(received.try_recv().is_err());
         let queue =

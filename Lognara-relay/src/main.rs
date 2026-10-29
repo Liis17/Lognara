@@ -40,6 +40,9 @@ async fn main() -> ExitCode {
         Ok(spool) => spool,
         Err(err) => {
             error!("failed to open spool {}: {err}", config.spool_dir.display());
+            if let Some(logs) = logs {
+                let _ = tokio::task::spawn_blocking(move || logs.stop()).await;
+            }
             return ExitCode::FAILURE;
         }
     };
@@ -47,6 +50,9 @@ async fn main() -> ExitCode {
         Ok(listener) => listener,
         Err(err) => {
             error!("failed to listen on {}: {err}", config.listen_addr);
+            if let Some(logs) = logs {
+                let _ = tokio::task::spawn_blocking(move || logs.stop()).await;
+            }
             return ExitCode::FAILURE;
         }
     };

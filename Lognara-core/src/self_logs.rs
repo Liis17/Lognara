@@ -18,10 +18,15 @@ pub struct Control {
 impl Control {
     pub fn open(dir: &std::path::Path) -> anyhow::Result<Self> {
         let path = dir.join("self-logs.json");
-        let value = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)?,
+        let loaded = std::fs::read(&path)
+            .and_then(|bytes| serde_json::from_slice(&bytes).map_err(io::Error::other));
+        let value = match loaded {
+            Ok(value) => value,
             Err(error) if error.kind() == io::ErrorKind::NotFound => Settings::default(),
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                tracing::warn!(%error, "self-log settings unavailable; using defaults");
+                Settings::default()
+            }
         };
         Ok(Self {
             path,
@@ -52,7 +57,17 @@ impl Destination for Local {
             .ingest_slots
             .try_acquire()
             .map_err(io::Error::other)?;
-        accept(&self.0, body, "lognara-core").map_err(|status| io::Error::other(status.to_string()))
+        accept(&self.0, body, "lognara-core").map_err(|status| {
+            let kind = if matches!(
+                status,
+                StatusCode::BAD_REQUEST | StatusCode::PAYLOAD_TOO_LARGE
+            ) {
+                io::ErrorKind::InvalidData
+            } else {
+                io::ErrorKind::Other
+            };
+            io::Error::new(kind, status.to_string())
+        })
     }
 }
 
@@ -144,12 +159,42 @@ fn accept(core: &Core, body: &[u8], service: &str) -> Result<(), StatusCode> {
     core.journal
         .accept(&packed)
         .map(|_| ())
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)
+        .map_err(ingest_status)
+}
+
+fn ingest_status(error: crate::journal::IngestError) -> StatusCode {
+    use crate::{journal::IngestError, wire::DecodeError};
+    match error {
+        IngestError::TooLarge | IngestError::Invalid(DecodeError::TooLarge) => {
+            StatusCode::PAYLOAD_TOO_LARGE
+        }
+        IngestError::Invalid(_) => StatusCode::BAD_REQUEST,
+        IngestError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn invalid_diagnostics_settings_do_not_block_core_startup() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("self-logs.json"), b"broken").unwrap();
+        assert_eq!(
+            Control::open(dir.path()).unwrap().get(),
+            Settings::default()
+        );
+        assert_eq!(
+            ingest_status(crate::journal::IngestError::TooLarge),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert_eq!(
+            ingest_status(crate::journal::IngestError::Invalid(
+                crate::wire::DecodeError::Invalid
+            )),
+            StatusCode::BAD_REQUEST
+        );
+    }
     #[test]
     fn retries_keep_wire_bytes_and_cannot_impersonate_other_components() {
         let records = vec![Record {

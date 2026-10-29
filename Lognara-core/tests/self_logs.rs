@@ -89,9 +89,10 @@ async fn diagnostics_are_authorized_durable_searchable_and_deduplicated() {
         .1["dock"],
         false
     );
+    let timestamp = lognara_core::model::now_nanos();
     let record = Record {
         id: uuid::Uuid::now_v7(),
-        timestamp: 1_790_678_400_000_000_000,
+        timestamp,
         service: "lognara-relay".into(),
         server: "node".into(),
         level: "ERROR".into(),
@@ -127,7 +128,9 @@ async fn diagnostics_are_authorized_durable_searchable_and_deduplicated() {
     }
     assert_eq!(core.snapshot().watermark, 1);
     let (_, found) = call(&router, "POST", "/v1/logs/search", "query", json!({
-        "from":"2026-09-29T00:00:00Z","to":"2027-01-01T00:00:00Z", "filters":{"service":["lognara-relay"]},"limit":10
+        "from":lognara_core::model::format_timestamp(timestamp - 1_000_000_000),
+        "to":lognara_core::model::format_timestamp(timestamp + 1_000_000_000),
+        "filters":{"service":["lognara-relay"]},"limit":10
     })).await;
     assert_eq!(found["events"].as_array().unwrap().len(), 1);
     assert_eq!(found["events"][0]["message"], "core unavailable");
