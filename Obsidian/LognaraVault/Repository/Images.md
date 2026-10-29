@@ -29,7 +29,7 @@ Job `publish-images` в `.github/workflows/ci.yml` при push в `master` по�
 
 ## Ручной полный релиз
 
-В GitHub Actions выберите `Release all containers` → `Run workflow` → ветку `master`. `.github/workflows/release-containers.yml` проверяет ветку и вызывает `ci.yml` с `release_all: true`: полные Rust/web-проверки и автоматизация, затем публикация core, relay и dock независимо от изменённых путей. Каждый компонент получает собственную следующую версию. Итог каждой успешной публикации записывается в GitHub Actions job summary. Релиз трёх образов не атомарен: при ошибке одного остальные могут быть уже опубликованы.
+В GitHub Actions выберите `Release all containers` → `Run workflow` → ветку `master`. `.github/workflows/release-containers.yml` проверяет ветку и вызывает `ci.yml` с `release_all: true`: полные Rust/web-проверки и автоматизация, затем публикация core, relay и dock независимо от изменённых путей. Вызывающий job release явно разрешает contents: read, pull-requests: read и id-token: write: вложенный CI не может повысить права вызывающего workflow, даже если соответствующий job пропускается по условию. Каждый компонент получает собственную следующую версию. Итог каждой успешной публикации записывается в GitHub Actions job summary. Релиз трёх образов не атомарен: при ошибке одного остальные могут быть уже опубликованы.
 
 Для скачивания приватных образов выполните `docker login docker.barkfluff.com` на хосте развёртывания.
 
