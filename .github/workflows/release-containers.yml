@@ -16,6 +16,10 @@ jobs:
         run: test "$GITHUB_REF" = refs/heads/master
   release:
     needs: [validate]
+    # Reusable CI declares id-token: write for the NuGet job; the caller must grant it too.
+    permissions:
+      contents: read
+      id-token: write
     uses: ./.github/workflows/ci.yml
     with:
       release_all: true

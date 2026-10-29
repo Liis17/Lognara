@@ -289,7 +289,8 @@ jobs:
         run: dotnet nuget push 'artifacts/*.nupkg' --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
 
   publish-images:
-    if: github.ref == 'refs/heads/master' && (github.event_name == 'push' || inputs.release_all) && needs.changes.outputs.images != '[]'
+    # Override implicit success(): optional Rust/web/.NET jobs may be skipped upstream.
+    if: ${{ !cancelled() && needs.ci.result == 'success' && needs.changes.result == 'success' && github.ref == 'refs/heads/master' && (github.event_name == 'push' || inputs.release_all) && needs.changes.outputs.images != '[]' }}
     needs: [ci, changes]
     uses: ./.github/workflows/publish-images.yml
     with:
