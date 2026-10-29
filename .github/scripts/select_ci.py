@@ -4,7 +4,7 @@ import json
 import os
 
 
-CRATES = ["Lognara-agent", "Lognara-relay", "Lognara-spool", "Lognara-core", "Lognara-dock"]
+CRATES = ["Lognara-agent", "Lognara-relay", "Lognara-spool", "Lognara-core", "Lognara-selflog", "Lognara-dock"]
 COMPONENTS = ["core", "relay", "dock"]
 
 

@@ -533,6 +533,26 @@ impl CoreClient {
     }
 
     /// Ответ core как JSON; `Null` для 204.
+    pub async fn self_log_settings(&self) -> Result<lognara_selflog::Settings, CoreError> {
+        let value = self
+            .admin(Method::GET, "self-logs/settings".into(), None)
+            .await?;
+        serde_json::from_value(value).map_err(|_| CoreError::Format)
+    }
+
+    pub async fn update_self_log_settings(
+        &self,
+        value: &lognara_selflog::Settings,
+    ) -> Result<(), CoreError> {
+        self.admin(
+            Method::PUT,
+            "self-logs/settings".into(),
+            Some(serde_json::to_value(value).map_err(|_| CoreError::Format)?),
+        )
+        .await
+        .map(drop)
+    }
+
     async fn admin(
         &self,
         method: Method,

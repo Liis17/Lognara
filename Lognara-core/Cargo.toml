@@ -11,6 +11,8 @@ publish = false
 crash-tests = []
 
 [dependencies]
+lognara-spool = { path = "../Lognara-spool" }
+lognara-selflog = { path = "../Lognara-selflog" }
 anyhow = "1"
 axum = "0.8"
 base64 = "0.22"

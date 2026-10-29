@@ -12,6 +12,8 @@ COPY Lognara-relay/Cargo.toml ./Lognara-relay/
 COPY Lognara-relay/src ./Lognara-relay/src
 COPY Lognara-spool/Cargo.toml ./Lognara-spool/
 COPY Lognara-spool/src ./Lognara-spool/src
+COPY Lognara-selflog/Cargo.toml ./Lognara-selflog/
+COPY Lognara-selflog/src ./Lognara-selflog/src
 RUN cargo build --release --locked --manifest-path Lognara-core/Cargo.toml --bin lognara-core
 
 FROM debian:bookworm-slim

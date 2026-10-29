@@ -63,7 +63,7 @@ jobs:
       - name: Build and publish
         uses: docker/build-push-action@v7
         with:
-          context: ${{ matrix.component == 'dock' && 'Lognara-dock' || '.' }}
+          context: .
           file: Lognara-${{ matrix.component }}/Dockerfile
           platforms: linux/amd64
           push: true

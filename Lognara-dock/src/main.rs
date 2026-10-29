@@ -1,4 +1,5 @@
 use std::process::ExitCode;
+use tracing_subscriber::prelude::*;
 
 use lognara_dock::api::App;
 use lognara_dock::config::Config;
@@ -9,11 +10,13 @@ use tracing::{error, info};
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    tracing_subscriber::fmt()
-        .with_env_filter(
+    let collector = lognara_selflog::Collector::new("lognara-dock");
+    tracing_subscriber::registry()
+        .with(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
-        .with_target(false)
+        .with(tracing_subscriber::fmt::layer().with_target(false))
+        .with(collector.layer())
         .init();
 
     let config = match Config::from_env() {
@@ -21,6 +24,20 @@ async fn main() -> ExitCode {
         Err(err) => {
             error!("{err}");
             return ExitCode::FAILURE;
+        }
+    };
+    let logs = match collector.start(
+        &config.data_dir.join("self-log-spool"),
+        lognara_selflog::Remote::new(
+            config.core_url.clone(),
+            config.core_admin_token.clone(),
+            false,
+        ),
+    ) {
+        Ok(logs) => Some(logs),
+        Err(error) => {
+            eprintln!("self-log worker unavailable: {error}");
+            None
         }
     };
     let app = match tokio::task::spawn_blocking({
@@ -55,7 +72,7 @@ async fn main() -> ExitCode {
         data = %config.data_dir.display(),
         "lognara-dock started"
     );
-    match lognara_dock::run(app, listener, shutdown).await {
+    let result = match lognara_dock::run(app, listener, shutdown).await {
         Ok(()) => {
             info!("lognara-dock stopped");
             ExitCode::SUCCESS
@@ -64,7 +81,11 @@ async fn main() -> ExitCode {
             error!("server failed: {err}");
             ExitCode::FAILURE
         }
+    };
+    if let Some(logs) = logs {
+        let _ = tokio::task::spawn_blocking(move || logs.stop()).await;
     }
+    result
 }
 
 /// Отменяет `shutdown` по SIGTERM (остановка контейнера) или SIGINT.

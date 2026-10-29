@@ -20,10 +20,10 @@ class SelectTests(unittest.TestCase):
             "rust": [], "web": True, "dotnet": False, "images": ["dock"],
         })
 
-    def test_spool_dependents_do_not_select_dock(self):
-        result = select(["Lognara-spool", "Lognara-agent", "Lognara-relay", "Lognara-core"])
-        self.assertEqual(result["rust"], CRATES[:-1])
-        self.assertEqual(result["images"], ["core", "relay"])
+    def test_spool_dependents_include_diagnostics_and_dock(self):
+        result = select(CRATES)
+        self.assertEqual(result["rust"], CRATES)
+        self.assertEqual(result["images"], COMPONENTS)
         self.assertFalse(result["web"])
 
     def test_manual_run_checks_and_releases_everything(self):

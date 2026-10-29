@@ -67,7 +67,34 @@ pub fn router(core: Arc<Core>) -> Router {
             authorize,
         ))
         .with_state(core.journal.access.clone());
+    let diagnostics = Router::new()
+        .route(
+            "/v1/admin/self-logs/settings",
+            get(crate::self_logs::settings).put(crate::self_logs::update),
+        )
+        .route("/v1/admin/self-logs", post(crate::self_logs::dock))
+        .layer(axum::extract::DefaultBodyLimit::max(
+            lognara_selflog::MAX_BODY,
+        ))
+        .route_layer(middleware::from_fn_with_state(
+            token_hash(&core.journal.config.admin_token),
+            authorize,
+        ))
+        .with_state(core.clone());
+    let relay_diagnostics = Router::new()
+        .route("/v1/self-logs/settings", get(crate::self_logs::settings))
+        .route("/v1/self-logs", post(crate::self_logs::relay))
+        .layer(axum::extract::DefaultBodyLimit::max(
+            lognara_selflog::MAX_BODY,
+        ))
+        .route_layer(middleware::from_fn_with_state(
+            core.journal.access.clone(),
+            authorize_relay,
+        ))
+        .with_state(core.clone());
     ingest_router(core.journal.clone())
+        .merge(diagnostics)
+        .merge(relay_diagnostics)
         .merge(queries)
         .merge(admin)
         .merge(admin_router(core.clone(), &core.journal.config.admin_token))

@@ -8,6 +8,7 @@ description = "Веб-интерфейс Lognara: вход по htpasswd и pass
 publish = false
 
 [dependencies]
+lognara-selflog = { path = "../Lognara-selflog" }
 axum = "0.8"
 base64 = "0.22"
 bcrypt = "0.19.3"

@@ -58,6 +58,7 @@ pub struct Snapshot {
 }
 
 pub struct Core {
+    pub self_logs: crate::self_logs::Control,
     pub journal: Arc<Journal>,
     snapshot: RwLock<Arc<Snapshot>>,
     pub rules: RwLock<Arc<RuleSet>>,
@@ -99,6 +100,7 @@ impl Core {
                 journal.config.index_cache_entries,
                 journal.config.index_memory_bytes,
             ),
+            self_logs: crate::self_logs::Control::open(&journal.config.data_dir)?,
             journal,
             snapshot: RwLock::new(Arc::new(Snapshot::default())),
             rules: RwLock::new(Arc::new(rules)),

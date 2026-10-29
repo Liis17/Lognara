@@ -256,6 +256,10 @@ pub fn router(app: AppState) -> Router {
             post(access::rotate_agent_token),
         )
         .route("/infrastructure", get(infra::overview))
+        .route(
+            "/settings/self-logs",
+            get(crate::self_logs::settings).put(crate::self_logs::update),
+        )
         .layer(middleware::from_fn_with_state(
             app.clone(),
             session::require_origin,

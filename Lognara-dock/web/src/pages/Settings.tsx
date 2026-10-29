@@ -138,11 +138,53 @@ function Passkeys({ onChange }: { onChange: () => void }) {
   );
 }
 
+type SelfLogSettings = { core: boolean; dock: boolean; relay: boolean };
+
+function SelfLogs() {
+  const [settings, setSettings] = useState<SelfLogSettings | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [saved, setSaved] = useState(false);
+  useEffect(() => {
+    const controller = new AbortController();
+    api<SelfLogSettings>("GET", "/api/settings/self-logs", undefined, { signal: controller.signal })
+      .then(setSettings)
+      .catch((err) => { if (!controller.signal.aborted) setError(errorText(err)); });
+    return () => controller.abort();
+  }, []);
+  const save = async (event: FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    setSaved(false);
+    try {
+      await api("PUT", "/api/settings/self-logs", settings);
+      setSaved(true);
+    } catch (err) { setError(errorText(err)); }
+    finally { setBusy(false); }
+  };
+  return <form onSubmit={save}>
+    <h2>Собственные логи Lognara</h2>
+    <p className="muted">Сбор для всех экземпляров выбранного компонента. Настройки применяются в течение 10 секунд после восстановления связи.</p>
+    {settings && (Object.keys(settings) as (keyof SelfLogSettings)[]).map((key) => <label key={key}>
+      <input type="checkbox" checked={settings[key]} disabled={busy}
+        onChange={(event) => { setSettings({ ...settings, [key]: event.target.checked }); setSaved(false); }} />
+      lognara-{key}
+    </label>)}
+    <p><a href="/logs?q=backend%3Alognara">Открыть собственные логи</a></p>
+    <p className="muted">Отключение останавливает новый сбор. Сохранённая очередь доставляется, история остаётся в поиске.</p>
+    <button type="submit" disabled={busy || !settings}>Сохранить сбор логов</button>
+    {saved && <p role="status">Настройки сохранены</p>}
+    {error && <p className="error">{error}</p>}
+  </form>;
+}
+
 export default function Settings({ onChange }: { onChange: () => void }) {
   return (
     <section className="settings">
       <PasswordForm />
       <Passkeys onChange={onChange} />
+      <SelfLogs />
     </section>
   );
 }

@@ -924,6 +924,7 @@ dependencies = [
  "fs2",
  "futures-util",
  "http-body-util",
+ "lognara-selflog",
  "rand 0.9.5",
  "reqwest",
  "rusqlite",
@@ -946,6 +947,23 @@ dependencies = [
  "webauthn-rs",
  "webauthn-rs-proto",
 ]
+
+[[package]]
+name = "lognara-selflog"
+version = "0.1.0"
+dependencies = [
+ "lognara-spool",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "lognara-spool"
+version = "0.1.0"
 
 [[package]]
 name = "lru-slab"
@@ -1337,7 +1355,9 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "futures-channel",
  "futures-core",
+ "futures-util",
  "http",
  "http-body",
  "http-body-util",

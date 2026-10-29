@@ -64,6 +64,7 @@ jobs:
               - 'Lognara-spool/**'
             Lognara-relay:
               - 'Lognara-relay/**'
+              - 'Lognara-selflog/**'
               - 'Lognara-spool/**'
             Lognara-spool:
               - 'Lognara-spool/**'
@@ -71,12 +72,18 @@ jobs:
             Lognara-core:
               - 'Lognara-dock/web/public/metrics-nginx.json'
               - 'Lognara-core/**'
+              - 'Lognara-selflog/**'
               - 'Lognara-agent/**'
               - 'Lognara-relay/**'
               - 'Lognara-spool/**'
             Lognara-dock:
               - 'Lognara-dock/**'
+              - 'Lognara-selflog/**'
+              - 'Lognara-spool/**'
               - '!Lognara-dock/web/**'
+            Lognara-selflog:
+              - 'Lognara-selflog/**'
+              - 'Lognara-spool/**'
             web:
               - 'Lognara-dock/web/**'
             dotnet:

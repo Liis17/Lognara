@@ -169,6 +169,20 @@ pub trait Destination: Send + 'static {
     /// Success only after durable acceptance. The same bytes are retried.
     fn send(&mut self, body: &[u8]) -> io::Result<()>;
 }
+
+fn batches(records: &[Record]) -> io::Result<Vec<(Vec<u8>, u64)>> {
+    let body = serde_json::to_vec(records).map_err(io::Error::other)?;
+    if body.len() <= MAX_BODY {
+        return Ok(vec![(body, records.len() as u64)]);
+    }
+    if records.len() < 2 {
+        return Err(io::Error::other("oversized self-log record"));
+    }
+    let (left, right) = records.split_at(records.len() / 2);
+    let mut result = batches(left)?;
+    result.extend(batches(right)?);
+    Ok(result)
+}
 pub struct Worker {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -249,9 +263,9 @@ impl Collector {
                         }
                     }
                     if !records.is_empty() {
-                        match serde_json::to_vec(&records) {
-                            Ok(body) if body.len() <= MAX_BODY => {
-                                if queue.append_group([Ok((body, records.len() as u64))]).is_err() {
+                        match batches(&records) {
+                            Ok(parts) => {
+                                if queue.append_group(parts.into_iter().map(Ok)).is_err() {
                                     self.capture.dropped.fetch_add(records.len() as u64, Ordering::Relaxed);
                                 }
                             }
@@ -359,6 +373,23 @@ impl Destination for Remote {
 mod tests {
     use super::*;
     use tracing_subscriber::prelude::*;
+    #[test]
+    fn escaped_large_messages_split_without_loss() {
+        let collector = Collector::new("lognara-core");
+        tracing::subscriber::with_default(
+            tracing_subscriber::registry().with(collector.layer()),
+            || {
+                for _ in 0..16 {
+                    tracing::error!(target: "lognara_core", "{}", "\0".repeat(MAX_TEXT));
+                }
+            },
+        );
+        let records: Vec<_> = collector.rx.try_iter().collect();
+        let parts = batches(&records).unwrap();
+        assert!(parts.len() > 1);
+        assert!(parts.iter().all(|(bytes, _)| bytes.len() <= MAX_BODY));
+        assert_eq!(parts.iter().map(|(_, count)| count).sum::<u64>(), 16);
+    }
     #[cfg(unix)]
     #[test]
     fn outage_restart_replays_identical_bytes_without_collecting_transport_logs() {
