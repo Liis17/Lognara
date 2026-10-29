@@ -56,17 +56,26 @@ pub(crate) struct KnownIssue {
 
 pub(crate) trait Lifetime: Clone + Serialize {
     fn span(&mut self) -> (&mut i64, &mut i64);
+    fn last(&self) -> i64;
 }
 
 impl Lifetime for Known {
     fn span(&mut self) -> (&mut i64, &mut i64) {
         (&mut self.first, &mut self.last)
     }
+
+    fn last(&self) -> i64 {
+        self.last
+    }
 }
 
 impl Lifetime for KnownIssue {
     fn span(&mut self) -> (&mut i64, &mut i64) {
         (&mut self.first, &mut self.last)
+    }
+
+    fn last(&self) -> i64 {
+        self.last
     }
 }
 
@@ -276,6 +285,23 @@ impl DiskCatalog {
         let mut next = self.state.clone();
         let mut known = (*next.known).clone();
         let mut issues = (*next.issues).clone();
+        // Запись, последнее событие которой раньше самого старого хранимого события, не имеет
+        // строк в хранилище: retention удалил их. Очистка до прохода освобождает лимиты.
+        let full = core.snapshot();
+        let oldest = full
+            .closed
+            .iter()
+            .map(|segment| &segment.meta)
+            .chain(full.active.as_ref().map(|active| &active.meta))
+            .filter(|meta| meta.rows > 0)
+            .map(|meta| meta.min_timestamp)
+            .min();
+        drop(full);
+        let (mut removed, mut removed_issues) = (vec![], vec![]);
+        if let Some(oldest) = oldest {
+            removed = prune(&mut known, &mut next.bytes, oldest)?;
+            removed_issues = prune(&mut issues, &mut next.bytes, oldest)?;
+        }
         let (mut changed, mut changed_issues) = (BTreeSet::new(), BTreeSet::new());
         let mut rows = 0_u64;
         let mut stream = raw_frame(core, snapshot, None)
@@ -378,6 +404,13 @@ impl DiskCatalog {
         next.ready = true;
         query::check_deadline(deadline)?;
         let transaction = self.connection.transaction().map_err(anyhow::Error::from)?;
+        for (table, ids) in [("patterns", &removed), ("issues", &removed_issues)] {
+            for id in ids {
+                transaction
+                    .execute(&format!("DELETE FROM {table} WHERE id=?1"), [id])
+                    .map_err(anyhow::Error::from)?;
+            }
+        }
         store(&transaction, "patterns", &changed, &known)?;
         store(&transaction, "issues", &changed_issues, &issues)?;
         transaction
@@ -392,6 +425,29 @@ impl DiskCatalog {
         self.state = next.clone();
         Ok(next)
     }
+}
+
+/// Удаляет записи с последним событием раньше `oldest` и их оценку размера (как в `observe`).
+fn prune<T: Lifetime>(
+    map: &mut BTreeMap<String, Arc<T>>,
+    bytes: &mut usize,
+    oldest: i64,
+) -> Result<Vec<String>, QueryError> {
+    let expired: Vec<String> = map
+        .iter()
+        .filter(|(_, entry)| entry.last() < oldest)
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in &expired {
+        let entry = map.remove(id).expect("listed entry");
+        let size = serde_json::to_vec(&*entry)
+            .map_err(anyhow::Error::from)?
+            .len()
+            + id.len()
+            + 256;
+        *bytes = bytes.saturating_sub(size);
+    }
+    Ok(expired)
 }
 
 /// Обновляет lifetime-границы или добавляет запись с учётом её размера.

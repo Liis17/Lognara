@@ -45,7 +45,7 @@ interface Issue {
 }
 ```
 
-Открытые — проблемы с событиями в периоде вне `resolved`. Новые — открытые с lifetime first_seen в периоде; при неполной истории `counts.new = null` и список пуст. Возвращаются — открытые из `regressed`. Решённые — проблемы из `resolved`, известные каталогу и подходящие под фильтры, включая проблемы без событий в периоде (count 0). Сортировка: решённые по lifetime last_seen DESC, остальные по count DESC, затем fingerprint ASC.
+Открытые — проблемы с событиями в периоде вне `resolved`. Новые — открытые с lifetime first_seen в периоде; при неполной истории `counts.new = null` и список пуст. Возвращаются — открытые из `regressed`. Решённые — проблемы из `resolved`, известные каталогу и подходящие под фильтры, включая проблемы без событий в периоде (count 0). Сортировка: решённые по lifetime last_seen DESC, остальные по count DESC, затем fingerprint ASC. Проблема, все события которой удалены retention, исчезает из каталога (как паттерн в [контракте паттернов](DockPatternsContract.md)) и перестаёт попадать в «Решённые»; её fingerprint в `resolved` игнорируется.
 
 `POST /v1/issues/{fingerprint}/details` (from/to/filters/interval_seconds) возвращает `{as_of, issue, servers: top5 {value,count}, other_servers, examples: до 3 новейших событий}`. Известная каталогу проблема без событий в периоде отдаётся с нулями; неизвестная — 404.
 

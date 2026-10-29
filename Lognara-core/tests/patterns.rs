@@ -452,3 +452,45 @@ async fn deleted_history_is_reported_as_incomplete() {
     );
     core.shutdown().unwrap();
 }
+
+#[tokio::test]
+async fn retention_frees_catalog_entries_of_deleted_events() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = config(dir.path());
+    cfg.pattern_max_entries = 3;
+    cfg.retention = Duration::from_secs(2);
+    cfg.segment_age = Duration::from_secs(1);
+    let core = Core::open(cfg).unwrap();
+    let count = || -> i64 {
+        rusqlite::Connection::open(dir.path().join("patterns.sqlite"))
+            .unwrap()
+            .query_row("SELECT count(*) FROM patterns", [], |row| row.get(0))
+            .unwrap()
+    };
+    core.journal
+        .accept(&batch(&[
+            (LogLevel::Info, "payment alpha accepted", 0),
+            (LogLevel::Info, "payment beta accepted", 1),
+        ]))
+        .unwrap();
+    processed(&core, 2).await;
+    assert_eq!(count(), 2);
+    let end = Instant::now() + Duration::from_secs(20);
+    while {
+        let snapshot = core.snapshot();
+        !snapshot.closed.is_empty() || snapshot.active.is_some()
+    } {
+        assert!(Instant::now() < end, "retention timed out");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // Без очистки четыре разных паттерна превысили бы лимит в три записи.
+    core.journal
+        .accept(&batch(&[
+            (LogLevel::Info, "refund gamma issued", 3600),
+            (LogLevel::Info, "refund delta issued", 3601),
+        ]))
+        .unwrap();
+    processed(&core, 4).await;
+    assert_eq!(count(), 2);
+    core.shutdown().unwrap();
+}
