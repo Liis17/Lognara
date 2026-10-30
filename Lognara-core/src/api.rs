@@ -34,6 +34,7 @@ use crate::{
 pub fn router(core: Arc<Core>) -> Router {
     let queries = Router::new()
         .route("/v1/logs/search", post(search))
+        .route("/v1/logs/sources", post(log_sources))
         .route("/v1/traces/{trace_id}", get(trace))
         .route("/v1/stats/histogram", post(histogram))
         .route("/v1/stats/group-by", post(group_by))
@@ -395,6 +396,21 @@ async fn search(
 ) -> Response {
     match request {
         Ok(Json(request)) => run_search(core, request, false).await,
+        Err(error) => QueryError::Invalid(error.body_text()).into_response(),
+    }
+}
+
+async fn log_sources(
+    State(core): State<Arc<Core>>,
+    request: Result<
+        Json<crate::log_sources::SourceRequest>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> Response {
+    match request {
+        Ok(Json(request)) => {
+            run_analytics(&core, crate::log_sources::list(core.clone(), request)).await
+        }
         Err(error) => QueryError::Invalid(error.body_text()).into_response(),
     }
 }
