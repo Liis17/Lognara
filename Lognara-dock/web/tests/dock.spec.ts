@@ -15,6 +15,12 @@ const events = Array.from({ length: 70 }, (_, index) => ({
   request_id: `req_${index}`, attributes: { 'db.host': '10.4.2.18', duration_ms: 5012, retry: 3 },
 }));
 
+// Следующая страница догружается при прокрутке к концу таблицы; кнопка остаётся запасным путём.
+async function loadNextPage(page: Page) {
+  await page.getByRole('button', { name: 'Загрузить ещё 50', exact: true }).scrollIntoViewIfNeeded();
+  await expect(page.getByRole('button', { name: 'Загрузить ещё 50', exact: true })).toHaveCount(0);
+}
+
 type Call = { path: string; body: Record<string, any> };
 async function fixture(page: Page, initiallyAuthenticated = true, dataset = events) {
   let authenticated = initiallyAuthenticated;
@@ -108,6 +114,99 @@ test('password login and existing account forms remain usable', async ({ page })
   await expect(page.getByText('Пароль изменён, остальные сессии завершены')).toBeVisible();
 });
 
+test('logout asks for confirmation and cancel keeps the session', async ({ page }) => {
+  const calls = await fixture(page);
+  await page.goto('/logs');
+  await page.getByRole('banner').getByRole('button', { name: 'Выйти', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Выйти из Lognara?' });
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole('button', { name: 'Отмена', exact: true }).click();
+  await expect(dialog).toBeHidden();
+  expect(calls.filter(call => call.path === '/api/auth/logout')).toHaveLength(0);
+  await page.getByRole('banner').getByRole('button', { name: 'Выйти', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Выйти', exact: true }).click();
+  await expect(page.getByLabel('Логин', { exact: true })).toBeVisible();
+  expect(calls.filter(call => call.path === '/api/auth/logout')).toHaveLength(1);
+});
+
+test('dragging over the events chart narrows the range and reset restores the preset', async ({ page }) => {
+  const calls = await fixture(page);
+  await page.goto('/logs');
+  const plot = page.getByRole('group', { name: /График событий/ });
+  await expect(plot).toBeVisible();
+  const before = new URL(page.url()).searchParams;
+  const box = (await plot.boundingBox())!;
+  await page.mouse.move(box.x + box.width * 0.2, box.y + box.height * 0.5);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width * 0.5, box.y + box.height * 0.8, { steps: 5 });
+  await page.mouse.up();
+  await expect(page.getByText(/^Выбрано: .* логи ограничены этим диапазоном$/)).toBeVisible();
+  const after = new URL(page.url()).searchParams;
+  expect(Date.parse(after.get('from')!)).toBeGreaterThan(Date.parse(before.get('from')!));
+  expect(Date.parse(after.get('to')!)).toBeLessThan(Date.parse(before.get('to')!));
+  await expect.poll(() => calls.filter(call => call.path === '/api/stats/summary').at(-1)?.body.from).toBe(after.get('from'));
+  await expect(page.getByLabel('Период', { exact: true })).toHaveValue('fixed');
+  await page.getByRole('button', { name: 'Сбросить выбор и масштаб', exact: true }).click();
+  await expect(page.getByLabel('Период', { exact: true })).toHaveValue('1h');
+  await expect(page.getByText(/^Выбрано: /)).toHaveCount(0);
+});
+
+test('failed auto-load does not retry by itself and the button retries once', async ({ page }) => {
+  await fixture(page);
+  let cursorCalls = 0;
+  await page.route('**/api/logs/search', route => {
+    if (!route.request().postDataJSON()?.cursor) return route.fallback();
+    cursorCalls += 1;
+    return route.fulfill({ status: 503, json: { error: 'query_unavailable' } });
+  });
+  await page.goto('/logs');
+  const more = page.getByRole('button', { name: 'Загрузить ещё 50', exact: true });
+  await more.scrollIntoViewIfNeeded();
+  await expect(page.getByRole('alert')).toBeVisible();
+  await expect(more).toBeEnabled();
+  // Наблюдатель срабатывает сразу при повторной подписке; короткая пауза ловит возможный цикл.
+  await page.waitForTimeout(500);
+  expect(cursorCalls).toBe(1);
+  await more.click();
+  await expect.poll(() => cursorCalls).toBe(2);
+  await expect(more).toBeEnabled();
+  await page.waitForTimeout(500);
+  expect(cursorCalls).toBe(2);
+});
+
+test('patterns list shows share, growth tone and the selected sort', async ({ page }) => {
+  await fixture(page);
+  const pattern = (id: string, level: string, text: string, count: number, growth: number) => ({
+    pattern_id: id, environment: 'prod', service: 'billing', level, template: text,
+    parts: [{ kind: 'literal', text }, { kind: 'variable', name: 'ms', variable_type: 'number' }], exact: false,
+    count, share: count / 300, previous_count: 10, growth_percent: growth, is_new: false,
+    first_seen: new Date(now - 7_200_000).toISOString(), last_seen: new Date(now).toISOString(),
+    buckets: [0, 1, 2].map(index => ({ timestamp: new Date(now - (3 - index) * 60_000).toISOString(), count: index + 1 })),
+  });
+  const sorts: string[] = [];
+  await page.route('**/api/patterns/hidden', route => route.fulfill({ json: { pattern_ids: [] } }));
+  await page.route('**/api/patterns/search**', route => {
+    sorts.push(route.request().postDataJSON().sort);
+    return route.fulfill({ json: {
+      algorithm_version: 1, as_of: new Date(now).toISOString(), watermark: 5, core_watermark: 5,
+      history_from: new Date(now - 86_400_000).toISOString(), history_complete: true,
+      total_events: 300, total_patterns: 2, visible_patterns: 2, new_patterns: 0,
+      patterns: [pattern('a'.repeat(32), 'error', 'gateway timeout after ', 214, 120), pattern('b'.repeat(32), 'info', 'request took ', 86, -12)],
+    } });
+  });
+  await page.goto('/logs?view=patterns');
+  await expect(page.getByRole('heading', { name: 'Паттерны', exact: true })).toBeVisible();
+  const rows = page.locator('.pattern-row');
+  await expect(rows).toHaveCount(2);
+  await expect(rows.first().locator('.pattern-growth')).toHaveClass(/growth-up/);
+  await expect(rows.nth(1).locator('.pattern-growth')).toHaveClass(/growth-down/);
+  await expect(page.getByText(/Показано 2 из 2 видимых паттернов/)).toBeVisible();
+  await expect(page.getByRole('button', { name: /^Live/ })).toHaveCount(0);
+  await page.screenshot({ path: test.info().outputPath('patterns-desktop.png'), fullPage: true });
+  await page.getByLabel('Сортировка', { exact: true }).selectOption('growth');
+  await expect.poll(() => sorts.at(-1)).toBe('growth');
+});
+
 test('history filter uses typed core query, cursor and text-scoped counts', async ({ page }) => {
   const calls = await fixture(page);
   await page.goto('/logs');
@@ -116,7 +215,7 @@ test('history filter uses typed core query, cursor and text-scoped counts', asyn
   await page.getByRole('button', { name: 'Найти', exact: true }).click();
   await expect.poll(() => calls.filter((call) => call.path === '/api/stats/summary').at(-1)?.body.filters)
     .toEqual({ service: ['billing'], level: ['error', 'warn'] });
-  await page.getByRole('button', { name: /Загрузить ещё/ }).click();
+  await loadNextPage(page);
   await expect.poll(() => calls.filter((call) => call.path === '/api/logs/search').at(-1)?.body.cursor).toBe('page-2');
   await expect(page.getByRole('button', { name: /Payment retry 69/ })).toBeVisible();
   await expect(page.getByText('В диапазоне 70', { exact: true })).toBeVisible();
@@ -230,7 +329,7 @@ test('repeated event ids open one occurrence and shared link restores its timest
   const repeated = { ...events[1], id: events[0].id, message: 'Repeated ID second event' };
   await fixture(page, true, [...events.slice(0, 50), repeated]);
   await page.goto('/logs');
-  await page.getByRole('button', { name: 'Загрузить ещё 50', exact: true }).click();
+  await loadNextPage(page);
   await page.getByRole('button', { name: 'Repeated ID second event', exact: true }).click();
   await expect(page.locator('.row-button[aria-expanded=true]')).toHaveCount(1);
   await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
@@ -261,6 +360,7 @@ test('switching to Trace clears occurrence selection when equal ids and timestam
   await expect(page).toHaveURL(/selected_occurrence=1/);
   await page.getByRole('button', { name: 'Открыть Trace', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Связанные логи Trace', exact: true })).toBeVisible();
+  await page.screenshot({ path: test.info().outputPath('trace-desktop.png'), fullPage: true });
   expect(new URL(page.url()).searchParams.has('selected')).toBe(false);
   await expect(page.locator('.row-button[aria-expanded=true]')).toHaveCount(0);
   await expect(page.locator('.row-button').first()).toHaveText('▸Occurrence A');
@@ -358,7 +458,7 @@ test('history beyond the UTC bucket cap keeps cursor search without inventing to
   expect(calls.filter(call => call.path === '/api/stats/summary')).toHaveLength(0);
   await expect(page.getByText(/^В диапазоне /)).toHaveCount(0);
   await expect(page.locator('.histogram')).toHaveCount(0);
-  await page.getByRole('button', { name: 'Загрузить ещё 50', exact: true }).click();
+  await loadNextPage(page);
   await expect(page.locator('.row-button')).toHaveCount(70);
   expect(calls.filter(call => call.path === '/api/logs/search').at(-1)?.body.cursor).toBe('page-2');
   // The exact exclusive bound still fits, so the summary becomes available again.

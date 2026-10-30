@@ -1,20 +1,42 @@
-import { useEffect, useState } from "react";
-import { Navigate, NavLink, Route, Routes, useNavigate } from "react-router";
+import { Component, type ReactNode, Suspense, lazy, useEffect, useRef, useState } from "react";
+import { Navigate, NavLink, Route, Routes, useLocation, useNavigate } from "react-router";
 import { api, type Me } from "./api";
-import Access from "./pages/Access";
-import Analytics from "./pages/Analytics";
-import Errors from "./pages/Errors";
-import Infrastructure from "./pages/Infrastructure";
-import Login from "./pages/Login";
-import Logs from "./pages/Logs";
-import Metrics from "./pages/Metrics";
-import MetricDetail from "./pages/MetricDetail";
-import Settings from "./pages/Settings";
+
+// Разделы грузятся отдельными чанками при первом переходе.
+const Access = lazy(() => import("./pages/Access"));
+const Analytics = lazy(() => import("./pages/Analytics"));
+const Errors = lazy(() => import("./pages/Errors"));
+const Infrastructure = lazy(() => import("./pages/Infrastructure"));
+const Login = lazy(() => import("./pages/Login"));
+const Logs = lazy(() => import("./pages/Logs"));
+const Metrics = lazy(() => import("./pages/Metrics"));
+const MetricDetail = lazy(() => import("./pages/MetricDetail"));
+const Settings = lazy(() => import("./pages/Settings"));
+
+const loadingPage = <div className="session-state" role="status">Загружаем раздел…</div>;
+
+// После обновления dock открытая вкладка может запросить уже удалённый чанк.
+class ChunkBoundary extends Component<{ children: ReactNode; resetKey: string }, { failed: boolean }> {
+  state = { failed: false };
+  static getDerivedStateFromError() { return { failed: true }; }
+  componentDidUpdate(previous: { resetKey: string }) {
+    if (this.state.failed && previous.resetKey !== this.props.resetKey) this.setState({ failed: false });
+  }
+  render() {
+    if (!this.state.failed) return this.props.children;
+    return <div className="session-state" role="alert">
+      <p>Не удалось загрузить раздел. Возможно, Dock обновился.</p>
+      <button type="button" className="button solid" onClick={() => window.location.reload()}>Перезагрузить страницу</button>
+    </div>;
+  }
+}
 
 export default function App() {
   // undefined: ещё проверяем сессию, null: не вошли.
   const [me, setMe] = useState<Me | null | undefined>(undefined);
   const navigate = useNavigate();
+  const { pathname } = useLocation();
+  const logoutDialog = useRef<HTMLDialogElement>(null);
 
   const refresh = () =>
     api<Me>("GET", "/api/me")
@@ -31,14 +53,19 @@ export default function App() {
 
   if (me === null) {
     return (
-      <Routes>
-        <Route path="/login" element={<Login onLogin={refresh} />} />
-        <Route path="*" element={<Navigate to="/login" replace />} />
-      </Routes>
+      <ChunkBoundary resetKey={pathname}>
+        <Suspense fallback={loadingPage}>
+          <Routes>
+            <Route path="/login" element={<Login onLogin={refresh} />} />
+            <Route path="*" element={<Navigate to="/login" replace />} />
+          </Routes>
+        </Suspense>
+      </ChunkBoundary>
     );
   }
 
   const logout = async () => {
+    logoutDialog.current?.close();
     await api("POST", "/api/auth/logout").catch(() => undefined);
     setMe(null);
     navigate("/login");
@@ -48,7 +75,7 @@ export default function App() {
     <div className="app">
       <header className="topbar">
         <NavLink className="brand" to="/logs" aria-label="Lognara Dock, логи">
-          lognara<span>/</span>dock
+          lognara<span><b>//</b>dock</span>
         </NavLink>
         <nav aria-label="Разделы">
           <NavLink to="/logs">Логи</NavLink>
@@ -59,24 +86,39 @@ export default function App() {
           <NavLink to="/access">Подключения</NavLink>
           <NavLink to="/settings">Настройки</NavLink>
         </nav>
-        <span className="user">{me.username}</span>
-        <button className="quiet" onClick={logout}>Выйти</button>
+        <div className="user">
+          <img src="/favicon.png" alt="" width="28" height="28" />
+          <span>{me.username}</span>
+        </div>
+        <button className="quiet" onClick={() => logoutDialog.current?.showModal()}>Выйти</button>
       </header>
+      <dialog ref={logoutDialog} className="confirm-dialog" aria-labelledby="logout-title">
+        <h2 id="logout-title">Выйти из Lognara?</h2>
+        <p>Вы сможете снова войти в любой момент.</p>
+        <div className="confirm-actions">
+          <button type="button" className="quiet" onClick={() => logoutDialog.current?.close()}>Отмена</button>
+          <button type="button" className="solid" onClick={logout}>Выйти</button>
+        </div>
+      </dialog>
       <main>
-        <Routes>
-          <Route path="/logs" element={<Logs onUnauthorized={() => setMe(null)} />} />
-          <Route path="/errors" element={<Errors onUnauthorized={() => setMe(null)} />} />
-          <Route path="/analytics" element={<Analytics onUnauthorized={() => setMe(null)} />} />
-          <Route path="/infrastructure" element={<Infrastructure onUnauthorized={() => setMe(null)} />} />
-          <Route
-            path="/metrics"
-            element={<Metrics onUnauthorized={() => setMe(null)} />}
-          />
-          <Route path="/metrics/detail" element={<MetricDetail onUnauthorized={() => setMe(null)} />} />
-          <Route path="/access" element={<Access onUnauthorized={() => setMe(null)} />} />
-          <Route path="/settings" element={<Settings onChange={refresh} />} />
-          <Route path="*" element={<Navigate to="/logs" replace />} />
-        </Routes>
+        <ChunkBoundary resetKey={pathname}>
+          <Suspense fallback={loadingPage}>
+            <Routes>
+              <Route path="/logs" element={<Logs onUnauthorized={() => setMe(null)} />} />
+              <Route path="/errors" element={<Errors onUnauthorized={() => setMe(null)} />} />
+              <Route path="/analytics" element={<Analytics onUnauthorized={() => setMe(null)} />} />
+              <Route path="/infrastructure" element={<Infrastructure onUnauthorized={() => setMe(null)} />} />
+              <Route
+                path="/metrics"
+                element={<Metrics onUnauthorized={() => setMe(null)} />}
+              />
+              <Route path="/metrics/detail" element={<MetricDetail onUnauthorized={() => setMe(null)} />} />
+              <Route path="/access" element={<Access onUnauthorized={() => setMe(null)} />} />
+              <Route path="/settings" element={<Settings onChange={refresh} />} />
+              <Route path="*" element={<Navigate to="/logs" replace />} />
+            </Routes>
+          </Suspense>
+        </ChunkBoundary>
       </main>
     </div>
   );

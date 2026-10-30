@@ -49,12 +49,14 @@ Lognara-dock/
     src/types.ts              wire-типы событий, запросов и агрегатов
     src/logs.ts               ограниченный query parser, Live merge, контекст и CSV
     src/logs.test.ts          query/history/live/CSV unit-тесты Node
-    src/components/Histogram.tsx count SVG, сравнение, доступные числа и drilldown
+    src/components/Histogram.tsx count SVG, сравнение, доступные числа и drilldown (аналитика)
+    src/components/EventsChart.tsx график событий/Trace: выделение диапазона, масштаб, уровни
+    src/components/PeriodChips.tsx границы периода, часовой пояс и момент снимка
     src/components/Patterns.tsx  режим паттернов: таблица, sparkline, детали, скрытие, переход к событиям
     src/webauthn.ts           base64url ↔ ArrayBuffer для navigator.credentials
-    src/App.tsx               проверка /api/me, маршруты /login, /logs, /errors, /analytics, /infrastructure, /metrics, /access, /settings
-    src/pages/Login.tsx       пароль и кнопка passkey
-    src/pages/Logs.tsx        история/cursor/Trace, URL, отдельный Live, детали, экспорт
+    src/App.tsx               проверка /api/me, верхняя панель, подтверждение выхода, ленивые маршруты /login, /logs, /errors, /analytics, /infrastructure, /metrics, /access, /settings
+    src/pages/Login.tsx       пароль, показ пароля, кнопка passkey и анимированный фон
+    src/pages/Logs.tsx        история/cursor/Trace, URL, автодогрузка, отдельный Live, детали, экспорт
     src/pages/Errors.tsx      проблемы: вкладки статусов, stack trace, история, решение и переходы
     src/pages/Analytics.tsx   единая сводка, stacked levels, p95/coverage/actions, сравнение и переход в логи
     src/pages/Infrastructure.tsx цепочка, узлы и диск, последовательный polling и stale-снимок
