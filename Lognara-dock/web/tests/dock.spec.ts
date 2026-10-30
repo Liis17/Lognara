@@ -108,6 +108,21 @@ test('password login and existing account forms remain usable', async ({ page })
   await expect(page.getByText('Пароль изменён, остальные сессии завершены')).toBeVisible();
 });
 
+test('logout asks for confirmation and cancel keeps the session', async ({ page }) => {
+  const calls = await fixture(page);
+  await page.goto('/logs');
+  await page.getByRole('banner').getByRole('button', { name: 'Выйти', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Выйти из Lognara?' });
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole('button', { name: 'Отмена', exact: true }).click();
+  await expect(dialog).toBeHidden();
+  expect(calls.filter(call => call.path === '/api/auth/logout')).toHaveLength(0);
+  await page.getByRole('banner').getByRole('button', { name: 'Выйти', exact: true }).click();
+  await dialog.getByRole('button', { name: 'Выйти', exact: true }).click();
+  await expect(page.getByLabel('Логин', { exact: true })).toBeVisible();
+  expect(calls.filter(call => call.path === '/api/auth/logout')).toHaveLength(1);
+});
+
 test('history filter uses typed core query, cursor and text-scoped counts', async ({ page }) => {
   const calls = await fixture(page);
   await page.goto('/logs');
