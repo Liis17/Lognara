@@ -184,6 +184,57 @@ async fn duplicate_deliveries_of_one_report_are_counted_once() {
 }
 
 #[tokio::test]
+async fn series_cutoff_reports_the_number_of_truncated_series() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = Core::open(config(dir.path(), 1000)).unwrap();
+    let router = api::router(core.clone());
+    let groups = (0..21)
+        .map(|index| {
+            let instance = format!("instance-{index:02}");
+            (
+                source("api", Some(&instance)),
+                vec![
+                    report(
+                        index * 2 + 1,
+                        "2026-10-13T10:00:10Z",
+                        json!({"runs": 0}),
+                        json!({}),
+                    ),
+                    report(
+                        index * 2 + 2,
+                        "2026-10-13T10:00:40Z",
+                        json!({"runs": index + 1}),
+                        json!({}),
+                    ),
+                ],
+            )
+        })
+        .collect();
+    core.journal.accept(&batch(groups)).unwrap();
+    wait(|| core.snapshot().watermark >= 42);
+
+    let (status, body) = send(
+        &router,
+        "POST",
+        QUERY,
+        Some("query"),
+        Some(query_with(
+            "runs",
+            FROM,
+            TO,
+            60,
+            json!({"split":"instance"}),
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["series"].as_array().unwrap().len(), 20);
+    assert_eq!(body["truncated"], true);
+    assert_eq!(body["truncated_count"], 1);
+    core.shutdown().unwrap();
+}
+
+#[tokio::test]
 async fn delta_sums_instances_and_splits_them_by_instance() {
     let dir = tempfile::tempdir().unwrap();
     let core = Core::open(config(dir.path(), 1000)).unwrap();

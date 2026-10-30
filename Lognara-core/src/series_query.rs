@@ -68,6 +68,8 @@ pub struct QueryResponse {
     pub unit: String,
     pub buckets: Vec<String>,
     pub series: Vec<SeriesLine>,
+    pub truncated: bool,
+    pub truncated_count: usize,
     pub as_of: String,
 }
 
@@ -380,6 +382,7 @@ pub async fn query(core: Arc<Core>, request: QueryRequest) -> Result<QueryRespon
         })
         .collect();
     ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    let truncated_count = ranked.len().saturating_sub(MAX_SERIES);
     ranked.truncate(MAX_SERIES);
     ranked.sort_by(|a, b| a.1.cmp(&b.1));
     let series = ranked
@@ -401,6 +404,8 @@ pub async fn query(core: Arc<Core>, request: QueryRequest) -> Result<QueryRespon
             .map(|bucket| format_timestamp(*bucket))
             .collect(),
         series,
+        truncated: truncated_count > 0,
+        truncated_count,
         as_of: format_timestamp(snapshot.published_at),
     })
 }

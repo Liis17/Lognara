@@ -2,6 +2,9 @@
 
 FROM rust:1-bookworm AS build
 ENV CARGO_BUILD_JOBS=2
+ARG LOGNARA_RELEASE_VERSION
+ARG LOGNARA_GIT_COMMIT
+ENV LOGNARA_RELEASE_VERSION=$LOGNARA_RELEASE_VERSION LOGNARA_GIT_COMMIT=$LOGNARA_GIT_COMMIT
 WORKDIR /src
 COPY Lognara-core/Cargo.toml Lognara-core/Cargo.lock ./Lognara-core/
 COPY Lognara-core/src ./Lognara-core/src

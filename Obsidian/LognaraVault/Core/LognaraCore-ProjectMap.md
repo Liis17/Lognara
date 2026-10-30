@@ -36,9 +36,11 @@ Parent: [[Core/LognaraCore]]
 | series_query | `GET /v1/series` и `POST /v1/series/query`: корзины, split, `server`, `environment`, приращения, план чтения по суткам (агрегат или точки), до 20 серий |
 | rollup | Суточные агрегаты точек: уровни по возрасту, отпечаток, фоновый поток `lognara-rollups`, ночная перепроверка, восстановление при старте |
 | metrics | Счётчики и gauges Prometheus, включая `lognara_core_series_*` |
+| log_sources | Query-auth pagination distinct service/server/environment names from retained log Parquet and active Arrow snapshot |
 | tests/series.rs | Точки из отчётов, сохранность файлов после рестарта, retention логов не трогает метрики, слияние дня, состояния незавершённого слияния (файлы и каталог), срок хранения метрик и снятие агрегатов |
 | tests/crashes.rs | Subprocess с feature `crash-tests`: точки `series_after_parquet`, `series_compact_*` и `segment_compact_*` в списке аварийных точек; тест агрегатов с `rollup_after_parquet` и `rollup_after_mark` |
 | tests/series_query.rs | Повтор одного отчёта, суммы по экземплярам, cumulative, gauge, открытый сегмент, список, окружение (фильтр и список), ошибки запросов, токен; план чтения по суткам: агрегаты, смешанные окна, устаревший агрегат, открытые точки суток |
+| tests/log_sources.rs | Query auth, exact source/environment filters, retained sources and lossless pagination beyond 1000 names |
 | tests/rollups.rs | Почасовые и 12-часовые корзины, повтор доставки, поздняя точка, смена окна при рестарте, ночная перепроверка, очистка незарегистрированных файлов и строк при старте, точки последних 7 суток без агрегата |
 | tests/definitions.rs | Админ-маршруты только с admin-токеном, валидация, правила по сервису, применение к новым событиям, предпросмотр |
 | examples/relay_fixture | Fixture через настоящий encoder relay; запись без происхождения (`origin: None`) сохраняет прежний контракт |

@@ -11,6 +11,8 @@ use crate::{
 #[derive(Serialize)]
 pub struct Status {
     pub version: &'static str,
+    pub release_version: Option<&'static str>,
+    pub git_commit: Option<&'static str>,
     pub as_of: String,
     pub ready: bool,
     pub visible_sequence: u64,
@@ -57,6 +59,8 @@ pub fn status(core: &Core) -> io::Result<Status> {
         .min();
     Ok(Status {
         version: env!("CARGO_PKG_VERSION"),
+        release_version: option_env!("LOGNARA_RELEASE_VERSION").filter(|value| !value.is_empty()),
+        git_commit: option_env!("LOGNARA_GIT_COMMIT").filter(|value| !value.is_empty()),
         as_of: format_timestamp(now_nanos()),
         ready: core.journal.ready(),
         visible_sequence: metrics.visible_sequence.load(Relaxed),

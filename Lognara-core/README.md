@@ -41,7 +41,7 @@ Core запускается с обязательными разными `LOGNAR
 | `POST /v1/admin/agents/{id}/rotate-token` | admin | Без тела → `200 {"agent":{…},"token":"lna_…"}`, `Cache-Control: no-store`; `404 not_found` |
 | `DELETE /v1/admin/agents/{id}` | admin | `204`, `404 not_found` |
 | `POST /v1/heartbeat` | relay | JSON отчёт relay и его агентов → 204; hash агента сопоставляется только внутри relay |
-| `GET /v1/status` | query | ready/version/lag/WAL и текущий filesystem storage |
+| `GET /v1/status` | query | package `version`, необязательные `release_version`/`git_commit`, ready/lag/WAL и filesystem storage |
 | `GET /v1/agents` | relay | `{"agents":["sha256 hex",…]}` только для этого relay |
 
 Имя после trim: 1..64 символа, без управляющих. Имя relay уникально глобально, агента — внутри relay. Ошибки JSON `{"error":"code"}`: `400 invalid_name/invalid_request`, `404 relay_not_found/not_found`, `409 name_taken/relay_has_agents`. Неизвестный или удалённый токен relay даёт `401`; admin/query-токены не дают права отправлять пачки. Поля `service/server/backend` не сверяются. Регистрируйте каждый процесс отдельно; потерянный токен требует пересоздания профиля.
@@ -62,6 +62,8 @@ Admin-списки добавляют `as_of` по часам core и после
 Текст: `all` (по умолчанию) или `phrase`, Unicode, lowercase, без стемминга. Limit 1..1000, по умолчанию 100. Для следующей страницы повторить запрос с `cursor`; limit можно менять. Новые записи в этот обход не включаются. Курсор подписан, живёт 10 минут и становится недействителен после рестарта или retention (`410`).
 
 `GET /v1/traces/{32 hex}?from=...&to=...&limit=100&cursor=...` возвращает такие же события в порядке возрастания времени. Это события trace, не реконструкция длительностей span. Поиск сортирует по убыванию времени; ничьи разрешает внутренний номер события.
+
+`POST /v1/logs/sources` (query Bearer) возвращает полный список различающихся источников по `field: service | server | environment`, `filters` с точными `service`, `server`, `environment`, `limit` 1..1000 (по умолчанию 100) и подписанному `cursor`. Даты не нужны. Ответ содержит `values`, `next_cursor`, `as_of`; снимок охватывает активный и все удерживаемые сегменты логов, а cursor фиксирует watermark на 10 минут: новые события не меняют страницы. После рестарта или изменения поколения retention курсор недействителен. Запрос использует общий analytics slot и deadline; каталог источников отдельно не сохраняется.
 
 Ошибки JSON/фильтров — `400`, истёкший курсор — `410`, занятая ёмкость или ошибка хранилища — `503`, таймаут — `504`. Неподдерживаемые поля не игнорируются.
 
@@ -103,7 +105,9 @@ Admin-списки добавляют `as_of` по часам core и после
 - `GET /v1/series` возвращает `{"metrics": [...]}`: по записи на (service, name, origin) с `first_seen`, `last_seen` в RFC3339, `definition` и `environments` (отсортированные окружения точек по всем origin, `[]` если окружений нет). Определения без точек тоже в списке, даты в них `null`.
 - `GET /v1/series?group_by=server` возвращает серверные метаданные; необязательные `server` и `service` сужают каталог. `GET /v1/series/sources` возвращает только пары сервер/сервис, включая определения без точек.
 - `POST /v1/series/lookup` с query-токеном принимает `{keys:[{server,service,name,origin}]}` и возвращает `{metrics:[...]}` только для найденных ключей без значений графиков. Повторы объединяются, отсутствующие ключи опускаются. Подробнее: [контракт метрик](../docs/MetricsBundle.md).
-- `POST /v1/series/query` с `service`, `name`, `from`, `to`, `step_seconds` (1..604800), `split` (`none`, `instance` или `labels`, по умолчанию `none`) и необязательными `origin` и `environment` (без `environment` - сумма по всем окружениям) возвращает `kind`, `aggregation`, `unit`, `buckets`, до 20 серий `series` с `values` (`null` без данных) и `as_of`. Корзин не больше 10000. У `cumulative` значения - приращения; первое приращение считается от предыдущей корзины. Сутки окна читаются суточными агрегатами вместо точек, если шаг кратен их корзине и агрегат актуален (см. [эксплуатация](docs/operations.md)).
+- `POST /v1/series/query` с `service`, `name`, `from`, `to`, `step_seconds` (1..604800), `split` (`none`, `instance` или `labels`, по умолчанию `none`) и необязательными `origin` и `environment` (без `environment` - сумма по всем окружениям) возвращает `kind`, `aggregation`, `unit`, `buckets`, до 20 серий `series` с `values` (`null` без данных), `truncated`, `truncated_count` и `as_of`. Новые поля явно показывают сохранённое ограничение 20 серий; корзин не больше 10000. У `cumulative` значения - приращения; первое приращение считается от предыдущей корзины. Сутки окна читаются суточными агрегатами вместо точек, если шаг кратен их корзине и агрегат актуален (см. [эксплуатация](docs/operations.md)).
+
+Локальный package `version` в `/v1/status` не является версией образа. При публикации Docker CI задаёт `LOGNARA_RELEASE_VERSION` и `LOGNARA_GIT_COMMIT`; без build args оба поля остаются `null`.
 
 ## Запуск и проверка
 

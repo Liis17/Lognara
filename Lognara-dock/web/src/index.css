@@ -336,6 +336,29 @@ pre.json, .event-details pre, tr.details pre { margin: 0; padding: 12px; backgro
 .settings form { padding: 22px; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; }
 .settings label { margin-bottom: 14px; }
 .settings h2 { margin-bottom: 18px; }
+.mcp-access { display: grid; gap: 16px; max-width: 1040px; }
+.mcp-access > header h1, .oauth-consent h1 { margin: 0 0 4px; }
+.mcp-access > header p { margin: 0; }
+.mcp-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; align-items: start; }
+.mcp-card { min-width: 0; padding: 22px; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; }
+.mcp-card h2 { margin: 0 0 12px; }
+.mcp-card p { overflow-wrap: anywhere; }
+.mcp-card code { overflow-wrap: anywhere; }
+.mcp-card form { display: grid; gap: 10px; }
+.mcp-secret { display: grid; gap: 10px; margin-top: 18px; }
+.mcp-secret textarea { width: 100%; overflow-wrap: anywhere; font: 12px/1.5 var(--mono); }
+.mcp-list { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.mcp-list li { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--line-soft); }
+.mcp-list li:last-child { border-bottom: 0; }
+.mcp-list li > div { display: grid; min-width: 0; }
+.mcp-list .muted { font-size: 12px; overflow-wrap: anywhere; }
+.oauth-consent { display: grid; place-items: start center; padding-top: min(10vh,80px); }
+.oauth-consent .mcp-card { width: min(560px,100%); }
+.oauth-consent h1 { margin-bottom: 18px; }
+.oauth-consent dl { display: grid; grid-template-columns: 120px minmax(0,1fr); gap: 8px 12px; }
+.oauth-consent dt { color: var(--ink3); }
+.oauth-consent dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.oauth-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 22px; }
 .passkeys { padding: 0; list-style: none; margin: 0 0 18px; }
 .passkeys li { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 12px 0; border-bottom: 1px solid var(--line); }
 .passkeys li .muted { font-size: 12px; }
@@ -506,6 +529,7 @@ pre.json, .event-details pre, tr.details pre { margin: 0; padding: 12px; backgro
   .pattern-spark { width: 90px; }
   .analytics-kpis { grid-template-columns: repeat(2,minmax(0,1fr)); }
   .settings { grid-template-columns: 1fr; }
+  .mcp-grid { grid-template-columns: 1fr; }
 }
 @media (max-width:640px) {
   .topbar { padding: 14px 16px; gap: 10px; }

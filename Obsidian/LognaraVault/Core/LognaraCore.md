@@ -5,7 +5,7 @@ Parent: [[Index]]
 ## Назначение и состояние
 
 Центральный Rust-crate `Lognara-core/`, edition 2024, MSRV 1.94. Принимает контракт [[Relay/LognaraRelay]], хранит события и предоставляет API поиска и аналитики.
-Реализованы конфигурация, HTTP-приём, бинарная модель, WAL, дедупликация пачек, восстановление и JSON-представление. Реализованы материализация в Arrow/Parquet, каталог SQLite, согласованные снимки и индексы; доступны HTTP-поиск, trace lookup, статистика и графики метрик (раздел «Метрики»).
+Реализованы конфигурация, HTTP-приём, бинарная модель, WAL, дедупликация пачек, восстановление и JSON-представление. Реализованы материализация в Arrow/Parquet, каталог SQLite, согласованные снимки и индексы; доступны HTTP-поиск, trace lookup, статистика, retained log source discovery и графики метрик.
 
 ## Контракт
 
@@ -86,7 +86,8 @@ WAL хранит одну версионированную запись на ф�
 
 | Метод | Назначение |
 |---|---|
-| `api::router(core: Arc<Core>): Router` | Собирает приём relay, query API (логи и серии) и admin API (relay, агенты, `/v1/admin/series/*`). |
+| `api::router(core: Arc<Core>): Router` | Собирает приём relay, query API (логи, источники, серии) и admin API (relay, агенты, `/v1/admin/series/*`). |
+| `log_sources::list(core: Arc<Core>, request: SourceRequest): Result<SourcePage, QueryError>` | Query-auth `POST /v1/logs/sources`: distinct service/server/environment по точным фильтрам из активного и закрытых retained log-сегментов; signed cursor привязан к snapshot и query, без отдельного persistent catalog. |
 | `api::ingest_router(journal: Arc<Journal>): Router` | Приём relay, список его агентов, health и query-метрики. |
 | `PreparedFilter::new(from, to, filters): Result<PreparedFilter>` | Проверяет диапазон и допустимые фильтры. |
 | `query::search(core, request, ascending, deadline): Result<SearchResponse>` | Ищет в согласованном снимке, возвращает события и курсор. |
@@ -149,7 +150,9 @@ Retention смотрит max core_received_at, а при заданном `LOGNA
 
 Relay с персональным токеном отправляет `POST /v1/heartbeat`; `Access::record_heartbeat(relay_id: i64, heartbeat: RelayHeartbeat): Result<usize>` одной транзакцией сохраняет последний отчёт relay и отчёты агентов с hash, зарегистрированным за ним. `heartbeats` в access.sqlite3 переживает рестарт; более старые отчёты не заменяют новые. Списки admin API добавляют heartbeat и as_of core; до первого отчёта поле может отсутствовать. Относительные возраста ограничены 100*365 днями, перевод в наносекунды выполняется через i128.
 
-`status::status(core: &Core): io::Result<Status>` обслуживает query-защищённый `GET /v1/status`: версия, ready, visible sequence/lag, WAL и лимит, число закрытых сегментов, Parquet, индексы включая активный сегмент, oldest event и настроенный retention, total/available filesystem data_dir. Lag публикации не является p95 доставки; размеры не означают квоту процесса. Размеры закрытого сегмента считаются один раз (`DiskSegment::sizes`), повторно обходится только индекс активного сегмента. Snapshot удерживает сегменты от retention во время подсчёта. Полный [контракт инфраструктуры](../../../docs/DockInfrastructureContract.md).
+`status::status(core: &Core): io::Result<Status>` обслуживает query-защищённый `GET /v1/status`: package version, необязательные `release_version`/`git_commit`, ready, visible sequence/lag, WAL и лимит, число закрытых сегментов, Parquet, индексы включая активный сегмент, oldest event и настроенный retention, total/available filesystem data_dir. Release metadata приходит только из Docker build args; package version не является image tag, локальная сборка без args сериализует `null`. Lag публикации не является p95 доставки; размеры не означают квоту процесса. Размеры закрытого сегмента считаются один раз (`DiskSegment::sizes`), повторно обходится только индекс активного сегмента. Snapshot удерживает сегменты от retention во время подсчёта. Полный [контракт инфраструктуры](../../../docs/DockInfrastructureContract.md).
+
+`POST /v1/logs/sources` принимает `field` service/server/environment, необязательные точные фильтры по всем трём полям, limit 1..1000 и cursor. Он читает имена из Parquet закрытых и Arrow активного сегмента одного snapshot; курсор фиксирует watermark первой страницы и исключает более новые строки, поэтому ingest не нарушает пагинацию. После изменения generation или рестарта следующий cursor получает 410. Обработка занимает общий analytics slot, работает через `spawn_blocking`, уважает query timeout/cancellation и не заводит отдельный каталог. Ответ включает `values`, `next_cursor`, `as_of`.
 
 ## Метрики
 
@@ -183,7 +186,7 @@ Relay с персональным токеном отправляет `POST /v1/
 | `definitions::update(core: &Core, id: &str, input: DefinitionInput): Result<Option<Definition>, QueryError>` | Замена определения; `None`, если id нет. |
 | `definitions::delete(core: &Core, id: &str): Result<bool, QueryError>` | Удаляет определение и пересобирает правила. |
 | `series_query::list(core: Arc<Core>): Result<ListResponse, QueryError>` | `GET /v1/series`: серии каталога и открытого сегмента, окружения (`environments`), определения без точек. |
-| `series_query::query(core: Arc<Core>, request: QueryRequest): Result<QueryResponse, QueryError>` | `POST /v1/series/query`: корзины, split, `environment`, приращения для cumulative, суточные агрегаты для полных суток, до 20 серий. |
+| `series_query::query(core: Arc<Core>, request: QueryRequest): Result<QueryResponse, QueryError>` | `POST /v1/series/query`: корзины, split, `environment`, приращения для cumulative, суточные агрегаты для полных суток; до 20 серий и явные `truncated`/`truncated_count`. |
 | `analytics::preview(core: &Core, request: PreviewRequest): Result<PreviewResponse, QueryError>` | Применяет правило к последним строкам сервиса: до 5000 строк, до 50 образцов. |
 | `columns::write_parquet_with(path: &Path, schema: SchemaRef, batches: &[RecordBatch], failpoint_name: &str): Result<()>` | Общая запись Parquet для логов и серий. |
 | `columns::stream_batches(path: &Path): Result<impl Iterator<Item = Result<RecordBatch>>>` | Потоковое чтение Parquet для слияния дня. |

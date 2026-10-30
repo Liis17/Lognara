@@ -85,6 +85,7 @@ API dock: GET/POST `/api/relays`, `/api/agents`, DELETE `/api/relays/{id}`, `/ap
 | `LOGNARA_DOCK_PASSWORD_MIN_LENGTH` | `12` | минимальная длина нового пароля в символах (максимум 71 байт) |
 | `LOGNARA_DOCK_LIVE_POLL_MS` | `1000` | частота опроса core |
 | `LOGNARA_DOCK_LIVE_LOOKBACK_SECONDS` | `300` | окно для поздно доставленных событий |
+| `LOGNARA_DOCK_MCP_ENABLED` | `false` | включает read-only MCP и OAuth, только явное `true` |
 | `LOGNARA_DOCK_WEB_DIR` | `/usr/share/lognara-dock/web` | собранный фронтенд, в образе уже есть |
 | `RUST_LOG` | `info` | уровень логов |
 
@@ -94,9 +95,29 @@ API dock: GET/POST `/api/relays`, `/api/agents`, DELETE `/api/relays/{id}`, `/ap
 
 - [`Dockerfile`](Dockerfile) собирает фронтенд и бинарник. В образе процесс работает от `1000:1000`.
 - [`docker-compose.example.yml`](docker-compose.example.yml) использует `docker.barkfluff.com/lognara-dock:${LOGNARA_IMAGE_TAG:-master}`, содержит все переменные, тома `./auth` и `./data`, публикует порт только на `127.0.0.1`.
-- [`nginx.example.conf`](nginx.example.conf) показывает TLS и отдельный `location` для SSE без буферизации.
+- [`nginx.example.conf`](nginx.example.conf) показывает TLS, SSE и `/mcp` без буферизации, а также проксирование OAuth metadata.
 
 nginx должен передавать заголовок `Origin` без изменений.
+
+### Удалённый MCP
+
+MCP выключен по умолчанию. Для включения задайте `LOGNARA_DOCK_MCP_ENABLED=true`, опубликуйте внешний HTTPS адрес Dock через nginx и перезапустите сервис. Core остаётся во внутренней Docker-сети. Streamable HTTP endpoint `/mcp` принимает только Bearer PAT или OAuth access token; cookie браузера не даёт доступ. Девять read-only инструментов: `list_applications`, `list_servers`, `list_environments`, `search_logs`, `get_trace`, `summarize_logs`, `list_metrics`, `query_metrics`, `get_versions`. Запись, SQL, admin proxy и live-подписки не публикуются.
+
+Списки источников читают все активные и сохранённые log-сегменты core, фильтруют по точным именам и возвращают полный список страницами. Поиск сохраняет поля и text all/phrase из существующего API; первая страница без границ времени использует последние 24 часа и 100 событий, максимум 1000. RFC3339 from/to или относительная длительность фиксируются в подписанном курсоре на 10 минут. Trace возвращает события по возрастанию времени. Метрики сохраняют kind, unit, aggregation и null-пропуски; запрос использует фильтр environment и сообщает об отсечении свыше 20 рядов. Каждый MCP результат ограничен 2 MiB, за минуту допускается 60 запросов на пользователя, одновременно два на пользователя и восемь на процесс.
+
+На странице **MCP-доступ** можно выпустить именной PAT на 30 дней, увидеть срок и последнее использование, отозвать PAT или OAuth grant. Секрет PAT показывается один раз и копируется явной кнопкой; Dock хранит только его SHA-256. OAuth использует Authorization Code + PKCE S256 и согласие пользователя после входа по паролю или passkey. В первой версии принимаются только валидированные CIMD-документы `https://chatgpt.com/oauth/client.json` и `https://chatgpt.com/oauth/{callback_id}/client.json`; публичная регистрация клиентов выключена. В удалённом клиенте Codex используйте Bearer PAT через `bearer_token_env_var`, не вставляйте секрет в конфигурационный файл.
+
+Доступ открывает полный текст сохранённых логов без маскирования, поэтому выдавайте его только доверенным клиентам и пользователям. События и метрики доступны в рамках существующих query-семантик и сроков хранения; в текущем API нет live-подписок. Nginx должен передавать `Host`, `Origin` и внешний HTTPS scheme, выключать буферизацию на `/mcp` и оставлять core недоступным извне. OAuth metadata и `/oauth/authorize`/`/oauth/token` также проксируются в dock. В первой версии CIMD ограничен документами ChatGPT; публичного DCR нет. См. [документацию OAuth для ChatGPT](https://developers.openai.com/plugins/build/auth/) и [настройку удалённого MCP в Codex](https://learn.chatgpt.com/docs/extend/mcp?surface=cli).
+
+PAT можно подключить к Codex через переменную окружения, не записывая секрет в конфигурацию:
+
+```toml
+[mcp_servers.lognara]
+url = "https://dock.example.com/mcp"
+bearer_token_env_var = "LOGNARA_MCP_TOKEN"
+```
+
+Задайте `LOGNARA_MCP_TOKEN` в окружении Codex значением PAT.
 
 ```sh
 cd Lognara-dock
@@ -117,6 +138,12 @@ docker compose up -d
 | `POST /api/auth/passkey/start`, `/finish` | открыт | вход по passkey |
 | `POST /api/auth/logout` | сессия | завершить сессию |
 | `GET /api/me` | сессия | `{username, passkeys}` |
+| `GET /api/mcp/access` | сессия | состояние MCP и внешний адрес endpoint |
+| `GET`, `POST /api/mcp/personal-tokens` | сессия | список PAT без секретов или выпуск именного PAT на 30 дней; plaintext возвращается один раз |
+| `DELETE /api/mcp/personal-tokens/{id}` | сессия + Origin | отзыв своего PAT |
+| `GET /api/mcp/grants` | сессия | список активных OAuth grants |
+| `DELETE /api/mcp/grants/{id}` | сессия + Origin | отзыв grant и его токенов |
+| `GET`, `POST /api/oauth/consent/{id}` | сессия; POST + Origin | сведения о запросе и решение пользователя |
 | `POST /api/account/password` | сессия | `{current, new}` |
 | `GET /api/account/passkeys` | сессия | список ключей |
 | `POST /api/account/passkeys/start` | сессия | `{name, password}`, начать регистрацию |
@@ -143,6 +170,8 @@ docker compose up -d
 | `GET /*` | открыт | SPA, неизвестный путь отдаёт `index.html` |
 
 Маршруты с пометкой admin dock вызывает в core с `LOGNARA_DOCK_CORE_ADMIN_TOKEN`. Тело запроса к core передаётся как есть, проверяет его core.
+
+Публичный протокол: `POST /mcp` (Streamable HTTP), `GET /.well-known/oauth-protected-resource[/mcp]`, `GET /.well-known/oauth-authorization-server`, `GET /oauth/authorize`, `POST /oauth/token`. OAuth требует входа, явного согласия, Authorization Code + PKCE S256, scope `lognara.read` и точного audience MCP URL. CIMD загружается только с разрешённых HTTPS URL `chatgpt.com`; DNS проверяется на публичные IP, redirects запрещены и адрес назначения закреплён на время запроса.
 
 Ошибки возвращаются как JSON `{"error": "<код>"}`: `unauthorized`, `forbidden`, `too_many_attempts`, `invalid_current_password`, `password_too_short`, `password_too_long`, `invalid_name`, `challenge_expired`, `passkey_rejected`, `passkey_exists`, `not_found`. Для метрик добавлены `core_unavailable` (502: core недоступен, не ответил вовремя или вернул 5xx) и `invalid` (400: ответ содержит `detail` с причиной от core).
 

@@ -36,6 +36,16 @@ SSE-поток каждые 60 секунд перепроверяет сесс�
 
 Dock проксирует query API core через сессию браузера: `POST /api/logs/search`, `GET /api/traces/{trace_id}` с from/to/limit/cursor, `POST /api/stats/histogram`, `POST /api/stats/group-by` и `POST /api/stats/summary`. Входные DTO повторяют типизированный контракт core; неизвестные поля JSON отклоняются. История и Trace сохраняют `events`, `next_cursor`, `as_of` и серверный порядок. Trace возвращает связанные логи, не spans.
 
+## Read-only MCP
+
+`LOGNARA_DOCK_MCP_ENABLED` по умолчанию `false`; при включении `api::router` монтирует отдельный `mcp::router` на `/mcp` и `oauth::router` на metadata/authorization endpoints. MCP работает через `rmcp::transport::streamable_http_server`, stateless JSON ответы, Bearer PAT/OAuth; browser cookie и MCP-токены не дают доступ к другому набору API. Middleware ограничивает Origin/Host, размер запроса 1 MiB, результат 2 MiB, 60 запросов/минуту и 2 in-flight на пользователя, 8 на процесс; cancellation привязан к shutdown. Инструменты `list_applications`, `list_servers`, `list_environments`, `search_logs`, `get_trace`, `summarize_logs`, `list_metrics`, `query_metrics`, `get_versions` имеют `readOnlyHint=true`; write, SQL, admin proxy и live subscription не зарегистрированы.
+
+Source lists используют `CoreClient::log_sources` и query-auth `POST /v1/logs/sources`: точные source filters, активные и закрытые хранимые log-сегменты, signed pagination и snapshot `as_of`. Поиск сохраняет существующие exact filter и all/phrase семантики; поиск без периода начинает с последних 24 часов и 100 событий, cursor фиксирует resolved bounds и живёт 10 минут. Search возвращает DESC, trace ASC. Core ошибки timeout, exhausted capacity, expired snapshot и unavailable не преобразуются в пустой ответ. Метрики используют существующий query и возвращают kind/unit/aggregation/null gaps плюс `truncated` и `truncated_count` при cutoff в 20 рядов.
+
+OAuth — Authorization Code + PKCE S256, scope `lognara.read`, exact resource `/mcp`, согласие после активной htpasswd/passkey сессии. Разрешены только ChatGPT CIMD URI и callback URI из проверенного metadata. Metadata fetch закрепляет только публичные DNS IP, запрещает redirects и ограничен по времени/размеру. DCR выключен. Access token живёт 1 час, refresh 30 дней с rotation и family revoke при replay; PAT живёт 30 дней. Store migration добавляет `mcp_personal_tokens`, `oauth_pending`, `oauth_codes`, `oauth_grants`, `oauth_tokens`, сохраняет только SHA-256 секретов и вызывается через blocking worker. Удаление пользователя из htpasswd отзывает его MCP credentials при следующем запросе.
+
+Страница `/mcp-access` показывает endpoint, одноразово выданный PAT (в памяти страницы, без localStorage), срок, последнее использование и отзывает PAT/grants. `/oauth/consent` показывает client/scope/resource; изменения защищены `session::require_origin`. Публичные metadata и MCP маршруты проксируются nginx отдельно; `/mcp` использует отключённую request/response buffering.
+
 Новые query-запросы имеют HTTP timeout 35 секунд при default timeout core 30 секунд; Live и admin остаются на 10 секундах. Ответы `/api/*` получают `Cache-Control: no-store`. Без сессии запрос даёт 401; POST требует прежний Origin. Ошибки core переводятся в безопасные коды: 400 `invalid_query`, 410 `cursor_expired`, 503 `query_unavailable`, 504 `query_timeout`; неожиданный формат/статус или upstream 401 даёт 502 `core_unavailable`. Тексты ошибок и query/admin-токены core браузеру не выдаются.
 
 ## Страницы логов и аналитики
@@ -116,6 +126,7 @@ API: `POST /api/issues/search`, `POST /api/issues/{fingerprint}/details`, `POST 
 | `LOGNARA_DOCK_PASSWORD_MIN_LENGTH` | нет | `12` | минимум символов нового пароля |
 | `LOGNARA_DOCK_LIVE_POLL_MS` | нет | `1000` | частота опроса core |
 | `LOGNARA_DOCK_LIVE_LOOKBACK_SECONDS` | нет | `300` | окно для поздних событий |
+| `LOGNARA_DOCK_MCP_ENABLED` | нет | `false` | включает отдельные read-only MCP и OAuth endpoints |
 | `LOGNARA_DOCK_WEB_DIR` | нет | `/usr/share/lognara-dock/web` | собранный фронтенд |
 
 Пример Compose, nginx и Dockerfile лежат в `Lognara-dock/`; подробности в `Lognara-dock/README.md`.
@@ -124,7 +135,10 @@ API: `POST /api/issues/search`, `POST /api/issues/{fingerprint}/details`, `POST 
 
 - `Config::from_lookup(lookup: impl Fn(&str) -> Option<String>): Result<Config, ConfigError>` — проверяет `LOGNARA_DOCK_*`, вычисляет origin и RP ID
 - `App::open(config: Config): Result<AppState, Box<dyn Error>>` — читает htpasswd, открывает SQLite, строит Webauthn и Live
-- `api::router(app: AppState): Router` — `/api/*`, health, SPA-fallback и защитные заголовки
+- `api::router(app: AppState): Router` — browser `/api/*`, MCP/OAuth routers, health, SPA-fallback и защитные заголовки
+- `mcp::router(app: AppState): Router` — stateless Streamable HTTP `/mcp`, Bearer validation, quotas и единственный allowlist read tools
+- `oauth::router(app: AppState): Router` — protected-resource/authorization-server metadata и ChatGPT CIMD authorization code + PKCE endpoints
+- `mcp_access::{access,tokens,create_token,revoke_token,grants,revoke_grant}` — browser management PAT и OAuth grants
 - `run(app: AppState, listener: TcpListener, shutdown: CancellationToken): io::Result<()>` — HTTP до отмены, затем закрывает SSE
 - `Htpasswd::users(&self): Option<Arc<HashMap<String, String>>>` — актуальные пользователи, `None` при некорректном файле
 - `Htpasswd::verify(&self, username: &str, password: &str): bool` — bcrypt, для неизвестного логина сравнение с фиктивным хэшем
@@ -139,6 +153,7 @@ API: `POST /api/issues/search`, `POST /api/issues/{fingerprint}/details`, `POST 
 - `Live::subscribe(self: &Arc<Self>): (Vec<Value>, Option<String>, Receiver<Message>)` — снимок и подписка, запускает опрос
 - `CoreClient::search(&self, from, to, limit: usize): Result<Vec<Value>, CoreError>` — поиск core
 - `CoreClient::search_page(&self, request: &SearchRequest): Result<SearchResponse, CoreQueryError>` — историческая страница с фильтрами, текстом и курсором
+- `CoreClient::log_sources(&self, request: &LogSourcesRequest): Result<LogSourcesPage, CoreQueryError>` — точные страницы service/server/environment из query-auth Core API
 - `CoreClient::trace(&self, trace_id: &str, params: &TraceParams): Result<SearchResponse, CoreQueryError>` — связанные события Trace по времени ASC
 - `CoreClient::histogram(&self, request: &HistogramRequest): Result<HistogramResponse, CoreQueryError>` — временные корзины count
 - `CoreClient::group_by(&self, request: &GroupRequest): Result<GroupResponse, CoreQueryError>` — ограниченные группировки count

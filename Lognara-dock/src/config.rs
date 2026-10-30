@@ -37,6 +37,8 @@ pub struct Config {
     pub password_min_length: usize,
     pub live_poll: Duration,
     pub live_lookback: Duration,
+    /// Remote read-only MCP and OAuth endpoints; disabled unless explicitly enabled.
+    pub mcp_enabled: bool,
 }
 
 impl fmt::Debug for Config {
@@ -57,6 +59,7 @@ impl fmt::Debug for Config {
             .field("password_min_length", &self.password_min_length)
             .field("live_poll", &self.live_poll)
             .field("live_lookback", &self.live_lookback)
+            .field("mcp_enabled", &self.mcp_enabled)
             .finish()
     }
 }
@@ -138,6 +141,18 @@ impl Config {
             });
         }
 
+        let mcp_enabled = match get("LOGNARA_DOCK_MCP_ENABLED").as_deref() {
+            None | Some("false") => false,
+            Some("true") => true,
+            Some(value) => {
+                return Err(ConfigError::Invalid {
+                    var: "LOGNARA_DOCK_MCP_ENABLED",
+                    value: value.into(),
+                    expected: "true or false",
+                });
+            }
+        };
+
         let bcrypt_cost = positive(&get, "LOGNARA_DOCK_BCRYPT_COST", 12u32)?;
         if !(10..=14).contains(&bcrypt_cost) {
             return Err(ConfigError::Invalid {
@@ -187,6 +202,7 @@ impl Config {
                 "LOGNARA_DOCK_LIVE_LOOKBACK_SECONDS",
                 300,
             )?),
+            mcp_enabled,
         })
     }
 }
@@ -287,6 +303,22 @@ mod tests {
         assert_eq!(config.password_min_length, 12);
         assert_eq!(config.live_poll, Duration::from_secs(1));
         assert_eq!(config.live_lookback, Duration::from_secs(300));
+        assert!(!config.mcp_enabled);
+    }
+
+    #[test]
+    fn mcp_requires_an_explicit_boolean_switch() {
+        assert!(
+            with_required(&[("LOGNARA_DOCK_MCP_ENABLED", "true")])
+                .unwrap()
+                .mcp_enabled
+        );
+        assert!(
+            !with_required(&[("LOGNARA_DOCK_MCP_ENABLED", "false")])
+                .unwrap()
+                .mcp_enabled
+        );
+        assert!(with_required(&[("LOGNARA_DOCK_MCP_ENABLED", "yes")]).is_err());
     }
 
     #[test]

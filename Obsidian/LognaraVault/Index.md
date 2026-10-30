@@ -25,14 +25,14 @@ Lognara — система сбора логов: агент в контейне
 ### Core
 | Файл | Компонент | Описание |
 |------|-----------|----------|
-| [[Core/LognaraCore]] | lognara-core | Реестр relay/агентов, admin API, хранилище, поиск, аналитика, паттерны сообщений и проблемы ошибок, heartbeat, состояние диска и API серий метрик. |
+| [[Core/LognaraCore]] | lognara-core | Реестр relay/агентов, admin API, хранилище, поиск, аналитика, источники логов, версии сборки, паттерны, проблемы, heartbeat и API метрик. |
 | [[Core/LognaraCore-ProjectMap]] | lognara-core | Модули, конвейер и тесты. |
 
 ### Dock
 
 | Файл | Компонент | Описание |
 |------|-----------|----------|
-| [[Dock/LognaraDock]] | lognara-dock | Веб-интерфейс за nginx: вход/passkey, подключения, история/cursor/Trace, паттерны с персональным скрытием, проблемы с общим статусом, отдельный Live, согласованная аналитика и p95, инфраструктура/узлы/диск, графики метрик и редактор правил; параметры `LOGNARA_DOCK_*`. |
+| [[Dock/LognaraDock]] | lognara-dock | Веб-интерфейс за nginx и read-only remote MCP: вход/passkey, PAT и OAuth grants, история/cursor/Trace, аналитика и метрики; MCP по умолчанию выключен и не использует cookie браузера. |
 | [[Dock/LognaraDock-ProjectMap]] | lognara-dock | Дерево файлов Rust и React, связи модулей и тесты. |
 | [[Dock/DesignIntegration]] | развитие dock | Полный план шести HTML-дизайнов; этапы 0–6 реализованы, дальнейшие backend-этапы и решения пользователя. |
 

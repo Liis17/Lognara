@@ -11,6 +11,8 @@ const Login = lazy(() => import("./pages/Login"));
 const Logs = lazy(() => import("./pages/Logs"));
 const Metrics = lazy(() => import("./pages/Metrics"));
 const MetricDetail = lazy(() => import("./pages/MetricDetail"));
+const McpAccess = lazy(() => import("./pages/McpAccess"));
+const OAuthConsent = lazy(() => import("./pages/OAuthConsent"));
 const Settings = lazy(() => import("./pages/Settings"));
 
 const loadingPage = <div className="session-state" role="status">Загружаем раздел…</div>;
@@ -35,7 +37,7 @@ export default function App() {
   // undefined: ещё проверяем сессию, null: не вошли.
   const [me, setMe] = useState<Me | null | undefined>(undefined);
   const navigate = useNavigate();
-  const { pathname } = useLocation();
+  const { pathname, search } = useLocation();
   const logoutDialog = useRef<HTMLDialogElement>(null);
 
   const refresh = () =>
@@ -57,7 +59,15 @@ export default function App() {
         <Suspense fallback={loadingPage}>
           <Routes>
             <Route path="/login" element={<Login onLogin={refresh} />} />
-            <Route path="*" element={<Navigate to="/login" replace />} />
+            <Route
+              path="*"
+              element={
+                <Navigate
+                  to={pathname === "/oauth/consent" ? `/login?return_to=${encodeURIComponent(`${pathname}${search}`)}` : "/login"}
+                  replace
+                />
+              }
+            />
           </Routes>
         </Suspense>
       </ChunkBoundary>
@@ -84,6 +94,7 @@ export default function App() {
           <NavLink to="/infrastructure">Инфраструктура</NavLink>
           <NavLink to="/metrics">Метрики</NavLink>
           <NavLink to="/access">Подключения</NavLink>
+          <NavLink to="/mcp-access">MCP-доступ</NavLink>
           <NavLink to="/settings">Настройки</NavLink>
         </nav>
         <div className="user">
@@ -114,6 +125,8 @@ export default function App() {
               />
               <Route path="/metrics/detail" element={<MetricDetail onUnauthorized={() => setMe(null)} />} />
               <Route path="/access" element={<Access onUnauthorized={() => setMe(null)} />} />
+              <Route path="/mcp-access" element={<McpAccess />} />
+              <Route path="/oauth/consent" element={<OAuthConsent />} />
               <Route path="/settings" element={<Settings onChange={refresh} />} />
               <Route path="*" element={<Navigate to="/logs" replace />} />
             </Routes>

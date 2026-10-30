@@ -32,4 +32,5 @@ mod wire_budget;
 
 pub mod scoped_metrics;
 
+pub mod log_sources;
 pub mod metric_import;

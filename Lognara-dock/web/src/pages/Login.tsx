@@ -1,5 +1,5 @@
 import { type CSSProperties, type FormEvent, useState } from "react";
-import { useNavigate } from "react-router";
+import { useLocation, useNavigate } from "react-router";
 import { api, errorText } from "../api";
 import { getPasskey } from "../webauthn";
 
@@ -33,9 +33,18 @@ export default function Login({ onLogin }: { onLogin: () => Promise<void> }) {
   const [busy, setBusy] = useState(false);
   const [blobs] = useState(makeBlobs);
   const navigate = useNavigate();
+  const location = useLocation();
 
   const finish = async () => {
     await onLogin();
+    const returnTo = new URLSearchParams(location.search).get("return_to");
+    if (returnTo && ["/oauth/authorize", "/oauth/consent"].some((path) => returnTo.startsWith(`${path}?`))) {
+      const destination = new URL(returnTo, window.location.origin);
+      if (destination.origin === window.location.origin && !returnTo.startsWith("//")) {
+        window.location.assign(`${destination.pathname}${destination.search}`);
+        return;
+      }
+    }
     navigate("/logs", { replace: true });
   };
 

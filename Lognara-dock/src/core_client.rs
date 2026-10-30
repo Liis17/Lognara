@@ -37,12 +37,40 @@ pub enum CoreQueryError {
     Unavailable,
     #[error("core query timed out")]
     Timeout,
+    #[error("core query capacity is exhausted")]
+    Busy,
     #[error("unexpected core response")]
     Unexpected,
     #[error("not found in range")]
     NotFound,
     #[error("pattern index is not ready")]
     NotReady,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LogSourcesRequest {
+    pub field: String,
+    pub filters: LogSourceFilters,
+    pub limit: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct LogSourceFilters {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct LogSourcesPage {
+    pub values: Vec<String>,
+    pub next_cursor: Option<String>,
+    pub as_of: String,
 }
 
 impl From<reqwest::Error> for CoreQueryError {
@@ -164,6 +192,22 @@ impl CoreClient {
             .push(trace_id);
         let reply: SearchResponse = self.query(self.http.get(url).query(params)).await?;
         if reply.events.len() > params.limit {
+            return Err(CoreQueryError::Unexpected);
+        }
+        Ok(reply)
+    }
+
+    /// Exact, paginated distinct names found in retained log sources.
+    pub async fn log_sources(
+        &self,
+        request: &LogSourcesRequest,
+    ) -> Result<LogSourcesPage, CoreQueryError> {
+        let url = self
+            .query_url
+            .join("logs/sources")
+            .expect("core url joins path");
+        let reply: LogSourcesPage = self.query(self.http.post(url).json(request)).await?;
+        if reply.values.len() > request.limit {
             return Err(CoreQueryError::Unexpected);
         }
         Ok(reply)
@@ -368,10 +412,10 @@ impl CoreClient {
             StatusCode::SERVICE_UNAVAILABLE => {
                 // Только неготовый каталог паттернов отличается от общей недоступности.
                 let reply: Value = response.json().await.unwrap_or(Value::Null);
-                if reply["error"] == "pattern index is not ready" {
-                    Err(CoreQueryError::NotReady)
-                } else {
-                    Err(CoreQueryError::Unavailable)
+                match reply["error"].as_str() {
+                    Some("pattern index is not ready") => Err(CoreQueryError::NotReady),
+                    Some("query capacity is exhausted") => Err(CoreQueryError::Busy),
+                    _ => Err(CoreQueryError::Unavailable),
                 }
             }
             StatusCode::GATEWAY_TIMEOUT => Err(CoreQueryError::Timeout),
