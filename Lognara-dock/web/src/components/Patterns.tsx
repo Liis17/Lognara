@@ -2,6 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router";
 import { api, ApiError, errorText } from "../api";
 import { withPatternFilter } from "../logs";
+import PeriodChips from "./PeriodChips";
 import type { ParsedQuery } from "../logs";
 import type { HistogramBucket, MessagePattern, PatternDetailsResponse, PatternPart, PatternRequest, PatternResponse, PatternSort } from "../types";
 
@@ -11,6 +12,9 @@ const date = new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "2-digit"
 const stamp = (value: string) => date.format(new Date(value));
 const growth = (pattern: MessagePattern) => pattern.previous_count === 0 ? "Нет в прошлом окне" :
   `${(pattern.growth_percent ?? 0) > 0 ? "+" : ""}${number.format(pattern.growth_percent ?? 0)}%`;
+// Заметный рост выделяется акцентом, заметное снижение зелёным.
+const growthTone = (pattern: MessagePattern) => pattern.previous_count === 0 || pattern.growth_percent === null ? "" :
+  pattern.growth_percent >= 20 ? "growth-up" : pattern.growth_percent <= -10 ? "growth-down" : "";
 
 export function Template({ parts }: { parts: PatternPart[] }) {
   return <code className="pattern-template">{parts.map((part, index) => part.kind === "literal"
@@ -139,19 +143,22 @@ export default function Patterns({ from, to, range, q, query, error, intervalSec
 
   return <div className="patterns-view">
     <div className="toolbar pattern-toolbar">
-      <label className="inline-label" htmlFor="pattern-sort">Сортировка <select id="pattern-sort" value={sort} onChange={(event) => update("sort", event.target.value)}>
+      <label className="muted" htmlFor="pattern-sort">Сортировка</label>
+      <select id="pattern-sort" value={sort} onChange={(event) => update("sort", event.target.value)}>
         <option value="count">По числу событий</option><option value="growth">По росту</option><option value="last_seen">По последнему событию</option>
-      </select></label>
-      <label className="inline-label"><input type="checkbox" checked={showHidden} onChange={(event) => update("show_hidden", String(event.target.checked))} />Показывать скрытые</label>
+      </select>
+      <label className="inline-label muted"><input type="checkbox" checked={showHidden} onChange={(event) => update("show_hidden", String(event.target.checked))} />Показывать скрытые</label>
       <button type="button" className="button" disabled={loading || !!validation} onClick={() => setRefresh((value) => value + 1)}>Обновить паттерны</button>
     </div>
-    <div className="summary"><h1>Паттерны</h1>{response && <div className="chips">
-      <span className="chip">{number.format(response.total_events)} событий</span><span className="chip">{number.format(response.total_patterns)} паттернов</span>
-      <span className="chip">Новых: {response.new_patterns === null ? "не установлено" : number.format(response.new_patterns)}</span>
-    </div>}</div>
-    <p className="page-note">Период: <time dateTime={from} title={from}>{Number.isFinite(Date.parse(from)) ? stamp(from) : from}</time> → <time dateTime={to} title={to}>{Number.isFinite(Date.parse(to)) ? stamp(to) : to}</time> · {Intl.DateTimeFormat().resolvedOptions().timeZone}.</p>
-    <p className="page-note">Доли считаются от всех совпавших событий, включая скрытые паттерны. Сравнение — с соседним прошлым окном такой же длины и тем же запросом. Отсутствие в прошлом окне не означает новизну.</p>
-    <p className="page-note">Паттерны показывают историю. Live недоступен: группировка выполняется сервером по обработанному снимку.</p>
+    <div className="summary"><h1>Паттерны</h1>
+      {response && <div className="chips">
+        <span className="chip">{number.format(response.total_events)} событий</span><span className="chip">{number.format(response.total_patterns)} паттернов</span>
+        <span className="chip">Новых: {response.new_patterns === null ? "не установлено" : number.format(response.new_patterns)}</span>
+      </div>}
+      <p className="muted">Доли считаются от всех совпавших событий, включая скрытые паттерны</p>
+    </div>
+    <PeriodChips from={from} to={to} />
+    <p className="page-note pattern-intro">Сравнение — с соседним прошлым окном такой же длины и тем же запросом. Отсутствие в прошлом окне не означает новизну.</p>
     {response && <div className="pattern-coverage" role="status">
       <p>Известная история: {response.history_from ? <time dateTime={response.history_from} title={response.history_from}>{stamp(response.history_from)}</time> : "ещё не обработана"} · {response.history_complete ? "полная" : "неполная: новизна части паттернов не установлена"}.</p>
       <p>Обработано до <time dateTime={response.as_of}>{response.as_of}</time> · watermark {number.format(response.watermark)} / {number.format(response.core_watermark)}.
@@ -159,11 +166,11 @@ export default function Patterns({ from, to, range, q, query, error, intervalSec
     </div>}
     {(validation || listError) && <p className="error" role="alert">{validation || listError}</p>}
     {actionError && <p className="error" role="alert">Не удалось изменить видимость: {actionError}</p>}
-    <section className="panel table-scroll" aria-label="Паттерны сообщений">
-      <table className="patterns-table"><thead><tr><th>Уровень</th><th>Паттерн сообщения</th><th>Событий</th>
-        <th className="pattern-secondary">Доля</th><th className="pattern-secondary">Рост</th><th className="pattern-secondary">Динамика</th></tr></thead>
+    <section className="panel" aria-label="Паттерны сообщений">
+      <div className="table-scroll"><table className="patterns-table"><thead><tr><th className="level-cell">Уровень</th><th>Паттерн сообщения</th><th className="pattern-number">События</th>
+        <th className="pattern-secondary pattern-share-cell">Доля</th><th className="pattern-secondary pattern-number">Рост</th><th className="pattern-secondary pattern-spark-cell">Динамика</th></tr></thead>
         <tbody>{response?.patterns.map((pattern) => <Fragment key={pattern.pattern_id}>
-          <tr className={`pattern-row level-${pattern.level} ${selected === pattern.pattern_id ? "open" : ""}`}>
+          <tr className={`pattern-row ${selected === pattern.pattern_id ? "open" : ""}`}>
             <td><span className={`level level-${pattern.level}`}>{pattern.level.toUpperCase()}</span></td>
             <td className="pattern-message"><button type="button" className="row-button" aria-expanded={selected === pattern.pattern_id}
               onClick={() => setSelected((current) => current === pattern.pattern_id ? null : pattern.pattern_id)}>
@@ -171,8 +178,9 @@ export default function Patterns({ from, to, range, q, query, error, intervalSec
             </button><div className="pattern-source">{pattern.service}{hidden.includes(pattern.pattern_id) && <span className="chip">Скрыт</span>}
               {pattern.is_new === true && <span className="pattern-new">Новый</span>}{pattern.is_new === null && <span className="muted">Новизна неизвестна</span>}</div></td>
             <td className="pattern-number">{number.format(pattern.count)}</td>
-            <td className="pattern-secondary"><div className="pattern-share"><span className="pattern-track" aria-hidden="true"><i style={{ width: `${pattern.share * 100}%` }} /></span><span>{percent.format(pattern.share)}</span></div></td>
-            <td className="pattern-secondary pattern-growth">{growth(pattern)}</td><td className="pattern-secondary"><Sparkline buckets={pattern.buckets} count={pattern.count} tone={pattern.level} /></td>
+            <td className="pattern-secondary"><div className={`pattern-share level-${pattern.level}`}><span className="pattern-track" aria-hidden="true"><i style={{ width: `${pattern.share * 100}%` }} /></span><span>{percent.format(pattern.share)}</span></div></td>
+            <td className={`pattern-secondary pattern-number pattern-growth ${growthTone(pattern)}`}>{growth(pattern)}</td>
+            <td className="pattern-secondary"><Sparkline buckets={pattern.buckets} count={pattern.count} tone={pattern.level} /></td>
           </tr>
           {selected === pattern.pattern_id && <tr className="pattern-details"><td colSpan={6}>
             {detailsLoading && <p role="status">Загружаем детали паттерна…</p>}
@@ -183,11 +191,11 @@ export default function Patterns({ from, to, range, q, query, error, intervalSec
             </button>
           </td></tr>}
         </Fragment>)}</tbody>
-      </table>
+      </table></div>
       {!response?.patterns.length && <p className="empty-state" role="status">{loading ? "Загружаем паттерны…" : validation || listError ? "Запрос паттернов не выполнен." :
         response && response.visible_patterns === 0 && response.total_patterns > 0 ? "Все совпавшие паттерны скрыты. Включите «Показывать скрытые»." : "В выбранном диапазоне паттернов нет."}</p>}
+      {response && <div className="table-footer">Показано {response.patterns.length} из {number.format(response.visible_patterns)} видимых паттернов · максимум 100.
+        {response.visible_patterns > response.patterns.length ? " Измените запрос, чтобы найти остальные." : ""} Алгоритм v{response.algorithm_version}.</div>}
     </section>
-    {response && <p className="page-note">Показано {response.patterns.length} из {number.format(response.visible_patterns)} видимых паттернов · максимум 100.
-      {response.visible_patterns > response.patterns.length ? " Измените запрос, чтобы найти остальные." : ""} Алгоритм v{response.algorithm_version}.</p>}
   </div>;
 }

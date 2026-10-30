@@ -151,6 +151,39 @@ test('dragging over the events chart narrows the range and reset restores the pr
   await expect(page.getByText(/^Выбрано: /)).toHaveCount(0);
 });
 
+test('patterns list shows share, growth tone and the selected sort', async ({ page }) => {
+  await fixture(page);
+  const pattern = (id: string, level: string, text: string, count: number, growth: number) => ({
+    pattern_id: id, environment: 'prod', service: 'billing', level, template: text,
+    parts: [{ kind: 'literal', text }, { kind: 'variable', name: 'ms', variable_type: 'number' }], exact: false,
+    count, share: count / 300, previous_count: 10, growth_percent: growth, is_new: false,
+    first_seen: new Date(now - 7_200_000).toISOString(), last_seen: new Date(now).toISOString(),
+    buckets: [0, 1, 2].map(index => ({ timestamp: new Date(now - (3 - index) * 60_000).toISOString(), count: index + 1 })),
+  });
+  const sorts: string[] = [];
+  await page.route('**/api/patterns/hidden', route => route.fulfill({ json: { pattern_ids: [] } }));
+  await page.route('**/api/patterns/search**', route => {
+    sorts.push(route.request().postDataJSON().sort);
+    return route.fulfill({ json: {
+      algorithm_version: 1, as_of: new Date(now).toISOString(), watermark: 5, core_watermark: 5,
+      history_from: new Date(now - 86_400_000).toISOString(), history_complete: true,
+      total_events: 300, total_patterns: 2, visible_patterns: 2, new_patterns: 0,
+      patterns: [pattern('a'.repeat(32), 'error', 'gateway timeout after ', 214, 120), pattern('b'.repeat(32), 'info', 'request took ', 86, -12)],
+    } });
+  });
+  await page.goto('/logs?view=patterns');
+  await expect(page.getByRole('heading', { name: 'Паттерны', exact: true })).toBeVisible();
+  const rows = page.locator('.pattern-row');
+  await expect(rows).toHaveCount(2);
+  await expect(rows.first().locator('.pattern-growth')).toHaveClass(/growth-up/);
+  await expect(rows.nth(1).locator('.pattern-growth')).toHaveClass(/growth-down/);
+  await expect(page.getByText(/Показано 2 из 2 видимых паттернов/)).toBeVisible();
+  await expect(page.getByRole('button', { name: /^Live/ })).toHaveCount(0);
+  await page.screenshot({ path: test.info().outputPath('patterns-desktop.png'), fullPage: true });
+  await page.getByLabel('Сортировка', { exact: true }).selectOption('growth');
+  await expect.poll(() => sorts.at(-1)).toBe('growth');
+});
+
 test('history filter uses typed core query, cursor and text-scoped counts', async ({ page }) => {
   const calls = await fixture(page);
   await page.goto('/logs');
