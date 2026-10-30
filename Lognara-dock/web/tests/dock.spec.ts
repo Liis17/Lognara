@@ -337,6 +337,7 @@ test('switching to Trace clears occurrence selection when equal ids and timestam
   await expect(page).toHaveURL(/selected_occurrence=1/);
   await page.getByRole('button', { name: 'Открыть Trace', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Связанные логи Trace', exact: true })).toBeVisible();
+  await page.screenshot({ path: test.info().outputPath('trace-desktop.png'), fullPage: true });
   expect(new URL(page.url()).searchParams.has('selected')).toBe(false);
   await expect(page.locator('.row-button[aria-expanded=true]')).toHaveCount(0);
   await expect(page.locator('.row-button').first()).toHaveText('▸Occurrence A');
