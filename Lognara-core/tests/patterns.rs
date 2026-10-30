@@ -483,6 +483,11 @@ async fn retention_frees_catalog_entries_of_deleted_events() {
         assert!(Instant::now() < end, "retention timed out");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    // Записи снимаются и без нового приёма.
+    while count() != 0 {
+        assert!(Instant::now() < end, "catalog cleanup timed out");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     // Без очистки четыре разных паттерна превысили бы лимит в три записи.
     core.journal
         .accept(&batch(&[

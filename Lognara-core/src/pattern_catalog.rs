@@ -154,11 +154,21 @@ impl PatternCatalog {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
+        let mut generation = None;
         loop {
             if core.journal.stopping.load(Ordering::Acquire) {
                 return Ok(());
             }
             let snapshot = core.snapshot();
+            // Поколение растёт при удалении данных retention; первый проход проверяет старые.
+            if generation != Some(snapshot.generation)
+                && snapshot.watermark >= catalog.state.checkpoint
+            {
+                generation = Some(snapshot.generation);
+                if let Some(state) = catalog.expire(&snapshot)? {
+                    *core.patterns.state.write().unwrap() = Arc::new(state);
+                }
+            }
             let ready = core.patterns.state.read().unwrap().ready;
             match next_chunk(&snapshot, catalog.state.checkpoint) {
                 Some(chunk) if !ready || chunk.watermark > catalog.state.checkpoint => {
@@ -285,27 +295,6 @@ impl DiskCatalog {
         let mut next = self.state.clone();
         let mut known = (*next.known).clone();
         let mut issues = (*next.issues).clone();
-        // Запись, последнее событие которой раньше самого старого хранимого события, не имеет
-        // строк в хранилище: retention удалил их. Очистка до прохода освобождает лимиты.
-        let full = core.snapshot();
-        let oldest = full
-            .closed
-            .iter()
-            .map(|segment| &segment.meta)
-            .chain(full.active.as_ref().map(|active| &active.meta))
-            .filter(|meta| meta.rows > 0)
-            .map(|meta| meta.min_timestamp)
-            .min();
-        drop(full);
-        let (mut removed, mut removed_issues) = (vec![], vec![]);
-        if let Some(oldest) = oldest {
-            removed = prune(&mut known, &mut next.bytes, oldest)?;
-            removed_issues = prune(&mut issues, &mut next.bytes, oldest)?;
-            // История каталога теперь начинается не раньше самого старого хранимого события.
-            if !removed.is_empty() || !removed_issues.is_empty() {
-                next.history_from = next.history_from.map(|from| from.max(oldest));
-            }
-        }
         let (mut changed, mut changed_issues) = (BTreeSet::new(), BTreeSet::new());
         let mut rows = 0_u64;
         let mut stream = raw_frame(core, snapshot, None)
@@ -408,13 +397,6 @@ impl DiskCatalog {
         next.ready = true;
         query::check_deadline(deadline)?;
         let transaction = self.connection.transaction().map_err(anyhow::Error::from)?;
-        for (table, ids) in [("patterns", &removed), ("issues", &removed_issues)] {
-            for id in ids {
-                transaction
-                    .execute(&format!("DELETE FROM {table} WHERE id=?1"), [id])
-                    .map_err(anyhow::Error::from)?;
-            }
-        }
         store(&transaction, "patterns", &changed, &known)?;
         store(&transaction, "issues", &changed_issues, &issues)?;
         transaction
@@ -429,6 +411,46 @@ impl DiskCatalog {
         self.state = next.clone();
         Ok(next)
     }
+
+    /// Удаляет записи без строк в хранилище: их последнее событие раньше самого старого
+    /// хранимого, либо хранилище пусто. Освобождает лимиты каталога и без нового приёма.
+    fn expire(&mut self, snapshot: &Snapshot) -> Result<Option<State>> {
+        let oldest = snapshot
+            .closed
+            .iter()
+            .map(|segment| &segment.meta)
+            .chain(snapshot.active.as_ref().map(|active| &active.meta))
+            .filter(|meta| meta.rows > 0)
+            .map(|meta| meta.min_timestamp)
+            .min();
+        let bound = oldest.unwrap_or(i64::MAX);
+        let mut next = self.state.clone();
+        let mut known = (*next.known).clone();
+        let mut issues = (*next.issues).clone();
+        let removed = prune(&mut known, &mut next.bytes, bound)?;
+        let removed_issues = prune(&mut issues, &mut next.bytes, bound)?;
+        if removed.is_empty() && removed_issues.is_empty() {
+            return Ok(None);
+        }
+        // История каталога теперь начинается не раньше самого старого хранимого события.
+        next.history_from =
+            oldest.and_then(|oldest| next.history_from.map(|from| from.max(oldest)));
+        let transaction = self.connection.transaction()?;
+        for (table, ids) in [("patterns", &removed), ("issues", &removed_issues)] {
+            for id in ids {
+                transaction.execute(&format!("DELETE FROM {table} WHERE id=?1"), [id])?;
+            }
+        }
+        transaction.execute(
+            "UPDATE progress SET history_from=?1 WHERE singleton=1",
+            params![next.history_from],
+        )?;
+        transaction.commit()?;
+        next.known = Arc::new(known);
+        next.issues = Arc::new(issues);
+        self.state = next.clone();
+        Ok(Some(next))
+    }
 }
 
 /// Удаляет записи с последним событием раньше `oldest` и их оценку размера (как в `observe`).
@@ -436,7 +458,7 @@ fn prune<T: Lifetime>(
     map: &mut BTreeMap<String, Arc<T>>,
     bytes: &mut usize,
     oldest: i64,
-) -> Result<Vec<String>, QueryError> {
+) -> Result<Vec<String>> {
     let expired: Vec<String> = map
         .iter()
         .filter(|(_, entry)| entry.last() < oldest)
@@ -444,11 +466,7 @@ fn prune<T: Lifetime>(
         .collect();
     for id in &expired {
         let entry = map.remove(id).expect("listed entry");
-        let size = serde_json::to_vec(&*entry)
-            .map_err(anyhow::Error::from)?
-            .len()
-            + id.len()
-            + 256;
+        let size = serde_json::to_vec(&*entry)?.len() + id.len() + 256;
         *bytes = bytes.saturating_sub(size);
     }
     Ok(expired)
