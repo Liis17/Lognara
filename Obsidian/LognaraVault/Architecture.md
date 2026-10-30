@@ -8,7 +8,7 @@ Parent: [[Index]]
 |---------|-------------------|
 | Язык и runtime | Rust (edition 2024) и tokio подтверждены для `Lognara-agent/` и `Lognara-relay/`. Core также использует Rust 2024 и tokio; MSRV 1.94. |
 | Зависимости | `Lognara-agent/Cargo.toml`: axum, reqwest, tokio, tokio-util, serde, serde_json, rmp-serde, serde_bytes, zstd, tracing, http-body, glob, regex, sha2, libc, общий lognara-spool. Подробности в [[Agent/LognaraAgent]]. `Lognara-relay/Cargo.toml`: общие HTTP/runtime/serde/zstd зависимости, reqwest с rustls, а также uuid, time, base64, bytes, http-body для ограниченного чтения, sha2 для проверки хешей агентов из core. Подробности в [[Relay/LognaraRelay]]. |
-| Веб-интерфейс | `Lognara-dock/Cargo.toml`: axum, tower-http (ServeDir), reqwest, rusqlite (bundled), bcrypt, webauthn-rs 0.5 (`conditional-ui`, требует OpenSSL), fs2, time. Фронтенд `Lognara-dock/web/`: React, react-router, TypeScript, Vite, uPlot; локальные Commissioner и IBM Plex Mono с лицензиями OFL. Подробности в [[Dock/LognaraDock]]. |
+| Веб-интерфейс и MCP | `Lognara-dock/Cargo.toml`: axum, rmcp 3.8 Streamable HTTP, tower-http (ServeDir), reqwest, rusqlite (bundled), bcrypt, webauthn-rs 0.5 (`conditional-ui`, требует OpenSSL), fs2, time. Фронтенд `Lognara-dock/web/`: React, react-router, TypeScript, Vite, uPlot. Подробности в [[Dock/LognaraDock]]. |
 | .NET-клиент | `Lognara-dotnet/`: .NET 8+, Serilog 4.4 и Serilog.Sinks.Http 9.2.1; [[Agent/Serilog]]. Сборка и тесты на Ubuntu/Windows, публикация NuGet через OIDC в [[Repository/CI]]. |
 | Хранилище core | `Lognara-core/Cargo.toml`: DataFusion, Parquet с ZSTD, Tantivy, rusqlite, rand, а также regex (правила метрик, лимит размера выражения 1 MiB). Подробности в [[Core/LognaraCore]]. |
 | Лицензия | MIT, см. `LICENSE`. |
@@ -20,8 +20,8 @@ Parent: [[Index]]
 |-----------|---------|-----------|
 | [[Agent/LognaraAgent]] | `Lognara-agent/` | HTTP, файлы и stdout/stderr через `run --`, атомарная дисковая очередь и отправка в relay; [[Agent/LogSources]]. |
 | [[Relay/LognaraRelay]] | `Lognara-relay/` | Реализованы приём пачек агентов, разбор в события, группировка по источнику, отправка в core и spool на диске. Структура в [[Relay/LognaraRelay-ProjectMap]]. |
-| [[Core/LognaraCore]] | `Lognara-core/` | Реализованы реестр подключений access.sqlite3 и admin API, авторизация relay, HTTP-приём, WAL, Arrow/Parquet, каталог SQLite, поиск Tantivy, аналитика DataFusion, retention, точки метрик из ServiceMetrics и правил regex, суточные агрегаты метрик в фоновом потоке, API серий, паттерны, проблемы ошибок и heartbeat. Структура в [[Core/LognaraCore-ProjectMap]]. |
-| [[Dock/LognaraDock]] | `Lognara-dock/` | Реализованы вход по htpasswd/passkey, сессии в SQLite, смена пароля, регистрация relay/агентов, исторический поиск/cursor/Trace, отдельная SSE-лента и согласованная аналитика, инфраструктура и метрики с редактором правил (uPlot). React использует общий дизайн и локальные шрифты. Структура в [[Dock/LognaraDock-ProjectMap]]. |
+| [[Core/LognaraCore]] | `Lognara-core/` | Реализованы реестр подключений access.sqlite3 и admin API, авторизация relay, HTTP-приём, WAL, Arrow/Parquet, поиск Tantivy, аналитика DataFusion, retained-source API, retention, метрики и build version metadata, паттерны, проблемы и heartbeat. Структура в [[Core/LognaraCore-ProjectMap]]. |
+| [[Dock/LognaraDock]] | `Lognara-dock/` | Реализованы вход по htpasswd/passkey, сессии в SQLite, браузерное управление PAT/OAuth, opt-in Streamable HTTP MCP с девятью read-only tools, исторический поиск/cursor/Trace, SSE, аналитика и метрики. MCP отделён от cookie API и использует Core query API. Структура в [[Dock/LognaraDock-ProjectMap]]. |
 | [[Delivery/Spool]] | `Lognara-spool/` | Общая атомарная файловая очередь; оба процесса подтверждают приём только после durable commit. |
 | [[Agent/Serilog]] | `Lognara-dotnet/` | Библиотека `WriteTo.Lognara(...)` для HTTP-входа агента; очередь в памяти или на диске. |
 | [[Repository/LocalExample]] | `Example/` | Локальный Compose: Python-сервер на 8881 и agent в одном контейнере, relay, core и dock отдельно; веб-логи на localhost:7403. |
@@ -63,6 +63,8 @@ Parent: [[Index]]
 ## Просмотр логов
 
 Браузер → nginx (TLS) → lognara-dock `:7403` → query API core. Dock проверяет вход по htpasswd/passkey, хранит сессии/ключи в SQLite, проксирует историю поиска, trace lookup, histogram/group-by/summary и раздаёт новые события через SSE. Query/admin-токены остаются в dock. Core summary объединяет текстовый подсчёт, stacked histogram, p95 duration_ms и первую страницу в одном Snapshot без миграции raw-сегментов. Паттерны: core вычисляет pattern_id детерминированно, фоновый поток ведёт производный `patterns.sqlite` (checkpoint, first_seen, полнота истории), а числа считает по сырым событиям; dock хранит персонально скрытые паттерны в своей SQLite. Проблемы: core группирует error/fatal по fingerprint в том же каталоге и считает числа по сырым событиям; dock хранит общий статус и историю, а фоновый наблюдатель по cursor `recurrences` отмечает возвраты. Прошлое окно аналитики получает отдельный снимок. Ограничения ленты описаны в [[Dock/LognaraDock]].
+
+Удалённый MCP — отдельный Streamable HTTP маршрут Dock `/mcp`, включаемый только `LOGNARA_DOCK_MCP_ENABLED=true`. Он принимает PAT или OAuth Bearer; browser cookie не авторизует MCP. OAuth Code + PKCE S256 ограничен read scope и ChatGPT CIMD; grants/PAT хешируются в SQLite Dock. Девять инструментов используют только существующие query API core плюс `POST /v1/logs/sources` для точного постраничного перечисления источников из удерживаемых log-сегментов. Core остаётся частной сетью, agent/relay/spool wire-контракт не меняется.
 
 ## Мониторинг цепочки
 

@@ -161,6 +161,7 @@ services:
       LOGNARA_DOCK_CORE_URL: http://lognara-core:7402
       LOGNARA_DOCK_CORE_TOKEN: ${LOGNARA_CORE_QUERY_TOKEN:?Задайте LOGNARA_CORE_QUERY_TOKEN}
       LOGNARA_DOCK_CORE_ADMIN_TOKEN: ${LOGNARA_CORE_ADMIN_TOKEN:?Задайте LOGNARA_CORE_ADMIN_TOKEN}
+      LOGNARA_DOCK_MCP_ENABLED: ${LOGNARA_DOCK_MCP_ENABLED:-false}
     volumes:
       - ./auth:/etc/lognara-dock/auth
       - ./dock-data:/var/lib/lognara-dock

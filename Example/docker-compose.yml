@@ -31,6 +31,7 @@ services:
       LOGNARA_DOCK_CORE_URL: http://lognara-core:7402
       LOGNARA_DOCK_CORE_TOKEN: ${LOGNARA_QUERY_TOKEN:?Задайте LOGNARA_QUERY_TOKEN}
       LOGNARA_DOCK_CORE_ADMIN_TOKEN: ${LOGNARA_ADMIN_TOKEN:?Задайте LOGNARA_ADMIN_TOKEN}
+      LOGNARA_DOCK_MCP_ENABLED: ${LOGNARA_DOCK_MCP_ENABLED:-false}
       LOGNARA_DOCK_HTPASSWD_FILE: /etc/lognara-dock/auth/htpasswd
       LOGNARA_DOCK_DATA_DIR: /var/lib/lognara-dock
       RUST_LOG: ${RUST_LOG:-info}

@@ -9,14 +9,17 @@ Lognara-dock/
   Cargo.toml                  отдельный crate, Rust 2024, MSRV 1.94
   Dockerfile                  node (web) → rust (бинарник) → debian-slim с libssl3
   docker-compose.example.yml  образ registry с LOGNARA_IMAGE_TAG, все переменные, тома ./auth и ./data
-  nginx.example.conf          TLS и отдельный location для SSE
+  nginx.example.conf          TLS, SSE и Streamable HTTP MCP/OAuth locations
   src/
     main.rs                   tracing, конфиг, App::open, SIGTERM/SIGINT
     lib.rs                    run(): axum::serve, наблюдатель проблем, отмена App::shutdown
     config.rs                 LOGNARA_DOCK_* и проверки
     api.rs                    App/AppState, ApiError, router, health, SPA
+    mcp.rs                    stateless Streamable HTTP `/mcp`, read-only tools, Bearer auth, cursors и limits
+    oauth.rs                  OAuth metadata, restricted ChatGPT CIMD, PKCE, token/refresh endpoints
+    mcp_access.rs             API страницы MCP-доступа, PAT и OAuth grants/consent
     htpasswd.rs               разбор, кэш по stamp, verify, атомарная перезапись
-    store.rs                  SQLite, миграции, lock каталога данных, скрытые паттерны, статусы проблем, общее избранное метрик
+    store.rs                  SQLite, миграции, PAT/OAuth hashes and grants, сессии, passkey, паттерны, проблемы, избранное
     patterns.rs               DTO паттернов, proxy search/details и персональное скрытие
     issues.rs                 DTO проблем, proxy search/details, resolve/reopen, наблюдатель возвратов
     session.rs                Sessions, cookie, AuthUser, require_origin
@@ -54,13 +57,15 @@ Lognara-dock/
     src/components/PeriodChips.tsx границы периода, часовой пояс и момент снимка
     src/components/Patterns.tsx  режим паттернов: таблица, sparkline, детали, скрытие, переход к событиям
     src/webauthn.ts           base64url ↔ ArrayBuffer для navigator.credentials
-    src/App.tsx               проверка /api/me, верхняя панель, подтверждение выхода, ленивые маршруты /login, /logs, /errors, /analytics, /infrastructure, /metrics, /access, /settings
+    src/App.tsx               проверка /api/me, верхняя панель и lazy routes включая `/mcp-access` и OAuth consent
     src/pages/Login.tsx       пароль, показ пароля, кнопка passkey и анимированный фон
     src/pages/Logs.tsx        история/cursor/Trace, URL, автодогрузка, отдельный Live, детали, экспорт
     src/pages/Errors.tsx      проблемы: вкладки статусов, stack trace, история, решение и переходы
     src/pages/Analytics.tsx   единая сводка, stacked levels, p95/coverage/actions, сравнение и переход в логи
     src/pages/Infrastructure.tsx цепочка, узлы и диск, последовательный polling и stale-снимок
     src/pages/Access.tsx      профили relay/агентов, создание, одноразовый токен, удаление
+    src/pages/McpAccess.tsx   MCP URL, одноразовый PAT, срок/last-use и отзыв PAT/grants
+    src/pages/OAuthConsent.tsx OAuth client/scope/resource и подтверждение пользователя
     src/pages/Metrics.tsx     плитки по серверам/сервисам и очередь миниграфиков
     src/pages/MetricDetail.tsx отдельная страница метрики с серверной областью
     src/pages/MetricCreate.tsx модалка создания, импорт JSON, конфликты и nginx
@@ -71,6 +76,7 @@ Lognara-dock/
     playwright.config.ts     Chromium, Vite webServer и сценарии tests/dock.spec.ts и tests/errors.spec.ts
     tests/metrics.spec.ts     окружения/разбиение, regex preview/save, навигация и mobile
     tests/infrastructure.spec.ts состояния/переходы, polling/error recovery, mobile и overflow
+    tests/mcp-access.spec.ts выпуск/копирование PAT, отсутствие localStorage, expiry/revoke, OAuth consent и возврат после login
     tests/dock.spec.ts        вход, аккаунт, поиск, cursor, Trace/ссылка, аналитика, Live, mobile
 ```
 

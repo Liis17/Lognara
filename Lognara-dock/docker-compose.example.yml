@@ -14,6 +14,7 @@ services:
       LOGNARA_DOCK_CORE_URL: http://lognara-core:7402
       LOGNARA_DOCK_CORE_TOKEN: ${LOGNARA_QUERY_TOKEN:?Задайте LOGNARA_QUERY_TOKEN}
       LOGNARA_DOCK_CORE_ADMIN_TOKEN: ${LOGNARA_CORE_ADMIN_TOKEN:?Задайте LOGNARA_CORE_ADMIN_TOKEN}
+      LOGNARA_DOCK_MCP_ENABLED: ${LOGNARA_DOCK_MCP_ENABLED:-false}
       # Необязательные, указаны значения по умолчанию:
       # LOGNARA_DOCK_RP_ID: dock.liis17.com
       # LOGNARA_DOCK_HTPASSWD_FILE: /etc/lognara-dock/auth/htpasswd
