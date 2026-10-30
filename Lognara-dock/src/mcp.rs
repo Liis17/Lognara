@@ -1,6 +1,6 @@
 //! Stateless, bearer-authenticated read-only MCP endpoint.
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{HashMap, VecDeque},
     sync::{Arc, Mutex},
     time::Instant,
 };
@@ -18,7 +18,7 @@ use axum::{
     },
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{any, post},
+    routing::any,
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use hmac::{Hmac, Mac};
@@ -26,7 +26,7 @@ use rmcp::{
     ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig},
-    schemars::JsonSchema,
+    schemars::{self, JsonSchema},
     tool, tool_handler, tool_router,
     transport::streamable_http_server::{
         StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
@@ -129,7 +129,7 @@ impl McpLimiter {
     }
 }
 
-pub fn router(app: AppState) -> Router {
+pub fn router(app: AppState) -> Router<AppState> {
     if !app.config.mcp_enabled {
         return Router::new().route("/mcp", any(disabled));
     }
@@ -303,7 +303,7 @@ fn authentication_required(app: &AppState, body: &Value, error: &str) -> Respons
         let result = CallToolResult::error(vec![ContentBlock::text(
             "Authentication is required to call this tool.",
         )])
-        .with_meta(Some(meta));
+        .with_meta(Some(rmcp::model::MetaObject(meta)));
         let response = json!({
             "jsonrpc": "2.0",
             "id": body["id"],
@@ -818,7 +818,7 @@ impl McpServer {
     }
 }
 
-#[tool_handler]
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for McpServer {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_server_info(
@@ -1266,7 +1266,7 @@ fn core_failure(error: CoreError) -> ToolFailure {
         CoreError::Request(_) => {
             ToolFailure::new("unavailable", "Core query service is unavailable")
         }
-        CoreError::Status { status, detail } if status == StatusCode::GATEWAY_TIMEOUT => {
+        CoreError::Status { status, .. } if status == StatusCode::GATEWAY_TIMEOUT => {
             ToolFailure::new("timeout", "Core query timed out")
         }
         CoreError::Status { status, detail } if status == StatusCode::SERVICE_UNAVAILABLE => {
@@ -1431,10 +1431,9 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(matches!(limiter.try_enter("ninth"), Err(LimitError::Busy)));
         drop(held);
-        let mut last = None;
         for _ in 0..60 {
-            last = Some(limiter.try_enter("rate-test").unwrap());
-            drop(last.take());
+            let permit = limiter.try_enter("rate-test").unwrap();
+            drop(permit);
         }
         assert!(matches!(
             limiter.try_enter("rate-test"),

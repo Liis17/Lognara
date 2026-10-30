@@ -185,7 +185,10 @@ async fn source_lists_include_logs_only_sources_and_have_exact_filtered_pages() 
 #[tokio::test]
 async fn source_lists_page_more_than_one_thousand_names_without_skipping() {
     let dir = tempfile::tempdir().unwrap();
-    let core = Core::open(config(dir.path())).unwrap();
+    let mut config = config(dir.path());
+    // Exercise closed and active segments without building 500 tiny indexes.
+    config.segment_rows = 512;
+    let core = Core::open(config).unwrap();
     let groups = (0..1005)
         .map(|index| {
             group(

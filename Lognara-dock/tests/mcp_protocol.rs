@@ -137,7 +137,7 @@ async fn stateless_mcp_initializes_lists_tools_and_calls_get_versions_with_beare
     let expired_token = "lnm_expired_fixture";
     add_token(&app, expired_token, store::now_ms() - 1).await;
     let revoked_token = "lnm_revoked_fixture";
-    let revoked_hash = add_token(&app, revoked_token, store::now_ms() + 60_000).await;
+    add_token(&app, revoked_token, store::now_ms() + 60_000).await;
     assert!(
         app.store
             .revoke_personal_token(USER.to_owned(), revoked_token.to_owned())

@@ -25,6 +25,7 @@ use crate::htpasswd::Htpasswd;
 use crate::infra;
 use crate::issues;
 use crate::live::{self, Live};
+use crate::mcp_access;
 use crate::passkey::{self, Challenges};
 use crate::patterns;
 use crate::query;

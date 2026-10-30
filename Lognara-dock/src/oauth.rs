@@ -32,7 +32,7 @@ const SCOPE: &str = "lognara.read";
 const CHATGPT_HOST: &str = "chatgpt.com";
 const CIMD_LIMIT: usize = 256 * 1024;
 
-pub fn router(app: AppState) -> Router {
+pub fn router(app: AppState) -> Router<AppState> {
     if !app.config.mcp_enabled {
         return Router::new()
             .route("/.well-known/oauth-protected-resource", get(disabled))
@@ -60,7 +60,7 @@ pub fn router(app: AppState) -> Router {
             CACHE_CONTROL,
             HeaderValue::from_static("no-store"),
         ))
-        .layer(middleware::from_fn(allowed_methods));
+        .layer(middleware::from_fn(allowed_methods))
 }
 
 async fn disabled() -> StatusCode {
@@ -441,8 +441,7 @@ async fn exchange_code(app: &AppState, request: TokenRequest) -> Response {
             redirect_uri,
             request.resource,
             challenge,
-            access_hash,
-            refresh_hash,
+            (access_hash, refresh_hash),
         )
         .await
     {

@@ -158,7 +158,7 @@ pub struct Recurrence {
     pub first_seen: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PersonalTokenInfo {
     pub id: String,
     pub name: String,
@@ -167,7 +167,7 @@ pub struct PersonalTokenInfo {
     pub last_used_at: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct OAuthGrantInfo {
     pub id: String,
     pub client_name: String,
@@ -671,9 +671,9 @@ impl Store {
         redirect_uri: String,
         resource: String,
         code_challenge: String,
-        access_hash: [u8; 32],
-        refresh_hash: [u8; 32],
+        token_hashes: ([u8; 32], [u8; 32]),
     ) -> Result<Option<IssuedOAuthTokens>, StoreError> {
+        let (access_hash, refresh_hash) = token_hashes;
         self.call(move |conn| {
             let tx = conn.transaction()?;
             let now = now_ms();
@@ -847,9 +847,9 @@ mod tests {
         redirect: String,
         resource: String,
         challenge: String,
-        access_hash: [u8; 32],
-        refresh_hash: [u8; 32],
+        token_hashes: ([u8; 32], [u8; 32]),
     ) -> Result<Option<IssuedOAuthTokens>, StoreError> {
+        let (access_hash, refresh_hash) = token_hashes;
         store
             .redeem_oauth_code(
                 code_hash,
@@ -857,8 +857,7 @@ mod tests {
                 redirect,
                 resource,
                 challenge,
-                access_hash,
-                refresh_hash,
+                (access_hash, refresh_hash),
             )
             .await
     }
@@ -968,7 +967,7 @@ mod tests {
             .unwrap();
         let now = now_ms();
         let code_expiry: i64 = store
-            .call(|conn| {
+            .call(move |conn| {
                 conn.query_row(
                     "SELECT expires_at FROM oauth_codes WHERE code_hash=?1",
                     [code_hash],
@@ -989,8 +988,7 @@ mod tests {
                 pending.redirect_uri.clone(),
                 pending.resource.clone(),
                 pending.code_challenge.clone(),
-                access_hash,
-                refresh_hash,
+                (access_hash, refresh_hash),
             )
             .await
             .unwrap()
@@ -1004,8 +1002,7 @@ mod tests {
                 pending.redirect_uri.clone(),
                 "https://wrong.example/mcp".into(),
                 pending.code_challenge.clone(),
-                access_hash,
-                refresh_hash,
+                (access_hash, refresh_hash),
             )
             .await
             .unwrap()
@@ -1019,8 +1016,7 @@ mod tests {
                 pending.redirect_uri.clone(),
                 pending.resource.clone(),
                 "wrong-challenge".into(),
-                access_hash,
-                refresh_hash,
+                (access_hash, refresh_hash),
             )
             .await
             .unwrap()
@@ -1033,8 +1029,7 @@ mod tests {
             pending.redirect_uri.clone(),
             pending.resource.clone(),
             pending.code_challenge.clone(),
-            access_hash,
-            refresh_hash,
+            (access_hash, refresh_hash),
         )
         .await
         .unwrap()
@@ -1047,8 +1042,7 @@ mod tests {
                 pending.redirect_uri,
                 pending.resource,
                 pending.code_challenge,
-                access_hash,
-                refresh_hash,
+                (access_hash, refresh_hash),
             )
             .await
             .unwrap()
