@@ -308,12 +308,13 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
   const moreSentinel = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const element = moreSentinel.current;
-    if (!element || liveEnabled || !page.next_cursor || paging || loading || expired) return;
+    // После ошибки автодогрузка не повторяется сама: повтор только кнопкой.
+    if (!element || liveEnabled || !page.next_cursor || paging || loading || expired || searchError) return;
     const observer = new IntersectionObserver((entries) => { if (entries.some((entry) => entry.isIntersecting)) loadMore(); },
       { rootMargin: "200px" });
     observer.observe(element);
     return () => observer.disconnect();
-  }, [page.next_cursor, paging, loading, expired, liveEnabled]);
+  }, [page.next_cursor, paging, loading, expired, searchError, liveEnabled]);
   const restart = () => { setLiveEnabled(false); setRevision((current) => current + 1); };
   const setRange = (range: Range) => {
     const to = Date.now(); updateLocation({ range, from: new Date(to - RANGES[range]).toISOString(), to: new Date(to).toISOString(), selected: null });

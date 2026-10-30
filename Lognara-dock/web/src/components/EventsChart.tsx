@@ -51,9 +51,10 @@ export default function EventsChart({ buckets, intervalSeconds, loading, aside, 
     const wheel = (event: WheelEvent) => {
       const { total, zoom, first } = view.current;
       if (!event.deltaY || total < 2) return;
-      event.preventDefault();
       const next = event.deltaY < 0 ? Math.min(MAX_ZOOM, zoom * 2) : Math.max(1, zoom / 2);
+      // На границе масштаба колесо прокручивает страницу.
       if (next === zoom) return;
+      event.preventDefault();
       const rect = element.getBoundingClientRect();
       const fraction = Math.min(Math.max((event.clientX - rect.left) / rect.width, 0), 1);
       const anchor = first + fraction * Math.ceil(total / zoom);

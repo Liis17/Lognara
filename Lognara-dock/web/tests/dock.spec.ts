@@ -151,6 +151,29 @@ test('dragging over the events chart narrows the range and reset restores the pr
   await expect(page.getByText(/^Выбрано: /)).toHaveCount(0);
 });
 
+test('failed auto-load does not retry by itself and the button retries once', async ({ page }) => {
+  await fixture(page);
+  let cursorCalls = 0;
+  await page.route('**/api/logs/search', route => {
+    if (!route.request().postDataJSON()?.cursor) return route.fallback();
+    cursorCalls += 1;
+    return route.fulfill({ status: 503, json: { error: 'query_unavailable' } });
+  });
+  await page.goto('/logs');
+  const more = page.getByRole('button', { name: 'Загрузить ещё 50', exact: true });
+  await more.scrollIntoViewIfNeeded();
+  await expect(page.getByRole('alert')).toBeVisible();
+  await expect(more).toBeEnabled();
+  // Наблюдатель срабатывает сразу при повторной подписке; короткая пауза ловит возможный цикл.
+  await page.waitForTimeout(500);
+  expect(cursorCalls).toBe(1);
+  await more.click();
+  await expect.poll(() => cursorCalls).toBe(2);
+  await expect(more).toBeEnabled();
+  await page.waitForTimeout(500);
+  expect(cursorCalls).toBe(2);
+});
+
 test('patterns list shows share, growth tone and the selected sort', async ({ page }) => {
   await fixture(page);
   const pattern = (id: string, level: string, text: string, count: number, growth: number) => ({
