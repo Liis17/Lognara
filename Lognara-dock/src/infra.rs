@@ -37,6 +37,10 @@ pub struct Source {
 #[derive(Debug, Deserialize)]
 pub struct CoreStatus {
     pub version: String,
+    #[serde(default)]
+    pub release_version: Option<String>,
+    #[serde(default)]
+    pub git_commit: Option<String>,
     pub ready: bool,
     pub visibility_lag_ms: u64,
     pub wal_bytes: u64,
@@ -149,6 +153,8 @@ pub struct CoreView {
 #[derive(Debug, Serialize)]
 pub struct DockView {
     pub version: &'static str,
+    pub release_version: Option<&'static str>,
+    pub git_commit: Option<&'static str>,
     pub sse_clients: usize,
     pub sessions: Option<u64>,
 }
@@ -223,6 +229,9 @@ pub async fn overview(State(app): State<AppState>, _user: AuthUser) -> Json<Infr
         storage: status.ok().map(|status| status.storage),
         dock: DockView {
             version: env!("CARGO_PKG_VERSION"),
+            release_version: option_env!("LOGNARA_RELEASE_VERSION")
+                .filter(|value| !value.is_empty()),
+            git_commit: option_env!("LOGNARA_GIT_COMMIT").filter(|value| !value.is_empty()),
             sse_clients: app.live.clients(),
             sessions: sessions.ok(),
         },

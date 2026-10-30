@@ -67,6 +67,9 @@ jobs:
           file: Lognara-${{ matrix.component }}/Dockerfile
           platforms: linux/amd64
           push: true
+          build-args: |
+            LOGNARA_RELEASE_VERSION=${{ steps.version.outputs.version }}
+            LOGNARA_GIT_COMMIT=${{ github.sha }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=lognara-${{ matrix.component }}
