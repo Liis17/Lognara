@@ -770,12 +770,28 @@ impl Materializer {
     fn retain(&mut self) -> Result<()> {
         let now = now_nanos();
         let before = now.saturating_sub(self.core.journal.config.retention.as_nanos() as i64);
-        let ids: Vec<_> = self
+        let mut ids: Vec<_> = self
             .closed
             .iter()
             .filter(|segment| segment.meta.max_received_at < before)
             .map(|segment| segment.meta.id.clone())
             .collect();
+        if let Some(limit) = self.core.journal.config.retention_max_bytes {
+            // closed упорядочен по sequence: сверх предела удаляются самые старые сегменты.
+            let mut kept = vec![];
+            for segment in self.closed.iter().filter(|s| !ids.contains(&s.meta.id)) {
+                let (parquet, index) = segment.sizes()?;
+                kept.push((&segment.meta.id, parquet + index));
+            }
+            let mut total: u64 = kept.iter().map(|(_, size)| size).sum();
+            for (id, size) in kept {
+                if total <= limit {
+                    break;
+                }
+                ids.push(id.clone());
+                total -= size;
+            }
+        }
         if !ids.is_empty() {
             self.core
                 .journal

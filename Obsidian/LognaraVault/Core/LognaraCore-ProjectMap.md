@@ -27,7 +27,7 @@ Parent: [[Core/LognaraCore]]
 | issues | API проблем, деталей и возвратов, UDF `log_issue_fingerprint` |
 | telemetry | Heartbeat DTO, проверка возрастов и перевод в часы core |
 | status | Версия/ready/WAL, размеры Parquet/индексов и filesystem data_dir |
-| tests | issues.rs: группировка, статусы вкладок, fingerprint в search/summary, рестарт, возвраты после checkpoint; patterns.rs: counts, прошлое окно, скрытие, pattern_id в search/summary, рестарт, поздние события, неполная история и очистка каталога после retention; access.rs: CRUD, изоляция и отзыв токенов; контракт, HTTP, WAL, Parquet, поиск, аналитика, retention, аварийные subprocess и настоящие agent/relay и восстановление всей цепочки после недоступности core |
+| tests | retention.rs: ожидание читателей, дедупликация, квота размера удаляет старейшие сегменты; issues.rs: группировка, статусы вкладок, fingerprint в search/summary, рестарт, возвраты после checkpoint; patterns.rs: counts, прошлое окно, скрытие, pattern_id в search/summary, рестарт, поздние события, неполная история и очистка каталога после retention; access.rs: CRUD, изоляция и отзыв токенов; контракт, HTTP, WAL, Parquet, поиск, аналитика, retention, аварийные subprocess и настоящие agent/relay и восстановление всей цепочки после недоступности core |
 | series | Схема и запись Parquet точек метрик (`timestamp`, источник, `name`, `origin`, `rule_id`, `labels`, `value`, `event_id`) |
 | extract | Точки из `attributes.Metrics` версии 2 и из правил regex |
 | scoped_metrics | Индекс источников/серий по серверам и возобновляемая миграция каталога |

@@ -22,6 +22,8 @@ pub struct Config {
     pub segment_compact: Duration,
     pub refresh_interval: Duration,
     pub retention: Duration,
+    /// Предел размера закрытых сегментов логов (Parquet + индекс); None - без предела.
+    pub retention_max_bytes: Option<u64>,
     pub series_compact_quiet: Duration,
     pub series_raw_days: u64,
     pub series_hourly_days: u64,
@@ -82,6 +84,7 @@ impl Config {
             segment_compact: Duration::from_secs(number("LOGNARA_SEGMENT_COMPACT_SECONDS", 86400)?),
             refresh_interval: Duration::from_millis(number("LOGNARA_REFRESH_MS", 1000)?),
             retention: Duration::from_secs(number("LOGNARA_RETENTION_SECONDS", 7 * 86400)?),
+            retention_max_bytes: optional("LOGNARA_RETENTION_MAX_BYTES")?,
             series_compact_quiet: Duration::from_secs(number(
                 "LOGNARA_SERIES_COMPACT_QUIET_SECONDS",
                 3600,
