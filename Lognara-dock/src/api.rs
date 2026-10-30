@@ -48,6 +48,9 @@ pub struct App {
     pub live: Arc<Live>,
     /// Отменяется при остановке: закрывает SSE-потоки и опрос core.
     pub shutdown: CancellationToken,
+    pub mcp_limiter: crate::mcp::McpLimiter,
+    /// Signs temporary MCP search cursors; changes on restart to invalidate stale pages.
+    pub mcp_cursor_key: [u8; 32],
 }
 
 impl App {
@@ -59,6 +62,8 @@ impl App {
         let sessions = Sessions::new(store.clone(), config.session_ttl, config.session_idle);
         let shutdown = CancellationToken::new();
         let core = Arc::new(CoreClient::new(&config));
+        let mut mcp_cursor_key = [0; 32];
+        rand::RngCore::fill_bytes(&mut rand::rng(), &mut mcp_cursor_key);
         Ok(Arc::new(Self {
             htpasswd,
             store,
@@ -67,6 +72,8 @@ impl App {
             webauthn,
             challenges: Challenges::default(),
             live: Live::new(&config, core.clone(), shutdown.clone()),
+            mcp_limiter: crate::mcp::McpLimiter::default(),
+            mcp_cursor_key,
             core,
             config,
             shutdown,
@@ -197,6 +204,21 @@ pub fn router(app: AppState) -> Router {
         .route("/auth/logout", post(auth::logout))
         .route("/auth/passkey/start", post(passkey::login_start))
         .route("/auth/passkey/finish", post(passkey::login_finish))
+        .route("/mcp/access", get(mcp_access::access))
+        .route(
+            "/mcp/personal-tokens",
+            get(mcp_access::tokens).post(mcp_access::create_token),
+        )
+        .route(
+            "/mcp/personal-tokens/{id}",
+            delete(mcp_access::revoke_token),
+        )
+        .route("/mcp/grants", get(mcp_access::grants))
+        .route("/mcp/grants/{id}", delete(mcp_access::revoke_grant))
+        .route(
+            "/oauth/consent/{id}",
+            get(crate::oauth::consent_details).post(crate::oauth::consent_decision),
+        )
         .route("/me", get(account::me))
         .route("/account/password", post(account::change_password))
         .route("/account/passkeys", get(passkey::list))
@@ -268,7 +290,11 @@ pub fn router(app: AppState) -> Router {
     // Остальные пути отдаёт SPA: неизвестный путь получает index.html для react-router.
     let web = &app.config.web_dir;
     let spa = ServeDir::new(web).fallback(ServeFile::new(web.join("index.html")));
+    let mcp = crate::mcp::router(app.clone());
+    let oauth = crate::oauth::router(app.clone());
     Router::new()
+        .merge(mcp)
+        .merge(oauth)
         .nest("/api", api)
         .route("/health/live", get(|| async { StatusCode::OK }))
         .route("/health/ready", get(ready))
