@@ -1,8 +1,9 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 import { api, ApiError, errorText } from "../api";
-import Histogram from "../components/Histogram";
+import EventsChart from "../components/EventsChart";
 import Patterns from "../components/Patterns";
+import PeriodChips from "../components/PeriodChips";
 import { appendHistory, contextBounds, eventBounds, eventsToCsv, LOG_LEVELS, matchesQuery, MAX_LIVE_ROWS,
   parseQuery, prependLive, sourceQuery } from "../logs";
 import type { ParsedQuery } from "../logs";
@@ -23,10 +24,6 @@ const calendar = new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "2-di
 function eventTime(timestamp: string): string {
   const fraction = timestamp.match(/\.(\d+)/)?.[1].slice(0, 3).padEnd(3, "0") ?? "000";
   return `${clock.format(new Date(timestamp))}.${fraction}`;
-}
-
-function periodLabel(timestamp: string): string {
-  return Number.isFinite(Date.parse(timestamp)) ? `${calendar.format(new Date(timestamp))} ${clock.format(new Date(timestamp))}` : "Некорректное время";
 }
 
 function EventDetails({ event, onContext, onTrace, onCopy }: {
@@ -307,6 +304,16 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
       if (!controller.signal.aborted && current === generation.current) handleError(error);
     }).finally(() => { if (current === generation.current) setPaging(false); });
   };
+  // Следующая страница догружается, когда конец таблицы попадает в окно.
+  const moreSentinel = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const element = moreSentinel.current;
+    if (!element || liveEnabled || !page.next_cursor || paging || loading || expired) return;
+    const observer = new IntersectionObserver((entries) => { if (entries.some((entry) => entry.isIntersecting)) loadMore(); },
+      { rootMargin: "200px" });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [page.next_cursor, paging, loading, expired, liveEnabled]);
   const restart = () => { setLiveEnabled(false); setRevision((current) => current + 1); };
   const setRange = (range: Range) => {
     const to = Date.now(); updateLocation({ range, from: new Date(to - RANGES[range]).toISOString(), to: new Date(to).toISOString(), selected: null });
@@ -348,6 +355,10 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
   const total = location.view === "events" ? summary?.total : histogram?.buckets.reduce((sum, bucket) => sum + bucket.count, 0);
   const chart = location.view === "events" ? summary : histogram;
 
+  const rangeText = fixedRange && !parsed.error
+    ? `Выбрано: ${calendar.format(new Date(location.from))} ${clock.format(new Date(location.from))} → ${calendar.format(new Date(location.to))} ${clock.format(new Date(location.to))} · логи ограничены этим диапазоном`
+    : undefined;
+
   return <section className="logs-page">
     <div className="filter-bar">
       <div className="segmented" role="group" aria-label="Вид логов">
@@ -373,24 +384,25 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
         {fixedRange && <option value="fixed" disabled>Точный диапазон</option>}
         <option value="1h">1 час</option><option value="24h">24 часа</option><option value="7d">7 дней</option>
       </select>
-      <button type="button" className="button" aria-pressed={liveEnabled} disabled={location.view !== "events" || !!parsed.error || coreOnly}
-        title={location.view === "trace" ? "Trace показывает историю связанных логов" :
-          location.view === "patterns" ? "Паттерны строятся по обработанной истории" :
-          coreOnly ? "pattern_id и fingerprint вычисляет core: фильтр доступен только в истории" : "Переключить отдельную ленту Live"}
-        onClick={() => setLiveEnabled((current) => !current)}>Live {liveEnabled ? "вкл" : "выкл"}</button>
-      <button type="button" className="button" aria-expanded={exportsOpen} disabled={!rows.length || location.view === "patterns"}
-        onClick={() => setExportsOpen((current) => !current)}>Экспорт</button>
+      {location.view !== "patterns" && <>
+        <button type="button" className="button" aria-pressed={liveEnabled} disabled={location.view !== "events" || !!parsed.error || coreOnly}
+          title={location.view === "trace" ? "Trace показывает историю связанных логов" :
+            coreOnly ? "pattern_id и fingerprint вычисляет core: фильтр доступен только в истории" : "Переключить отдельную ленту Live"}
+          onClick={() => setLiveEnabled((current) => !current)}>Live {liveEnabled ? "вкл" : "выкл"}</button>
+        <button type="button" className="button" aria-expanded={exportsOpen} disabled={!rows.length}
+          onClick={() => setExportsOpen((current) => !current)}>Экспорт</button>
+      </>}
     </div>
-    {exportsOpen && <div className="export-menu panel"><span>Только загруженные строки: {rows.length}.</span>
+    {exportsOpen && location.view !== "patterns" && <div className="export-menu panel"><span>Только загруженные строки: {rows.length}.</span>
       <button type="button" className="button" onClick={() => exportRows("json")}>Скачать JSON</button>
       <button type="button" className="button" onClick={() => exportRows("csv")}>Скачать CSV</button>
       <span className="muted">CSV экранирует формулы; JSON сохраняет исходные значения.</span>
     </div>}
-    <details className="search-help"><summary>Синтаксис поиска</summary><p>
+    {location.view !== "patterns" && <details className="search-help"><summary>Синтаксис поиска</summary><p>
       Точные поля: service, service_instance, environment, server, backend, action, level, id, trace_id, span_id, parent_span_id, request_id, pattern_id, fingerprint.
       AND соединяет поля, OR работает внутри одного поля: <code>level:(ERROR OR WARN)</code>.
       Слова ищутся все; <code>message:"connection refused"</code> или фраза в двойных кавычках ищутся подряд.
-      NOT и OR между полями пока недоступны.</p></details>
+      NOT и OR между полями пока недоступны.</p></details>}
     {location.view === "patterns" ? <Patterns from={location.from} to={location.to} range={location.range} q={location.q}
       query={parsed.query} error={parsed.error} intervalSeconds={intervalSeconds} revision={revision} onUnauthorized={onUnauthorized} /> : <>
     <div className="summary"><h1>{location.view === "trace" ? "Связанные логи Trace" : "События"}</h1>
@@ -398,19 +410,16 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
         {!liveEnabled && total !== undefined && <span className="chip">В диапазоне {total.toLocaleString("ru-RU")}</span>}
         {LOG_LEVELS.map((level) => {
           const count = rows.filter((event) => event.level === level).length;
-          return count ? <span key={level} className={`chip level-${level}`}>{level.toUpperCase()} {count}</span> : null;
+          return count ? <span key={level} className="chip">{level.toUpperCase()} {count}</span> : null;
         })}
-      </div><p>Уровни посчитаны по загруженным строкам.</p>
+      </div><p className="muted">Уровни посчитаны по загруженным строкам</p>
     </div>
-    {liveEnabled ? <div className="live-toolbar actions">
+    {liveEnabled ? <div className="live-toolbar">
       <span className={`status ${status}`} role="status">{STATUS_TEXT[status]}</span>
       <button type="button" className="button" aria-pressed={paused} onClick={togglePause}>{paused ? "Продолжить" : "Пауза"}</button>
       {paused && <span className="muted">На паузе · в буфере {pendingCount} строк</span>}
       <button type="button" className="button" onClick={refreshHistory}>Обновить историю</button>
-    </div> : <p className="page-note">Период: <time dateTime={location.from} title={location.from}>{periodLabel(location.from)}</time>
-      {" → "}<time dateTime={location.to} title={location.to}>{periodLabel(location.to)}</time>
-      {" · "}{Intl.DateTimeFormat().resolvedOptions().timeZone}
-      {page.as_of && <> · Обновлено <time dateTime={page.as_of} title={page.as_of}>{clock.format(new Date(page.as_of))}</time></>}</p>}
+    </div> : <PeriodChips from={location.from} to={location.to} asOf={page.as_of} />}
     {liveEnabled && <p className="page-note">Live показывает новые поступления из общего потока, до 2000 строк. Возможны пропуски при высокой нагрузке;
       для полного диапазона используйте историю. Пауза по Space вне элементов управления.</p>}
     {liveEnabled && liveNotice && <p className="page-note" role="status">{liveNotice}</p>}
@@ -420,19 +429,19 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
     {!liveEnabled && !parsed.error && summaryUnavailable && <p className="page-note" role="status">
       Сводка недоступна для такого длинного диапазона, сузьте период. Показаны только загруженные строки.
     </p>}
-    {!liveEnabled && !parsed.error && !summaryUnavailable && <section className="panel" aria-label="События по времени">
-        <div className="panel-head"><h2>События по времени</h2><span className="muted">Шаг {Math.round(intervalSeconds / 60 * 10) / 10} мин</span></div>
-        <Histogram buckets={chart?.buckets ?? []} label="События по времени" loading={location.view === "events" ? loading : histogramLoading}
-          intervalSeconds={intervalSeconds} caption={chart ? location.view === "events"
-            ? `Общий снимок сводки и первой страницы ${chart.as_of}. Подписи времени локальные.`
-            : `Независимый снимок аналитики ${chart.as_of}. Подписи времени локальные.` : undefined}
-          onBucket={(timestamp) => {
-            const from = Math.max(Date.parse(location.from), Date.parse(timestamp));
-            const to = Math.min(Date.parse(location.to), Date.parse(timestamp) + intervalSeconds * 1000);
-            updateLocation({ from: new Date(from).toISOString(), to: new Date(to).toISOString(), selected: null });
-          }} />
-        {histogramError && <p className="error" role="status">Гистограмма: {histogramError}</p>}
-      </section>}
+    {!liveEnabled && !parsed.error && !summaryUnavailable && <EventsChart buckets={chart?.buckets ?? []}
+      loading={location.view === "events" ? loading : histogramLoading} intervalSeconds={intervalSeconds}
+      aside={<span className="muted">Шаг {Math.round(intervalSeconds / 60 * 10) / 10} мин</span>}
+      caption={chart ? location.view === "events"
+        ? `Общий снимок сводки и первой страницы ${chart.as_of}. Подписи времени локальные.`
+        : `Независимый снимок аналитики ${chart.as_of}. Подписи времени локальные.` : undefined}
+      selection={rangeText}
+      onSelect={(from, to) => updateLocation({
+        from: new Date(Math.max(Date.parse(location.from), from)).toISOString(),
+        to: new Date(Math.min(Date.parse(location.to), to)).toISOString(), selected: null,
+      })}
+      onReset={() => setRange(location.range)} />}
+    {histogramError && <p className="error" role="status">Гистограмма: {histogramError}</p>}
     {location.view === "trace" && <p className="page-note">Логи упорядочены от ранних к поздним. Это корреляция по trace_id;
       spans и их длительности появятся отдельным этапом.</p>}
     {copyNote && <p className="page-note" role="status">{copyNote}</p>}
@@ -442,17 +451,18 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
     {selectedEvent && <section className="panel event-details" aria-label="Событие из ссылки">
       <h2>{selectedEvent.level.toUpperCase()} · {selectedEvent.timestamp}</h2><p>{selectedEvent.message}</p>{details(selectedEvent)}
     </section>}
-    <section className="panel table-scroll" aria-label="События">
-      <table className="logs-table"><thead><tr>
-        <th scope="col">Время</th><th scope="col">Уровень</th><th scope="col">Источник</th><th scope="col">Сообщение</th>
+    <section className="panel" aria-label="События">
+      <div className="table-scroll"><table className="logs-table"><thead><tr>
+        <th scope="col" className="time">Время</th><th scope="col" className="level-cell">Уровень</th>
+        <th scope="col" className="source">Источник</th><th scope="col">Сообщение</th>
       </tr></thead><tbody>{rows.map((event, index) => <Fragment key={`${event.id}:${index}`}>
-        <tr className={`event-row level-${event.level} ${selectedIndex === index ? "open" : ""}`}>
+        <tr className={`event-row ${selectedIndex === index ? "open" : ""}`}>
           <td className="time" title={event.timestamp}>
             {Date.parse(location.to) - Date.parse(location.from) >= 86_400_000 && <span className="date">{calendar.format(new Date(event.timestamp))}</span>}
             <time dateTime={event.timestamp}>{eventTime(event.timestamp)}</time>
           </td>
-          <td><span className={`level level-${event.level}`}>{event.level.toUpperCase()}</span></td>
-          <td className="source">{event.service}<br /><span className="muted">{event.service_instance ?? event.server}</span></td>
+          <td className="level-cell"><span className={`level level-${event.level}`}>{event.level.toUpperCase()}</span></td>
+          <td className="source"><span>{event.service}</span><small>{event.service_instance ?? event.server}</small></td>
           <td className="message"><button type="button" className="row-button" aria-expanded={selectedIndex === index}
             onClick={() => {
               const occurrence = rows.slice(0, index).filter((row) => row.id === event.id && row.timestamp === event.timestamp).length;
@@ -464,15 +474,19 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
           </button></td>
         </tr>
         {selectedIndex === index && <tr className="event-details"><td colSpan={4}>{details(event)}</td></tr>}
-      </Fragment>)}</tbody></table>
+      </Fragment>)}</tbody></table></div>
       {!rows.length && <p className="empty-state" role="status">{!liveEnabled && loading ? "Загружаем события…" :
         liveEnabled ? "Ожидаем события Live, соответствующие запросу." : parsed.error || searchError ? "Поиск не выполнен." : "В выбранном диапазоне событий нет."}</p>}
-    </section>
-    <div className="table-footer"><span>Показано {rows.length} загруженных строк{!liveEnabled && page.next_cursor ? " · есть следующая страница" : ""}.</span>
-      {!liveEnabled && <div className="actions">
-        {page.next_cursor && <button type="button" className="button" disabled={paging || expired} onClick={loadMore}>{paging ? "Загрузка…" : "Загрузить ещё 50"}</button>}
-        <button type="button" className="button" disabled={loading || paging || !!parsed.error} onClick={restart}>Обновить поиск</button>
+      <div ref={moreSentinel} aria-hidden="true" />
+      {paging && <div className="loading-more" role="status">
+        <svg className="spinner" viewBox="0 0 28 28" aria-hidden="true"><circle cx="14" cy="14" r="11" /></svg>Загружаем ещё строки…
       </div>}
-    </div></>}
+      <div className="table-footer"><span>Показано {rows.length} загруженных строк{!liveEnabled && page.next_cursor ? " · есть следующая страница" : ""}.</span>
+        {!liveEnabled && <div className="footer-actions">
+          {page.next_cursor && <button type="button" className="button" disabled={paging || expired} onClick={loadMore}>{paging ? "Загрузка…" : "Загрузить ещё 50"}</button>}
+          <button type="button" className="button" disabled={loading || paging || !!parsed.error} onClick={restart}>Обновить поиск</button>
+        </div>}
+      </div>
+    </section></>}
   </section>;
 }
