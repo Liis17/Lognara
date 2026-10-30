@@ -19,13 +19,18 @@ pub struct Config {
     pub segment_rows: usize,
     pub segment_bytes: usize,
     pub segment_age: Duration,
+    pub segment_compact: Duration,
     pub refresh_interval: Duration,
     pub retention: Duration,
+    /// Предел размера закрытых сегментов логов (Parquet + индекс); None - без предела.
+    pub retention_max_bytes: Option<u64>,
     pub series_compact_quiet: Duration,
     pub series_raw_days: u64,
     pub series_hourly_days: u64,
     pub series_rollup_hour_utc: u8,
     pub series_rollup_pause: Duration,
+    /// Срок хранения точек и агрегатов метрик по времени точек; None - без удаления.
+    pub series_retention: Option<Duration>,
     pub query_memory_bytes: usize,
     pub search_memory_bytes: usize,
     pub query_timeout: Duration,
@@ -54,6 +59,7 @@ impl Config {
                 },
             }
         };
+        let optional = |key| get(key).map(|_| number(key, 1)).transpose();
         let config = Self {
             listen_addr: get("LOGNARA_LISTEN_ADDR")
                 .unwrap_or_else(|| "127.0.0.1:7402".into())
@@ -75,8 +81,10 @@ impl Config {
             segment_rows: number("LOGNARA_SEGMENT_ROWS", 250_000)? as usize,
             segment_bytes: number("LOGNARA_SEGMENT_BYTES", 256 << 20)? as usize,
             segment_age: Duration::from_secs(number("LOGNARA_SEGMENT_SECONDS", 300)?),
+            segment_compact: Duration::from_secs(number("LOGNARA_SEGMENT_COMPACT_SECONDS", 86400)?),
             refresh_interval: Duration::from_millis(number("LOGNARA_REFRESH_MS", 1000)?),
             retention: Duration::from_secs(number("LOGNARA_RETENTION_SECONDS", 7 * 86400)?),
+            retention_max_bytes: optional("LOGNARA_RETENTION_MAX_BYTES")?,
             series_compact_quiet: Duration::from_secs(number(
                 "LOGNARA_SERIES_COMPACT_QUIET_SECONDS",
                 3600,
@@ -94,11 +102,13 @@ impl Config {
                 "LOGNARA_SERIES_ROLLUP_PAUSE_MS",
                 1000,
             )?),
+            series_retention: optional("LOGNARA_SERIES_RETENTION_SECONDS")?
+                .map(Duration::from_secs),
             query_memory_bytes: number("LOGNARA_QUERY_MEMORY_BYTES", 1 << 30)? as usize,
             search_memory_bytes: number("LOGNARA_SEARCH_MEMORY_BYTES", 128 << 20)? as usize,
             query_timeout: Duration::from_secs(number("LOGNARA_QUERY_TIMEOUT_SECONDS", 30)?),
             index_memory_bytes: number("LOGNARA_INDEX_MEMORY_BYTES", 64 << 20)? as usize,
-            index_cache_entries: number("LOGNARA_INDEX_CACHE_ENTRIES", 32)? as usize,
+            index_cache_entries: number("LOGNARA_INDEX_CACHE_ENTRIES", 256)? as usize,
             pattern_max_entries: number("LOGNARA_PATTERN_MAX_ENTRIES", 100_000)? as usize,
             pattern_catalog_bytes: number("LOGNARA_PATTERN_CATALOG_BYTES", 256 << 20)? as usize,
             pattern_query_bytes: number("LOGNARA_PATTERN_QUERY_BYTES", 64 << 20)? as usize,
@@ -123,8 +133,12 @@ impl Config {
         if config.pattern_catalog_bytes < (1 << 20) || config.pattern_query_bytes < 4096 {
             bail!("pattern catalog must be >= 1 MiB and query budget >= 4096 bytes");
         }
-        if config.retention.as_secs() > i64::MAX as u64 / 1_000_000_000 {
-            bail!("LOGNARA_RETENTION_SECONDS is too large");
+        if config.retention.as_secs() > i64::MAX as u64 / 1_000_000_000
+            || config
+                .series_retention
+                .is_some_and(|retention| retention.as_secs() > i64::MAX as u64 / 1_000_000_000)
+        {
+            bail!("LOGNARA_RETENTION_SECONDS or LOGNARA_SERIES_RETENTION_SECONDS is too large");
         }
         if config.series_compact_quiet.as_secs() > i64::MAX as u64 / 1_000_000_000 {
             bail!("LOGNARA_SERIES_COMPACT_QUIET_SECONDS is too large");
@@ -137,6 +151,12 @@ impl Config {
             || config.segment_age.as_secs() > i64::MAX as u64 / 1_000_000_000
         {
             bail!("query/refresh must be <= 3600 seconds; segment age must fit i64 nanoseconds");
+        }
+        // Тишина слияния равна двум segment age: обе длительности должны помещаться в i64 ns.
+        if config.segment_age.as_secs() > i64::MAX as u64 / 2_000_000_000
+            || config.segment_compact.as_secs() > i64::MAX as u64 / 1_000_000_000
+        {
+            bail!("LOGNARA_SEGMENT_SECONDS and LOGNARA_SEGMENT_COMPACT_SECONDS are too large");
         }
         Ok(config)
     }

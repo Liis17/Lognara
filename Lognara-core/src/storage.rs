@@ -2,6 +2,7 @@
 use crate::{
     catalog::{SegmentMeta, SeriesEnvironment, SeriesName},
     columns,
+    compaction::Replacement,
     config::Config,
     definitions::{LabelGuard, RuleSet},
     extract,
@@ -22,7 +23,7 @@ use std::{
     fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, RwLock, atomic::Ordering},
+    sync::{Arc, Mutex, OnceLock, RwLock, atomic::Ordering, mpsc::Receiver},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -34,6 +35,34 @@ use uuid::Uuid;
 pub struct DiskSegment {
     pub meta: SegmentMeta,
     pub path: PathBuf,
+    sizes: OnceLock<(u64, u64)>,
+}
+
+impl DiskSegment {
+    pub fn new(meta: SegmentMeta, path: PathBuf) -> Self {
+        Self {
+            meta,
+            path,
+            sizes: OnceLock::new(),
+        }
+    }
+
+    /// Размеры Parquet и индекса; закрытый сегмент неизменен, поэтому считаются один раз.
+    /// После редкой пересборки индекса из Parquet размер индекса может быть устаревшим.
+    pub fn sizes(&self) -> std::io::Result<(u64, u64)> {
+        if let Some(sizes) = self.sizes.get() {
+            return Ok(*sizes);
+        }
+        let sizes = (
+            crate::status::size(&self.path.join("logs.parquet"))?,
+            crate::status::size(&self.path.join("index"))?,
+        );
+        // Индекс без файлов бывает только во время пересборки: такой размер не запоминается.
+        if sizes.1 == 0 {
+            return Ok(sizes);
+        }
+        Ok(*self.sizes.get_or_init(|| sizes))
+    }
 }
 
 #[derive(Clone)]
@@ -73,6 +102,7 @@ pub struct Core {
     /// Готовые суточные агрегаты; публикует поток lognara-rollups.
     pub rollups: RwLock<Arc<Vec<Arc<RollupFile>>>>,
     rollup_worker: Mutex<Option<JoinHandle<()>>>,
+    compaction_worker: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl Core {
@@ -112,8 +142,10 @@ impl Core {
             pattern_worker: Mutex::new(None),
             rollups: RwLock::new(Arc::new(vec![])),
             rollup_worker: Mutex::new(None),
+            compaction_worker: Mutex::new(None),
         });
-        let mut worker = Materializer::recover(core.clone())?;
+        let (requests, compactions) = std::sync::mpsc::channel();
+        let mut worker = Materializer::recover(core.clone(), compactions)?;
         while worker.next()? {}
         worker.publish()?;
         let handle = thread::Builder::new().name("lognara-segments".into()).spawn(move || {
@@ -128,6 +160,8 @@ impl Core {
         *core.pattern_worker.lock().unwrap() = Some(PatternCatalog::start(core.clone())?);
         let rollups = rollup::spawn(core.clone())?;
         *core.rollup_worker.lock().unwrap() = Some(rollups);
+        let compaction = crate::compaction::spawn(core.clone(), requests)?;
+        *core.compaction_worker.lock().unwrap() = Some(compaction);
         Ok(core)
     }
 
@@ -148,6 +182,13 @@ impl Core {
             handle.thread().unpark();
             if handle.join().is_err() {
                 tracing::error!("rollup worker panicked; rollups are derived and rebuilt on start");
+            }
+        }
+        let compaction = self.compaction_worker.lock().unwrap().take();
+        if let Some(handle) = compaction {
+            handle.thread().unpark();
+            if handle.join().is_err() {
+                tracing::error!("compaction worker panicked; source segments remain registered");
             }
         }
         let handle = self.worker.lock().unwrap().take();
@@ -265,10 +306,11 @@ struct Materializer {
     last_publish: Instant,
     last_retention: Instant,
     last_compaction: Instant,
+    compactions: Receiver<crate::compaction::Request>,
 }
 
 impl Materializer {
-    fn recover(core: Arc<Core>) -> Result<Self> {
+    fn recover(core: Arc<Core>, compactions: Receiver<crate::compaction::Request>) -> Result<Self> {
         let (position, _, _) = core.journal.catalog.lock().unwrap().progress()?;
         let mut closed = vec![];
         let root = core.journal.config.data_dir.join("segments");
@@ -301,8 +343,10 @@ impl Materializer {
                     && manifest.checkpoint == meta.checkpoint,
                 "segment manifest disagrees with catalog"
             );
-            closed.push(Arc::new(DiskSegment { meta, path }));
+            closed.push(Arc::new(DiskSegment::new(meta, path)));
         }
+        // id слитого сегмента новее источников: порядок задаёт sequence, а не id.
+        closed.sort_by_key(|segment| segment.meta.first_sequence);
         let retained: HashSet<_> = closed.iter().map(|segment| segment.path.clone()).collect();
         for path in nested_directories(&root, 4)? {
             if !retained.contains(&path) {
@@ -337,7 +381,11 @@ impl Materializer {
             series_files.push(Arc::new(SeriesFile { meta, path }));
         }
         let registered: HashSet<_> = series_files.iter().map(|file| file.path.clone()).collect();
-        for day in nested_directories(&series_root, 3)? {
+        // Файлы лежат в каталогах дней, слитые по месяцам - прямо в каталоге месяца.
+        let directories = nested_directories(&series_root, 2)?
+            .into_iter()
+            .chain(nested_directories(&series_root, 3)?);
+        for day in directories {
             let mut removed = false;
             for entry in fs::read_dir(&day)? {
                 let path = entry?.path();
@@ -379,6 +427,7 @@ impl Materializer {
             last_publish: Instant::now(),
             last_retention: Instant::now() - Duration::from_secs(60),
             last_compaction: Instant::now() - Duration::from_secs(60),
+            compactions,
         })
     }
 
@@ -406,6 +455,18 @@ impl Materializer {
             if self.last_compaction.elapsed() >= compact_every {
                 self.compact()?;
                 self.last_compaction = Instant::now();
+            }
+            while let Ok(request) = self.compactions.try_recv() {
+                let applied = match request.replacement {
+                    Replacement::Segments { merged, sources } => {
+                        self.replace_segments(merged, &sources)
+                    }
+                    Replacement::Series { merged, sources } => {
+                        self.replace_series(merged, &sources)
+                    }
+                };
+                let _ = request.reply.send(matches!(applied, Ok(true)));
+                applied?;
             }
             if !worked {
                 if self.core.journal.stopping.load(Ordering::Acquire) {
@@ -613,13 +674,7 @@ impl Materializer {
         segment.index.finish()?;
         segment.meta.closed_at = now_nanos();
         segment.meta.checkpoint = self.position;
-        let mut file = File::create(segment.path.join("meta.json.tmp"))?;
-        file.write_all(&serde_json::to_vec_pretty(&segment.meta)?)?;
-        file.sync_all()?;
-        fs::rename(
-            segment.path.join("meta.json.tmp"),
-            segment.path.join("meta.json"),
-        )?;
+        write_manifest(&segment.path, &segment.meta)?;
         sync_ancestors(
             &segment.path.join("index"),
             &self.core.journal.config.data_dir,
@@ -651,10 +706,8 @@ impl Materializer {
         if let Some(file) = sealed_series {
             self.series_files.push(Arc::new(file));
         }
-        self.closed.push(Arc::new(DiskSegment {
-            meta: segment.meta,
-            path: segment.path,
-        }));
+        self.closed
+            .push(Arc::new(DiskSegment::new(segment.meta, segment.path)));
         self.publish()?;
         self.core
             .journal
@@ -729,12 +782,36 @@ impl Materializer {
     fn retain(&mut self) -> Result<()> {
         let now = now_nanos();
         let before = now.saturating_sub(self.core.journal.config.retention.as_nanos() as i64);
-        let ids: Vec<_> = self
+        let mut ids: Vec<_> = self
             .closed
             .iter()
             .filter(|segment| segment.meta.max_received_at < before)
             .map(|segment| segment.meta.id.clone())
             .collect();
+        if let Some(limit) = self.core.journal.config.retention_max_bytes {
+            // closed упорядочен по sequence: сверх предела удаляются самые старые сегменты,
+            // новейший закрытый сегмент остаётся. Ошибка подсчёта не останавливает приём.
+            let mut kept = vec![];
+            for segment in self.closed.iter().filter(|s| !ids.contains(&s.meta.id)) {
+                let size = segment.sizes().map_or_else(
+                    |error| {
+                        tracing::warn!(%error, path = %segment.path.display(), "segment size is unavailable");
+                        0
+                    },
+                    |(parquet, index)| parquet + index,
+                );
+                kept.push((&segment.meta.id, size));
+            }
+            let mut total: u64 = kept.iter().map(|(_, size)| size).sum();
+            kept.pop();
+            for (id, size) in kept {
+                if total <= limit {
+                    break;
+                }
+                ids.push(id.clone());
+                total -= size;
+            }
+        }
         if !ids.is_empty() {
             self.core
                 .journal
@@ -754,6 +831,7 @@ impl Materializer {
             self.generation += 1;
             self.publish()?;
         }
+        self.retain_series(now)?;
         self.finish_deletions()?;
         let first_retained = self
             .closed
@@ -778,6 +856,49 @@ impl Materializer {
             first_retained,
         )?;
         Ok(())
+    }
+
+    /// Заменяет источники слитым сегментом; false - источник уже удалён, новый каталог снят.
+    /// Видимые строки не меняются, поэтому поколение курсоров остаётся прежним.
+    fn replace_segments(
+        &mut self,
+        merged: DiskSegment,
+        sources: &[Arc<DiskSegment>],
+    ) -> Result<bool> {
+        let present = sources.iter().all(|source| {
+            self.closed
+                .iter()
+                .any(|segment| Arc::ptr_eq(segment, source))
+        });
+        if !present {
+            // Каталог не зарегистрирован: при ошибке удаления его дочистит восстановление.
+            crate::compaction::discard(&merged.path);
+            return Ok(false);
+        }
+        let old_ids: Vec<String> = sources
+            .iter()
+            .map(|source| source.meta.id.clone())
+            .collect();
+        self.core
+            .journal
+            .catalog
+            .lock()
+            .unwrap()
+            .replace_segments(&merged.meta, &old_ids)?;
+        failpoint("segment_compact_after_mark");
+        self.closed
+            .retain(|segment| !sources.iter().any(|source| Arc::ptr_eq(segment, source)));
+        self.closed.push(Arc::new(merged));
+        self.closed
+            .sort_by_key(|segment| segment.meta.first_sequence);
+        self.retired.extend(sources.iter().cloned());
+        self.publish()?;
+        self.core
+            .journal
+            .metrics
+            .segment_compactions
+            .fetch_add(1, Ordering::Relaxed);
+        Ok(true)
     }
 
     fn finish_deletions(&mut self) -> Result<()> {
@@ -807,72 +928,76 @@ impl Materializer {
     }
 
     /// Сливает файлы серий одного дня, если все они старше порога тишины; за проход один день.
+    /// Прошедшие месяцы крупнее и сливаются в потоке lognara-compaction.
     fn compact(&mut self) -> Result<()> {
         let quiet = self.core.journal.config.series_compact_quiet.as_nanos() as i64;
         let cutoff = now_nanos().saturating_sub(quiet);
-        let mut days: BTreeMap<&str, Vec<&Arc<SeriesFile>>> = BTreeMap::new();
-        for file in &self.series_files {
-            let (day, _) = file
-                .meta
-                .path
-                .rsplit_once('/')
-                .context("series file outside day directory")?;
-            days.entry(day).or_default().push(file);
-        }
-        // Ключи упорядочены по строке YYYY/MM/DD: первым идёт самый старый день.
-        let Some((day, files)) = days.into_iter().find(|(_, files)| {
-            files.len() >= 2 && files.iter().all(|file| file.meta.closed_at < cutoff)
-        }) else {
+        let Some((directory, sources)) = series_day_group(&self.series_files, cutoff)? else {
             return Ok(());
         };
-        let day = day.to_owned();
-        let sources: Vec<Arc<SeriesFile>> = files.into_iter().cloned().collect();
-        let id = Uuid::now_v7().to_string();
-        let relative = format!("{day}/{id}.parquet");
-        let path = self.core.journal.config.data_dir.join(&relative);
-        let mut writer = columns::ParquetWriter::create(&path, series::schema())?;
-        for source in &sources {
-            for batch in columns::stream_batches(&source.path)? {
-                writer.write(&batch?)?;
-                failpoint("series_compact_during_parquet");
-            }
+        let merged = write_series(&self.core, &directory, &sources, &|| false)?
+            .expect("day merge is not interrupted");
+        self.replace_series(merged, &sources)?;
+        Ok(())
+    }
+
+    /// Заменяет источники слитым файлом серий; false - источник уже заменён или удалён.
+    fn replace_series(&mut self, merged: SeriesFile, sources: &[Arc<SeriesFile>]) -> Result<bool> {
+        let present = sources.iter().all(|source| {
+            self.series_files
+                .iter()
+                .any(|file| Arc::ptr_eq(file, source))
+        });
+        if !present {
+            crate::compaction::discard(&merged.path);
+            return Ok(false);
         }
-        writer.finish()?;
-        failpoint("series_compact_after_parquet");
         let old_ids: Vec<String> = sources.iter().map(|file| file.meta.id.clone()).collect();
-        let merged = SeriesFileMeta {
-            version: 1,
-            id,
-            path: relative,
-            rows: sources.iter().map(|file| file.meta.rows).sum(),
-            min_timestamp: sources
-                .iter()
-                .fold(i64::MAX, |min, file| min.min(file.meta.min_timestamp)),
-            max_timestamp: sources
-                .iter()
-                .fold(i64::MIN, |max, file| max.max(file.meta.max_timestamp)),
-            closed_at: now_nanos(),
-        };
         self.core
             .journal
             .catalog
             .lock()
             .unwrap()
-            .replace_series(&merged, &old_ids)?;
+            .replace_series(&merged.meta, &old_ids)?;
         failpoint("series_compact_after_mark");
-        let removed: HashSet<&str> = old_ids.iter().map(String::as_str).collect();
         self.series_files
-            .retain(|file| !removed.contains(file.meta.id.as_str()));
-        self.series_files
-            .push(Arc::new(SeriesFile { meta: merged, path }));
+            .retain(|file| !sources.iter().any(|source| Arc::ptr_eq(file, source)));
+        self.series_files.push(Arc::new(merged));
         self.series_files.sort_by(|a, b| a.path.cmp(&b.path));
-        self.retired_series.extend(sources);
+        self.retired_series.extend(sources.iter().cloned());
         self.publish()?;
         self.core
             .journal
             .metrics
             .series_compactions
             .fetch_add(1, Ordering::Relaxed);
+        self.core.wake_rollups();
+        Ok(true)
+    }
+
+    /// Срок хранения метрик: файлы, все точки которых старше срока, исключаются из снимков
+    /// и удаляются после освобождения; агрегаты их суток снимает поток lognara-rollups.
+    fn retain_series(&mut self, now: i64) -> Result<()> {
+        let Some(retention) = self.core.journal.config.series_retention else {
+            return Ok(());
+        };
+        let before = now.saturating_sub(retention.as_nanos() as i64);
+        let (expired, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.series_files)
+            .into_iter()
+            .partition(|file| file.meta.max_timestamp < before);
+        self.series_files = kept;
+        if expired.is_empty() {
+            return Ok(());
+        }
+        let ids: Vec<String> = expired.iter().map(|file| file.meta.id.clone()).collect();
+        self.core
+            .journal
+            .catalog
+            .lock()
+            .unwrap()
+            .mark_series_deleting(&ids)?;
+        self.retired_series.extend(expired);
+        self.publish()?;
         self.core.wake_rollups();
         Ok(())
     }
@@ -911,8 +1036,17 @@ fn estimated_bytes(row: &StoredEvent) -> usize {
         + row.event.request_id.as_ref().map_or(0, String::len)
 }
 
+/// Долговечно публикует meta.json сегмента через `.tmp`, fsync и rename.
+pub(crate) fn write_manifest(dir: &Path, meta: &SegmentMeta) -> Result<()> {
+    let mut file = File::create(dir.join("meta.json.tmp"))?;
+    file.write_all(&serde_json::to_vec_pretty(meta)?)?;
+    file.sync_all()?;
+    fs::rename(dir.join("meta.json.tmp"), dir.join("meta.json"))?;
+    Ok(())
+}
+
 /// Синхронизирует каталог и его предков до корня данных, чтобы новые имена пережили сбой.
-fn sync_ancestors(start: &Path, root: &Path) -> Result<()> {
+pub(crate) fn sync_ancestors(start: &Path, root: &Path) -> Result<()> {
     let mut parent = start.to_path_buf();
     loop {
         sync_dir(&parent)?;
@@ -942,4 +1076,226 @@ pub(crate) fn nested_directories(root: &Path, depth: usize) -> Result<Vec<PathBu
         level = next;
     }
     Ok(level)
+}
+
+type SeriesGroup = Option<(String, Vec<Arc<SeriesFile>>)>;
+
+/// Файлы серий по каталогам дня (`metrics/YYYY/MM/DD`) и месяца (`metrics/YYYY/MM`).
+/// Месяц берётся из пути, то есть по времени поступления, как и день.
+#[allow(clippy::type_complexity)]
+fn series_directories(
+    files: &[Arc<SeriesFile>],
+) -> Result<(
+    BTreeMap<&str, Vec<&Arc<SeriesFile>>>,
+    BTreeMap<&str, Vec<&Arc<SeriesFile>>>,
+)> {
+    let mut days: BTreeMap<&str, Vec<&Arc<SeriesFile>>> = BTreeMap::new();
+    let mut months: BTreeMap<&str, Vec<&Arc<SeriesFile>>> = BTreeMap::new();
+    for file in files {
+        let (directory, _) = file
+            .meta
+            .path
+            .rsplit_once('/')
+            .context("series file outside metrics directory")?;
+        // metrics/YYYY/MM - 15 байт; каталог дня длиннее, файл месяца лежит прямо в нём.
+        let month = directory.get(..15).context("series file outside month")?;
+        if directory.len() > month.len() {
+            days.entry(directory).or_default().push(file);
+        }
+        months.entry(month).or_default().push(file);
+    }
+    Ok((days, months))
+}
+
+/// Ключи упорядочены по строке пути: первой идёт самая старая группа из двух и более файлов,
+/// все файлы которой закрыты раньше `cutoff`.
+fn oldest_ready(
+    groups: BTreeMap<&str, Vec<&Arc<SeriesFile>>>,
+    cutoff: i64,
+    allowed: impl Fn(&str) -> bool,
+) -> SeriesGroup {
+    groups
+        .into_iter()
+        .find(|(directory, files)| {
+            allowed(directory)
+                && files.len() >= 2
+                && files.iter().all(|file| file.meta.closed_at < cutoff)
+        })
+        .map(|(directory, files)| (directory.to_owned(), files.into_iter().cloned().collect()))
+}
+
+/// Самый старый день для слияния файлов серий.
+fn series_day_group(files: &[Arc<SeriesFile>], cutoff: i64) -> Result<SeriesGroup> {
+    Ok(oldest_ready(series_directories(files)?.0, cutoff, |_| true))
+}
+
+/// Самый старый прошедший месяц UTC для слияния в `metrics/YYYY/MM/<id>.parquet`.
+pub(crate) fn series_month_group(
+    files: &[Arc<SeriesFile>],
+    cutoff: i64,
+    now: i64,
+) -> Result<SeriesGroup> {
+    let date = OffsetDateTime::from_unix_timestamp_nanos(now as i128)?;
+    let current = format!("metrics/{:04}/{:02}", date.year(), date.month() as u8);
+    Ok(oldest_ready(
+        series_directories(files)?.1,
+        cutoff,
+        |month| month < current.as_str(),
+    ))
+}
+
+/// Пишет слияние файлов серий в `directory/<id>.parquet`; None - `stop` прервал запись,
+/// временный файл удалён.
+pub(crate) fn write_series(
+    core: &Core,
+    directory: &str,
+    sources: &[Arc<SeriesFile>],
+    stop: &dyn Fn() -> bool,
+) -> Result<Option<SeriesFile>> {
+    let id = Uuid::now_v7().to_string();
+    let relative = format!("{directory}/{id}.parquet");
+    let path = core.journal.config.data_dir.join(&relative);
+    let written = (|| -> Result<bool> {
+        let mut writer = columns::ParquetWriter::create(&path, series::schema())?;
+        for source in sources {
+            for batch in columns::stream_batches(&source.path)? {
+                if stop() {
+                    return Ok(false);
+                }
+                writer.write(&batch?)?;
+                failpoint("series_compact_during_parquet");
+            }
+        }
+        writer.finish()?;
+        Ok(true)
+    })();
+    let temp = path.with_extension("parquet.tmp");
+    match written {
+        Ok(true) => {}
+        Ok(false) => {
+            fs::remove_file(temp)?;
+            return Ok(None);
+        }
+        Err(error) => {
+            let _ = fs::remove_file(temp);
+            return Err(error);
+        }
+    }
+    failpoint("series_compact_after_parquet");
+    Ok(Some(SeriesFile {
+        meta: SeriesFileMeta {
+            version: 1,
+            id,
+            path: relative,
+            rows: sources.iter().map(|file| file.meta.rows).sum(),
+            min_timestamp: sources
+                .iter()
+                .fold(i64::MAX, |min, file| min.min(file.meta.min_timestamp)),
+            max_timestamp: sources
+                .iter()
+                .fold(i64::MIN, |max, file| max.max(file.meta.max_timestamp)),
+            closed_at: now_nanos(),
+        },
+        path,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(path: &str, closed_at: i64) -> Arc<SeriesFile> {
+        Arc::new(SeriesFile {
+            meta: SeriesFileMeta {
+                version: 1,
+                id: path.into(),
+                path: path.into(),
+                rows: 1,
+                min_timestamp: 0,
+                max_timestamp: 0,
+                closed_at,
+            },
+            path: path.into(),
+        })
+    }
+
+    #[test]
+    fn failed_series_merge_leaves_no_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = crate::config::Config::from_lookup(|key| match key {
+            "LOGNARA_ADMIN_TOKEN" => Some("ingest".into()),
+            "LOGNARA_QUERY_TOKEN" => Some("query".into()),
+            _ => None,
+        })
+        .unwrap();
+        config.data_dir = dir.path().into();
+        config.disk_reserve_bytes = 1;
+        let core = Core::open(config).unwrap();
+        let directory = dir.path().join("metrics/2026/01");
+        fs::create_dir_all(&directory).unwrap();
+        let source = directory.join("broken.parquet");
+        fs::write(&source, b"not parquet").unwrap();
+        let mut broken = file("broken", 0);
+        Arc::get_mut(&mut broken).unwrap().path = source;
+
+        assert!(write_series(&core, "metrics/2026/01", &[broken], &|| false).is_err());
+
+        let names: Vec<_> = fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["broken.parquet"]);
+        core.shutdown().unwrap();
+    }
+
+    fn ids(group: SeriesGroup) -> Option<(String, Vec<String>)> {
+        group.map(|(directory, files)| {
+            (
+                directory,
+                files.iter().map(|file| file.meta.id.clone()).collect(),
+            )
+        })
+    }
+
+    #[test]
+    fn series_groups_merge_days_and_only_past_months() {
+        // 2026-10-15T00:00:00Z
+        let now = 1_792_022_400_000_000_000;
+        let files = vec![
+            file("metrics/2026/09/30/a.parquet", 1),
+            file("metrics/2026/09/02/b.parquet", 1),
+            file("metrics/2026/10/01/c.parquet", 1),
+            file("metrics/2026/10/01/d.parquet", 1),
+        ];
+        assert_eq!(
+            ids(series_day_group(&files, 10).unwrap()),
+            Some((
+                "metrics/2026/10/01".into(),
+                vec![
+                    "metrics/2026/10/01/c.parquet".into(),
+                    "metrics/2026/10/01/d.parquet".into()
+                ]
+            ))
+        );
+        // Прошедший сентябрь собирается в файл месяца, текущий октябрь - нет.
+        let month = ids(series_month_group(&files, 10, now).unwrap()).unwrap();
+        assert_eq!(month.0, "metrics/2026/09");
+        assert_eq!(month.1.len(), 2);
+        assert!(series_month_group(&files[2..], 10, now).unwrap().is_none());
+        // Поздний файл уже слитого месяца сливается с файлом месяца после тишины.
+        let files = vec![
+            file("metrics/2026/09/m.parquet", 1),
+            file("metrics/2026/09/30/late.parquet", 20),
+        ];
+        assert!(series_day_group(&files, 30).unwrap().is_none());
+        assert!(series_month_group(&files, 10, now).unwrap().is_none());
+        assert_eq!(
+            series_month_group(&files, 30, now)
+                .unwrap()
+                .unwrap()
+                .1
+                .len(),
+            2
+        );
+    }
 }

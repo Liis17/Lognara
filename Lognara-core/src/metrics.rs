@@ -18,6 +18,8 @@ pub struct Metrics {
     pub series_parse_errors: AtomicU64,
     pub series_dropped_points: AtomicU64,
     pub series_compactions: AtomicU64,
+    pub segment_compactions: AtomicU64,
+    pub segment_compaction_errors: AtomicU64,
     pub series_rollups_built: AtomicU64,
     pub series_rollup_errors: AtomicU64,
     pub queries: AtomicU64,
@@ -49,6 +51,16 @@ impl Metrics {
             ),
             ("sealed_segments_total", &self.sealed_segments, "counter"),
             ("deleted_segments_total", &self.deleted_segments, "counter"),
+            (
+                "segment_compactions_total",
+                &self.segment_compactions,
+                "counter",
+            ),
+            (
+                "segment_compaction_errors_total",
+                &self.segment_compaction_errors,
+                "counter",
+            ),
             ("series_points_total", &self.series_points, "counter"),
             (
                 "series_parse_errors_total",

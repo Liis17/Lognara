@@ -141,3 +141,42 @@ fn status_counts_index_of_open_segment_before_seal() {
     assert!(status.storage.index_bytes > 0);
     core.shutdown().unwrap();
 }
+
+#[test]
+fn invalidated_index_is_checked_again_and_rebuilt_after_corruption() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = Core::open(config(dir.path())).unwrap();
+    core.journal.accept(&batch(2)).unwrap();
+    wait_visible(&core, 2);
+    core.shutdown().unwrap();
+    let segment = core.snapshot().closed[0].clone();
+    assert_eq!(
+        core.indexes
+            .searcher(&segment.path, segment.meta.rows)
+            .unwrap()
+            .num_docs(),
+        2
+    );
+    core.indexes.invalidate(&segment.path);
+    // Повреждение без изменения длины находит только проверка checksum.
+    let file = std::fs::read_dir(segment.path.join("index"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "term"))
+        .unwrap();
+    let mut bytes = std::fs::read(&file).unwrap();
+    bytes[0] ^= 0xff;
+    std::fs::write(&file, bytes).unwrap();
+    assert_eq!(
+        core.indexes
+            .searcher(&segment.path, segment.meta.rows)
+            .unwrap()
+            .num_docs(),
+        2
+    );
+    assert_eq!(segment.sizes().unwrap().0, {
+        std::fs::metadata(segment.path.join("logs.parquet"))
+            .unwrap()
+            .len()
+    });
+}

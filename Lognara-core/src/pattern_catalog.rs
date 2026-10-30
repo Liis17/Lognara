@@ -56,17 +56,26 @@ pub(crate) struct KnownIssue {
 
 pub(crate) trait Lifetime: Clone + Serialize {
     fn span(&mut self) -> (&mut i64, &mut i64);
+    fn last(&self) -> i64;
 }
 
 impl Lifetime for Known {
     fn span(&mut self) -> (&mut i64, &mut i64) {
         (&mut self.first, &mut self.last)
     }
+
+    fn last(&self) -> i64 {
+        self.last
+    }
 }
 
 impl Lifetime for KnownIssue {
     fn span(&mut self) -> (&mut i64, &mut i64) {
         (&mut self.first, &mut self.last)
+    }
+
+    fn last(&self) -> i64 {
+        self.last
     }
 }
 
@@ -113,6 +122,17 @@ impl PatternCatalog {
         self.view().ok().map(|state| state.checkpoint)
     }
 
+    /// Граница слияния сегментов: обработанный sequence, без границы при отказе каталога,
+    /// None до первичного прохода.
+    pub(crate) fn compaction_limit(&self) -> Option<u64> {
+        let state = self.state.read().unwrap();
+        if state.failed {
+            Some(u64::MAX)
+        } else {
+            state.ready.then_some(state.checkpoint)
+        }
+    }
+
     pub(crate) fn start(core: Arc<Core>) -> Result<JoinHandle<()>> {
         Ok(thread::Builder::new()
             .name("lognara-patterns".into())
@@ -134,11 +154,21 @@ impl PatternCatalog {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
+        let mut generation = None;
         loop {
             if core.journal.stopping.load(Ordering::Acquire) {
                 return Ok(());
             }
             let snapshot = core.snapshot();
+            // Поколение растёт при удалении данных retention; первый проход проверяет старые.
+            if generation != Some(snapshot.generation)
+                && snapshot.watermark >= catalog.state.checkpoint
+            {
+                generation = Some(snapshot.generation);
+                if let Some(state) = catalog.expire(&snapshot)? {
+                    *core.patterns.state.write().unwrap() = Arc::new(state);
+                }
+            }
             let ready = core.patterns.state.read().unwrap().ready;
             match next_chunk(&snapshot, catalog.state.checkpoint) {
                 Some(chunk) if !ready || chunk.watermark > catalog.state.checkpoint => {
@@ -381,6 +411,65 @@ impl DiskCatalog {
         self.state = next.clone();
         Ok(next)
     }
+
+    /// Удаляет записи без строк в хранилище: их последнее событие раньше самого старого
+    /// хранимого, либо хранилище пусто. Освобождает лимиты каталога и без нового приёма.
+    fn expire(&mut self, snapshot: &Snapshot) -> Result<Option<State>> {
+        let oldest = snapshot
+            .closed
+            .iter()
+            .map(|segment| &segment.meta)
+            .chain(snapshot.active.as_ref().map(|active| &active.meta))
+            .filter(|meta| meta.rows > 0)
+            .map(|meta| meta.min_timestamp)
+            .min();
+        let bound = oldest.unwrap_or(i64::MAX);
+        let mut next = self.state.clone();
+        let mut known = (*next.known).clone();
+        let mut issues = (*next.issues).clone();
+        let removed = prune(&mut known, &mut next.bytes, bound)?;
+        let removed_issues = prune(&mut issues, &mut next.bytes, bound)?;
+        if removed.is_empty() && removed_issues.is_empty() {
+            return Ok(None);
+        }
+        // История каталога теперь начинается не раньше самого старого хранимого события.
+        next.history_from =
+            oldest.and_then(|oldest| next.history_from.map(|from| from.max(oldest)));
+        let transaction = self.connection.transaction()?;
+        for (table, ids) in [("patterns", &removed), ("issues", &removed_issues)] {
+            for id in ids {
+                transaction.execute(&format!("DELETE FROM {table} WHERE id=?1"), [id])?;
+            }
+        }
+        transaction.execute(
+            "UPDATE progress SET history_from=?1 WHERE singleton=1",
+            params![next.history_from],
+        )?;
+        transaction.commit()?;
+        next.known = Arc::new(known);
+        next.issues = Arc::new(issues);
+        self.state = next.clone();
+        Ok(Some(next))
+    }
+}
+
+/// Удаляет записи с последним событием раньше `oldest` и их оценку размера (как в `observe`).
+fn prune<T: Lifetime>(
+    map: &mut BTreeMap<String, Arc<T>>,
+    bytes: &mut usize,
+    oldest: i64,
+) -> Result<Vec<String>> {
+    let expired: Vec<String> = map
+        .iter()
+        .filter(|(_, entry)| entry.last() < oldest)
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in &expired {
+        let entry = map.remove(id).expect("listed entry");
+        let size = serde_json::to_vec(&*entry)?.len() + id.len() + 256;
+        *bytes = bytes.saturating_sub(size);
+    }
+    Ok(expired)
 }
 
 /// Обновляет lifetime-границы или добавляет запись с учётом её размера.

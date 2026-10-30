@@ -5,6 +5,7 @@ pub mod analytics;
 pub mod api;
 pub mod catalog;
 pub mod columns;
+pub mod compaction;
 pub mod config;
 pub mod definitions;
 pub mod extract;

@@ -40,8 +40,9 @@ pub fn status(core: &Core) -> io::Result<Status> {
     let metrics = &core.journal.metrics;
     let (mut parquet_bytes, mut index_bytes) = (0, 0);
     for segment in &snapshot.closed {
-        parquet_bytes += size(&segment.path.join("logs.parquet"))?;
-        index_bytes += size(&segment.path.join("index"))?;
+        let (parquet, index) = segment.sizes()?;
+        parquet_bytes += parquet;
+        index_bytes += index;
     }
     if let Some(active) = &snapshot.active {
         index_bytes += size(&config.data_dir.join(&active.meta.path).join("index"))?;
@@ -75,7 +76,7 @@ pub fn status(core: &Core) -> io::Result<Status> {
 }
 
 /// Размер файла или каталога; индекс может перестраиваться, исчезнувшие файлы пропускаются.
-fn size(path: &Path) -> io::Result<u64> {
+pub(crate) fn size(path: &Path) -> io::Result<u64> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),

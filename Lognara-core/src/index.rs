@@ -3,6 +3,7 @@ use crate::{columns, model::StoredEvent, wal::sync_dir};
 use anyhow::{Result, ensure};
 use lru::LruCache;
 use std::{
+    collections::HashSet,
     fs,
     num::NonZeroUsize,
     path::{Path, PathBuf},
@@ -175,6 +176,9 @@ impl ActiveIndex {
 
 pub struct IndexCache {
     readers: Mutex<LruCache<PathBuf, IndexReader>>,
+    /// Закрытые индексы неизменны: полная проверка checksum нужна один раз за процесс.
+    verified: Mutex<HashSet<PathBuf>>,
+    opening: Mutex<()>,
     memory: usize,
 }
 
@@ -184,34 +188,44 @@ impl IndexCache {
             readers: Mutex::new(LruCache::new(
                 NonZeroUsize::new(entries).expect("nonzero config"),
             )),
+            verified: Mutex::new(HashSet::new()),
+            opening: Mutex::new(()),
             memory,
         }
     }
 
     pub fn searcher(&self, segment: &Path, rows: usize) -> Result<Searcher> {
-        let mut readers = self.readers.lock().unwrap();
-        if let Some(reader) = readers.get(segment) {
+        if let Some(reader) = self.readers.lock().unwrap().get(segment) {
             return Ok(reader.searcher());
         }
-        let reader = match open(segment, rows) {
+        // Открытие и пересборка крупного индекса идут вне замка кеша: попадания не ждут.
+        // Отдельный замок не даёт двум поискам собирать один индекс одновременно.
+        let _opening = self.opening.lock().unwrap();
+        if let Some(reader) = self.readers.lock().unwrap().get(segment) {
+            return Ok(reader.searcher());
+        }
+        let verified = self.verified.lock().unwrap().contains(segment);
+        let reader = match open(segment, rows, !verified) {
             Ok(reader) => reader,
             Err(error) => {
                 tracing::warn!(%error, path = %segment.display(), "rebuilding index from Parquet");
                 rebuild(segment, self.memory)?;
-                open(segment, rows)?
+                open(segment, rows, true)?
             }
         };
+        self.verified.lock().unwrap().insert(segment.into());
         let searcher = reader.searcher();
-        readers.put(segment.into(), reader);
+        self.readers.lock().unwrap().put(segment.into(), reader);
         Ok(searcher)
     }
 
     pub fn invalidate(&self, segment: &Path) {
         self.readers.lock().unwrap().pop(segment);
+        self.verified.lock().unwrap().remove(segment);
     }
 }
 
-fn open(segment: &Path, rows: usize) -> Result<IndexReader> {
+fn open(segment: &Path, rows: usize, checksum: bool) -> Result<IndexReader> {
     let index = Index::open_in_dir(segment.join("index"))?;
     ensure!(index.schema() == schema(), "incompatible index schema");
     ensure!(
@@ -219,7 +233,7 @@ fn open(segment: &Path, rows: usize) -> Result<IndexReader> {
         "incompatible pattern normalization"
     );
     ensure!(
-        index.validate_checksum()?.is_empty(),
+        !checksum || index.validate_checksum()?.is_empty(),
         "index checksum mismatch"
     );
     configure(&index);
@@ -236,15 +250,7 @@ fn rebuild(segment: &Path, memory: usize) -> Result<()> {
     if temp.exists() {
         fs::remove_dir_all(&temp)?;
     }
-    let mut writer = ActiveIndex::create(&temp, memory)?;
-    let mut row_id = 0;
-    for batch in columns::read_all(&segment.join("logs.parquet"))? {
-        for row in columns::decode(&batch)? {
-            writer.add(&row, row_id)?;
-            row_id += 1;
-        }
-    }
-    writer.finish()?;
+    build(&segment.join("logs.parquet"), &temp, memory, &|| false)?;
     let path = segment.join("index");
     let old = segment.join("index-old");
     if old.exists() {
@@ -259,4 +265,27 @@ fn rebuild(segment: &Path, memory: usize) -> Result<()> {
         fs::remove_dir_all(old)?;
     }
     Ok(())
+}
+
+/// Строит индекс Parquet-файла в `dir`; row_id - позиция строки в файле.
+/// Читает по одной пачке; false - `stop` прервал сборку, индекс неполон.
+pub(crate) fn build(
+    parquet: &Path,
+    dir: &Path,
+    memory: usize,
+    stop: &dyn Fn() -> bool,
+) -> Result<bool> {
+    let mut writer = ActiveIndex::create(dir, memory)?;
+    let mut row_id = 0;
+    for batch in columns::stream_batches(parquet)? {
+        if stop() {
+            return Ok(false);
+        }
+        for row in columns::decode(&batch?)? {
+            writer.add(&row, row_id)?;
+            row_id += 1;
+        }
+    }
+    writer.finish()?;
+    Ok(true)
 }
