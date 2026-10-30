@@ -217,7 +217,7 @@ pub fn router(app: AppState) -> Router {
         .route("/mcp/grants/{id}", delete(mcp_access::revoke_grant))
         .route(
             "/oauth/consent/{id}",
-            get(crate::oauth::consent_details).post(crate::oauth::consent_decision),
+            get(crate::mcp_access::consent_details).post(crate::mcp_access::consent_decision),
         )
         .route("/me", get(account::me))
         .route("/account/password", post(account::change_password))

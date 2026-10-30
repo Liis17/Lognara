@@ -122,6 +122,24 @@ async fn source_lists_include_logs_only_sources_and_have_exact_filtered_pages() 
     assert_eq!(first["values"], json!(["app-a"]));
     let cursor = first["next_cursor"].as_str().unwrap();
 
+    // New names between existing names must not leak into the original snapshot.
+    core.journal
+        .accept(&packed(vec![group(
+            5,
+            "app-ab",
+            "new-server",
+            Some("test"),
+        )]))
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while core.snapshot().watermark < 5 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "new row did not publish"
+        );
+        tokio::task::yield_now().await;
+    }
+
     let (status, second) = send(
         &router,
         Some("query"),

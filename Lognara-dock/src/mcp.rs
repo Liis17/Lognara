@@ -231,10 +231,36 @@ async fn authenticate(State(app): State<AppState>, request: Request<Body>, next:
     };
     let request = Request::from_parts(parts, Body::from(bytes));
     let response = next.run(request).await;
-    if is_tools_list {
+    let response = if is_tools_list {
         add_oauth_security_schemes(response).await
     } else {
         response
+    };
+    bound_response(
+        response,
+        request_value.get("id").cloned().unwrap_or(Value::Null),
+    )
+    .await
+}
+
+// Check the complete envelope, including the caller-controlled JSON-RPC id.
+async fn bound_response(response: Response, id: Value) -> Response {
+    let (mut parts, body) = response.into_parts();
+    match to_bytes(body, MAX_RESULT_BYTES).await {
+        Ok(bytes) => Response::from_parts(parts, Body::from(bytes)),
+        Err(_) => {
+            let result = failure_result(ToolFailure::new(
+                "response_too_large",
+                "The response exceeds 2 MiB; retry with a smaller limit or a larger metric step.",
+            ));
+            let bytes = serde_json::to_vec(&json!({"jsonrpc":"2.0", "id":id, "result":result}))
+                .expect("JSON response is serializable");
+            parts.headers.remove(CONTENT_LENGTH);
+            parts
+                .headers
+                .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+            Response::from_parts(parts, Body::from(bytes))
+        }
     }
 }
 
@@ -1370,6 +1396,27 @@ mod tests {
         };
         assert!(text.contains("response_too_large"));
         assert!(text.contains("larger metric step"));
+    }
+
+    #[tokio::test]
+    async fn response_limit_includes_large_caller_controlled_id() {
+        let id = json!("i".repeat(700_000));
+        let result = success_result(json!({"message": "x".repeat(1_500_000)}));
+        assert_ne!(result.is_error, Some(true));
+        let response = Json(json!({"jsonrpc":"2.0", "id":id, "result":result})).into_response();
+        let response = bound_response(response, id.clone()).await;
+        let bytes = to_bytes(response.into_body(), MAX_RESULT_BYTES)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["id"], id);
+        assert_eq!(body["result"]["isError"], true);
+        assert!(
+            body["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("response_too_large")
+        );
     }
 
     #[test]

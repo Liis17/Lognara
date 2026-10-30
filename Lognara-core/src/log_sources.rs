@@ -3,7 +3,7 @@ use std::{collections::BTreeSet, fs::File, sync::Arc};
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use datafusion::arrow::{
-    array::{Array, StringArray},
+    array::{Array, StringArray, UInt64Array},
     record_batch::RecordBatch,
 };
 use hmac::{Hmac, Mac};
@@ -126,7 +126,7 @@ pub async fn list(core: Arc<Core>, request: SourceRequest) -> Result<SourcePage,
         if cursor.version != 1
             || cursor.instance != core.instance
             || cursor.generation != snapshot.generation
-            || cursor.watermark != snapshot.watermark
+            || cursor.watermark > snapshot.watermark
             || cursor.issued_at > now_nanos()
             || now_nanos().saturating_sub(cursor.issued_at) > CURSOR_TTL_NANOS
         {
@@ -145,6 +145,9 @@ pub async fn list(core: Arc<Core>, request: SourceRequest) -> Result<SourcePage,
     let filters = request.filters;
     let limit = request.limit;
     let after = cursor.as_ref().map(|value| value.after.clone());
+    let watermark = cursor
+        .as_ref()
+        .map_or(snapshot.watermark, |value| value.watermark);
     let scan_snapshot = snapshot.clone();
     let values = tokio::task::spawn_blocking(move || {
         scan(
@@ -154,6 +157,7 @@ pub async fn list(core: Arc<Core>, request: SourceRequest) -> Result<SourcePage,
             after.as_deref(),
             limit,
             &cancel,
+            watermark,
         )
     })
     .await
@@ -173,7 +177,7 @@ pub async fn list(core: Arc<Core>, request: SourceRequest) -> Result<SourcePage,
                 version: 1,
                 instance: core.instance,
                 generation: snapshot.generation,
-                watermark: snapshot.watermark,
+                watermark,
                 query,
                 after: last.clone(),
                 issued_at: cursor
@@ -199,6 +203,7 @@ fn scan(
     after: Option<&str>,
     limit: usize,
     cancel: &CancellationToken,
+    watermark: u64,
 ) -> Result<Vec<String>, QueryError> {
     let capacity = limit + 1;
     let mut values = BTreeSet::new();
@@ -211,7 +216,7 @@ fn scan(
             File::open(path).map_err(anyhow::Error::from)?,
         )
         .map_err(anyhow::Error::from)?;
-        let indices = ["server", "service", "environment"]
+        let indices = ["server", "service", "environment", "sequence"]
             .iter()
             .map(|name| builder.schema().index_of(name))
             .collect::<std::result::Result<Vec<_>, _>>()
@@ -233,6 +238,7 @@ fn scan(
                 filters,
                 after,
                 capacity,
+                watermark,
             )?;
         }
     }
@@ -241,7 +247,15 @@ fn scan(
             if cancel.is_cancelled() {
                 return Err(QueryError::Timeout);
             }
-            add_batch(&mut values, batch, field, filters, after, capacity)?;
+            add_batch(
+                &mut values,
+                batch,
+                field,
+                filters,
+                after,
+                capacity,
+                watermark,
+            )?;
         }
     }
     Ok(values.into_iter().collect())
@@ -254,16 +268,22 @@ fn add_batch(
     filters: &SourceFilters,
     after: Option<&str>,
     capacity: usize,
+    watermark: u64,
 ) -> Result<(), QueryError> {
+    let sequence = batch
+        .column_by_name("sequence")
+        .and_then(|array| array.as_any().downcast_ref::<UInt64Array>())
+        .ok_or_else(|| QueryError::Invalid("missing source column sequence".into()))?;
     let server = strings(batch, "server")?;
     let service = strings(batch, "service")?;
     let environment = strings(batch, "environment")?;
     let selected = strings(batch, field.name())?;
     for row in 0..batch.num_rows() {
-        if filters
-            .server
-            .as_deref()
-            .is_some_and(|v| server.value(row) != v)
+        if sequence.value(row) > watermark
+            || filters
+                .server
+                .as_deref()
+                .is_some_and(|v| server.value(row) != v)
             || filters
                 .service
                 .as_deref()
@@ -334,14 +354,37 @@ mod tests {
                 Field::new("server", DataType::Utf8, false),
                 Field::new("service", DataType::Utf8, false),
                 Field::new("environment", DataType::Utf8, true),
+                Field::new("sequence", DataType::UInt64, false),
             ])),
             vec![
                 Arc::new(StringArray::from_iter_values(rows.iter().map(|r| r.0))),
                 Arc::new(StringArray::from_iter_values(rows.iter().map(|r| r.1))),
                 Arc::new(StringArray::from_iter(rows.iter().map(|r| r.2))),
+                Arc::new(UInt64Array::from_iter_values(1..=rows.len() as u64)),
             ],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn snapshot_watermark_excludes_new_source_names() {
+        let rows = batch(&[
+            ("server", "app-a", None),
+            ("server", "app-c", None),
+            ("server", "app-b", None),
+        ]);
+        let mut values = BTreeSet::new();
+        add_batch(
+            &mut values,
+            &rows,
+            SourceField::Service,
+            &SourceFilters::default(),
+            Some("app-a"),
+            100,
+            2,
+        )
+        .unwrap();
+        assert_eq!(values.into_iter().collect::<Vec<_>>(), ["app-c"]);
     }
 
     #[test]
@@ -364,6 +407,7 @@ mod tests {
             },
             None,
             2,
+            u64::MAX,
         )
         .unwrap();
         assert_eq!(values.into_iter().collect::<Vec<_>>(), ["srv-a", "srv-b"]);
@@ -379,6 +423,7 @@ mod tests {
             },
             Some("prod"),
             2,
+            u64::MAX,
         )
         .unwrap();
         assert!(environments.is_empty());
@@ -394,6 +439,7 @@ mod tests {
                 Field::new("server", DataType::Utf8, false),
                 Field::new("service", DataType::Utf8, false),
                 Field::new("environment", DataType::Utf8, true),
+                Field::new("sequence", DataType::UInt64, false),
             ])),
             vec![
                 Arc::new(StringArray::from_iter_values(rows.iter().map(|r| r.0))),
@@ -401,6 +447,7 @@ mod tests {
                     rows.iter().map(|r| r.1.as_str()),
                 )),
                 Arc::new(StringArray::from_iter(rows.iter().map(|r| r.2))),
+                Arc::new(UInt64Array::from_iter_values(1..=rows.len() as u64)),
             ],
         )
         .unwrap();
@@ -412,6 +459,7 @@ mod tests {
             &SourceFilters::default(),
             None,
             1001,
+            u64::MAX,
         )
         .unwrap();
         let first = first.into_iter().collect::<Vec<_>>();
@@ -426,6 +474,7 @@ mod tests {
             &SourceFilters::default(),
             Some(&first[999]),
             1001,
+            u64::MAX,
         )
         .unwrap();
         let second = second.into_iter().collect::<Vec<_>>();
