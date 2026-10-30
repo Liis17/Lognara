@@ -1155,19 +1155,32 @@ pub(crate) fn write_series(
     let id = Uuid::now_v7().to_string();
     let relative = format!("{directory}/{id}.parquet");
     let path = core.journal.config.data_dir.join(&relative);
-    let mut writer = columns::ParquetWriter::create(&path, series::schema())?;
-    for source in sources {
-        for batch in columns::stream_batches(&source.path)? {
-            if stop() {
-                drop(writer);
-                fs::remove_file(path.with_extension("parquet.tmp"))?;
-                return Ok(None);
+    let written = (|| -> Result<bool> {
+        let mut writer = columns::ParquetWriter::create(&path, series::schema())?;
+        for source in sources {
+            for batch in columns::stream_batches(&source.path)? {
+                if stop() {
+                    return Ok(false);
+                }
+                writer.write(&batch?)?;
+                failpoint("series_compact_during_parquet");
             }
-            writer.write(&batch?)?;
-            failpoint("series_compact_during_parquet");
+        }
+        writer.finish()?;
+        Ok(true)
+    })();
+    let temp = path.with_extension("parquet.tmp");
+    match written {
+        Ok(true) => {}
+        Ok(false) => {
+            fs::remove_file(temp)?;
+            return Ok(None);
+        }
+        Err(error) => {
+            let _ = fs::remove_file(temp);
+            return Err(error);
         }
     }
-    writer.finish()?;
     failpoint("series_compact_after_parquet");
     Ok(Some(SeriesFile {
         meta: SeriesFileMeta {
@@ -1204,6 +1217,35 @@ mod tests {
             },
             path: path.into(),
         })
+    }
+
+    #[test]
+    fn failed_series_merge_leaves_no_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = crate::config::Config::from_lookup(|key| match key {
+            "LOGNARA_ADMIN_TOKEN" => Some("ingest".into()),
+            "LOGNARA_QUERY_TOKEN" => Some("query".into()),
+            _ => None,
+        })
+        .unwrap();
+        config.data_dir = dir.path().into();
+        config.disk_reserve_bytes = 1;
+        let core = Core::open(config).unwrap();
+        let directory = dir.path().join("metrics/2026/01");
+        fs::create_dir_all(&directory).unwrap();
+        let source = directory.join("broken.parquet");
+        fs::write(&source, b"not parquet").unwrap();
+        let mut broken = file("broken", 0);
+        Arc::get_mut(&mut broken).unwrap().path = source;
+
+        assert!(write_series(&core, "metrics/2026/01", &[broken], &|| false).is_err());
+
+        let names: Vec<_> = fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["broken.parquet"]);
+        core.shutdown().unwrap();
     }
 
     fn ids(group: SeriesGroup) -> Option<(String, Vec<String>)> {

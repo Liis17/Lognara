@@ -208,8 +208,12 @@ fn build(
         closed_at: now_nanos(),
         checkpoint: last.checkpoint,
     };
-    write_manifest(&path, &meta)?;
-    sync_ancestors(&path.join("index"), &config.data_dir)?;
+    if let Err(error) = write_manifest(&path, &meta)
+        .and_then(|()| sync_ancestors(&path.join("index"), &config.data_dir))
+    {
+        discard(&path);
+        return Err(error);
+    }
     failpoint("segment_compact_after_parquet");
     Ok(Some(DiskSegment::new(meta, path)))
 }
@@ -282,14 +286,24 @@ fn step(
     } else {
         let now = now_nanos();
         let cutoff = now.saturating_sub(core.journal.config.series_compact_quiet.as_nanos() as i64);
-        let Some((directory, sources)) = series_month_group(&snapshot.series_files, cutoff, now)?
-        else {
+        // Файлы, слияние которых уже падало, не участвуют до рестарта.
+        let files: Vec<_> = snapshot
+            .series_files
+            .iter()
+            .filter(|file| !failed.contains(&file.meta.id))
+            .cloned()
+            .collect();
+        drop(snapshot);
+        let Some((directory, sources)) = series_month_group(&files, cutoff, now)? else {
             return Ok(false);
         };
-        drop(snapshot);
-        match write_series(core, &directory, &sources, &stopping)? {
-            Some(merged) => Replacement::Series { merged, sources },
-            None => return Ok(false),
+        match write_series(core, &directory, &sources, &stopping) {
+            Ok(Some(merged)) => Replacement::Series { merged, sources },
+            Ok(None) => return Ok(false),
+            Err(error) => {
+                failed.extend(sources.iter().map(|file| file.meta.id.clone()));
+                return Err(error);
+            }
         }
     };
     let path = match &replacement {
@@ -309,11 +323,9 @@ fn step(
                 }
                 return Ok(true);
             }
-            // Материализатор отвечает до любой своей ошибки: без ответа замена не принята.
-            Err(RecvTimeoutError::Disconnected) => {
-                discard(&path);
-                return Ok(false);
-            }
+            // Без ответа неизвестно, зарегистрирована ли замена (например, паника после
+            // транзакции каталога): незарегистрированный результат удалит восстановление.
+            Err(RecvTimeoutError::Disconnected) => return Ok(false),
             Err(RecvTimeoutError::Timeout) => {
                 if core.journal.stopping.load(Ordering::Acquire) {
                     return Ok(false);
