@@ -178,6 +178,7 @@ pub struct IndexCache {
     readers: Mutex<LruCache<PathBuf, IndexReader>>,
     /// Закрытые индексы неизменны: полная проверка checksum нужна один раз за процесс.
     verified: Mutex<HashSet<PathBuf>>,
+    opening: Mutex<()>,
     memory: usize,
 }
 
@@ -188,13 +189,19 @@ impl IndexCache {
                 NonZeroUsize::new(entries).expect("nonzero config"),
             )),
             verified: Mutex::new(HashSet::new()),
+            opening: Mutex::new(()),
             memory,
         }
     }
 
     pub fn searcher(&self, segment: &Path, rows: usize) -> Result<Searcher> {
-        let mut readers = self.readers.lock().unwrap();
-        if let Some(reader) = readers.get(segment) {
+        if let Some(reader) = self.readers.lock().unwrap().get(segment) {
+            return Ok(reader.searcher());
+        }
+        // Открытие и пересборка крупного индекса идут вне замка кеша: попадания не ждут.
+        // Отдельный замок не даёт двум поискам собирать один индекс одновременно.
+        let _opening = self.opening.lock().unwrap();
+        if let Some(reader) = self.readers.lock().unwrap().get(segment) {
             return Ok(reader.searcher());
         }
         let verified = self.verified.lock().unwrap().contains(segment);
@@ -208,7 +215,7 @@ impl IndexCache {
         };
         self.verified.lock().unwrap().insert(segment.into());
         let searcher = reader.searcher();
-        readers.put(segment.into(), reader);
+        self.readers.lock().unwrap().put(segment.into(), reader);
         Ok(searcher)
     }
 

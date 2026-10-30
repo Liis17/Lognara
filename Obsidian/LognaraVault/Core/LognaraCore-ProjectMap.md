@@ -16,7 +16,7 @@ Parent: [[Core/LognaraCore]]
 | storage | Материализация, точки метрик, снимки, seal, retention, слияние файлов метрик, атомарная замена слитых сегментов логов; запуск и остановка потоков `lognara-rollups`, `lognara-compaction` и каталога паттернов |
 | tests/compaction.rs | Слияние окна: поиск, текст, курсор до и после слияния, histogram, старый снимок держит источники, рестарт и дедупликация; окно не сливается до конца |
 | index | Индексация, построение индекса из Parquet (`index::build`) и ограниченный кеш читателей с однократной проверкой checksum |
-| compaction | Слияние закрытых сегментов логов одного окна: выбор группы (`compaction::select`), поток `lognara-compaction`, запрос замены материализатору |
+| compaction | Слияние закрытых сегментов логов одного окна (`compaction::select`) и прошедших месяцев файлов точек; поток `lognara-compaction`, запрос замены материализатору (`Replacement`), удаление непринятого результата |
 | query | Проверка фильтров, top-k, чтение строк, HMAC-курсоры |
 | analytics | Типизированные агрегаты DataFusion, общий memory pool, общий фильтр Arrow/Parquet и предпросмотр правил |
 | summary | Единый Snapshot, text-aware count/stacked histogram, p95 duration_ms/coverage, action groups и первая страница |

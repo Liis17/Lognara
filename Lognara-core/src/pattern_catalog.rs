@@ -301,6 +301,10 @@ impl DiskCatalog {
         if let Some(oldest) = oldest {
             removed = prune(&mut known, &mut next.bytes, oldest)?;
             removed_issues = prune(&mut issues, &mut next.bytes, oldest)?;
+            // История каталога теперь начинается не раньше самого старого хранимого события.
+            if !removed.is_empty() || !removed_issues.is_empty() {
+                next.history_from = next.history_from.map(|from| from.max(oldest));
+            }
         }
         let (mut changed, mut changed_issues) = (BTreeSet::new(), BTreeSet::new());
         let mut rows = 0_u64;
