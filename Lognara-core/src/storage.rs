@@ -95,6 +95,8 @@ pub struct Core {
     pub(crate) cursor_key: [u8; 32],
     pub search_slots: Arc<Semaphore>,
     pub analytics_slots: Arc<Semaphore>,
+    /// Один слот для фоновой проверки алертов; не занимает слоты UI-аналитики.
+    pub alert_slots: Arc<Semaphore>,
     pub query_runtime: Arc<datafusion::execution::runtime_env::RuntimeEnv>,
     pub patterns: PatternCatalog,
     worker: Mutex<Option<JoinHandle<Result<()>>>>,
@@ -136,6 +138,7 @@ impl Core {
             cursor_key: key,
             search_slots: Arc::new(Semaphore::new(4)),
             analytics_slots: Arc::new(Semaphore::new(2)),
+            alert_slots: Arc::new(Semaphore::new(1)),
             query_runtime,
             patterns: PatternCatalog::new(),
             worker: Mutex::new(None),

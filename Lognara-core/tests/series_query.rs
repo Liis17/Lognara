@@ -25,6 +25,7 @@ const FIXTURE: &[u8] = include_bytes!("fixtures/relay-batch.bin");
 const DEFINITIONS: &str = "/v1/admin/series/definitions";
 const LIST: &str = "/v1/series";
 const QUERY: &str = "/v1/series/query";
+const ALERT_QUERY: &str = "/v1/series/alerts/query";
 const FROM: &str = "2026-10-13T10:00:00Z";
 const TO: &str = "2026-10-13T10:01:00Z";
 const HOURLY: u32 = 3600;
@@ -90,6 +91,16 @@ async fn send(
 fn source(service: &str, instance: Option<&str>) -> Source {
     Source {
         environment: Some("production".into()),
+        server: "eu-prod-01".into(),
+        backend: "barkcloud".into(),
+        service: service.into(),
+        service_instance: instance.map(Into::into),
+    }
+}
+
+fn source_in_environment(service: &str, instance: Option<&str>, environment: &str) -> Source {
+    Source {
+        environment: Some(environment.into()),
         server: "eu-prod-01".into(),
         backend: "barkcloud".into(),
         service: service.into(),
@@ -180,6 +191,220 @@ async fn duplicate_deliveries_of_one_report_are_counted_once() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["series"], json!([{"label": "", "values": [10.0]}]));
+    core.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn alert_query_uses_exact_raw_windows_baselines_and_selected_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = Core::open(config(dir.path(), 1000)).unwrap();
+    let router = api::router(core.clone());
+    let now = OffsetDateTime::now_utc();
+    let ago = |seconds: i64| {
+        (now - time::Duration::seconds(seconds))
+            .format(&Rfc3339)
+            .unwrap()
+    };
+    let reports = vec![
+        report(1, &ago(1000), json!({"requests": 1}), json!({})),
+        report(2, &ago(260), json!({"requests": 2}), json!({})),
+        report(3, &ago(120), json!({"requests": 4}), json!({})),
+        report(4, &ago(30), json!({"requests": 8}), json!({})),
+        // A retried native report has a new event ID but the same raw dedup identity.
+        report(5, &ago(30), json!({"requests": 8}), json!({})),
+    ];
+    core.journal
+        .accept(&batch(vec![
+            (source("api", Some("eu-1")), reports),
+            (
+                source_in_environment("api", Some("eu-2"), "staging"),
+                vec![report(6, &ago(30), json!({"requests": 100}), json!({}))],
+            ),
+        ]))
+        .unwrap();
+    wait(|| core.snapshot().watermark >= 6);
+
+    let request = json!({
+        "server": "eu-prod-01",
+        "service": "api",
+        "name": "requests",
+        "origin": "counter",
+        "environment": "production",
+        "windows_seconds": [60, 180, 300]
+    });
+    // Occupying both UI analytics slots must not block the dedicated alert slot.
+    let _first = core.analytics_slots.clone().try_acquire_owned().unwrap();
+    let _second = core.analytics_slots.clone().try_acquire_owned().unwrap();
+    let (status, reply) = send(
+        &router,
+        "POST",
+        ALERT_QUERY,
+        Some("query"),
+        Some(request.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{reply}");
+    assert_eq!(reply["windows"][0]["count"], 1);
+    assert_eq!(reply["windows"][0]["sum"], 8.0);
+    assert_eq!(reply["windows"][0]["avg"], 8.0);
+    assert_eq!(reply["windows"][0]["min"], 8.0);
+    assert_eq!(reply["windows"][0]["max"], 8.0);
+    assert_eq!(reply["windows"][0]["increase"], 4.0);
+    assert_eq!(reply["windows"][1]["count"], 2);
+    assert_eq!(reply["windows"][1]["sum"], 12.0);
+    assert_eq!(reply["windows"][1]["avg"], 6.0);
+    assert_eq!(reply["windows"][1]["min"], 4.0);
+    assert_eq!(reply["windows"][1]["max"], 8.0);
+    assert_eq!(reply["windows"][1]["increase"], 6.0);
+    assert_eq!(reply["windows"][2]["count"], 3);
+    assert_eq!(reply["windows"][2]["sum"], 14.0);
+    assert_eq!(reply["windows"][2]["avg"], 14.0 / 3.0);
+    assert_eq!(reply["windows"][2]["min"], 2.0);
+    assert_eq!(reply["windows"][2]["max"], 8.0);
+    assert_eq!(reply["windows"][2]["increase"], 7.0);
+    assert!(reply["as_of"].as_str().is_some());
+    assert!(reply["last_point_at"].as_str().is_some());
+
+    let mut all_environments = request;
+    all_environments
+        .as_object_mut()
+        .unwrap()
+        .remove("environment");
+    let (_, all) = send(
+        &router,
+        "POST",
+        ALERT_QUERY,
+        Some("query"),
+        Some(all_environments),
+    )
+    .await;
+    assert_eq!(all["windows"][0]["count"], 2);
+    assert_eq!(all["windows"][0]["sum"], 108.0);
+
+    let (status, _) = send(
+        &router,
+        "POST",
+        ALERT_QUERY,
+        None,
+        Some(json!({
+            "server": "eu-prod-01", "service": "api", "name": "requests",
+            "origin": "counter", "windows_seconds": [60]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    core.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn alert_query_has_no_series_cutoff_and_returns_zero_for_empty_sum_and_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = Core::open(config(dir.path(), 1000)).unwrap();
+    let router = api::router(core.clone());
+    let now = OffsetDateTime::now_utc();
+    let timestamp = (now - time::Duration::seconds(20))
+        .format(&Rfc3339)
+        .unwrap();
+    let groups = (0..25)
+        .map(|index| {
+            let instance = format!("instance-{index:02}");
+            (
+                source("api", Some(&instance)),
+                vec![report(
+                    index as u128 + 1,
+                    &timestamp,
+                    json!({"requests": 1}),
+                    json!({}),
+                )],
+            )
+        })
+        .collect();
+    core.journal.accept(&batch(groups)).unwrap();
+    wait(|| core.snapshot().watermark >= 25);
+
+    let (status, reply) = send(
+        &router,
+        "POST",
+        ALERT_QUERY,
+        Some("query"),
+        Some(json!({
+            "server": "eu-prod-01", "service": "api", "name": "requests",
+            "origin": "counter", "windows_seconds": [60]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{reply}");
+    assert_eq!(reply["windows"][0]["count"], 25);
+    assert_eq!(reply["windows"][0]["sum"], 25.0);
+
+    let (_, empty) = send(
+        &router,
+        "POST",
+        ALERT_QUERY,
+        Some("query"),
+        Some(json!({
+            "server": "eu-prod-01", "service": "api", "name": "not_seen",
+            "origin": "counter", "windows_seconds": [60]
+        })),
+    )
+    .await;
+    assert_eq!(empty["windows"][0]["count"], 0);
+    assert_eq!(empty["windows"][0]["sum"], 0.0);
+    assert!(empty["windows"][0]["avg"].is_null());
+    assert!(empty["windows"][0]["min"].is_null());
+    assert!(empty["windows"][0]["max"].is_null());
+    assert!(empty["windows"][0]["increase"].is_null());
+    assert!(empty["last_point_at"].is_null());
+    core.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn seven_day_alert_query_scans_exact_raw_points_within_the_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = Core::open(config(dir.path(), 2_000)).unwrap();
+    let router = api::router(core.clone());
+    let now = OffsetDateTime::now_utc();
+    const POINTS: usize = 1_008;
+    let reports = (0..POINTS)
+        .map(|index| {
+            let ago = 604_700 - (index as i64 * 600);
+            let timestamp = (now - time::Duration::seconds(ago))
+                .format(&Rfc3339)
+                .unwrap();
+            report(
+                index as u128 + 1,
+                &timestamp,
+                json!({"requests": index + 1}),
+                json!({}),
+            )
+        })
+        .collect();
+    core.journal
+        .accept(&batch(vec![(source("api", Some("eu-1")), reports)]))
+        .unwrap();
+    wait(|| core.snapshot().watermark >= POINTS as u64);
+
+    let started = Instant::now();
+    let (status, reply) = send(
+        &router,
+        "POST",
+        ALERT_QUERY,
+        Some("query"),
+        Some(json!({
+            "server": "eu-prod-01", "service": "api", "name": "requests",
+            "origin": "counter", "environment": "production", "windows_seconds": [WEEK]
+        })),
+    )
+    .await;
+    let elapsed = started.elapsed();
+    assert_eq!(status, StatusCode::OK, "{reply}");
+    assert_eq!(reply["windows"][0]["count"], POINTS);
+    assert_eq!(reply["windows"][0]["increase"], (POINTS - 1) as f64);
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "7-day raw query took {elapsed:?}"
+    );
+    eprintln!("7-day alert query: {POINTS} raw points in {elapsed:?}");
     core.shutdown().unwrap();
 }
 
