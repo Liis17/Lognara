@@ -21,7 +21,19 @@ const bundle = {
     },
   ],
 };
-async function fixture(page: Page, conflict = false) {
+async function fixture(
+  page: Page,
+  conflict = false,
+  alertSummary: {
+    enabled: boolean;
+    alerts: {
+      key: Pick<typeof metric, "server" | "service" | "name" | "origin">;
+      enabled: boolean;
+      state: "unknown" | "ok" | "firing";
+      no_recipients: boolean;
+    }[];
+  } = { enabled: false, alerts: [] },
+) {
   let favorites = [metric, { ...metric, server: "server-b" }].map(
     ({ server, service, name, origin }) => ({ server, service, name, origin }),
   );
@@ -29,6 +41,27 @@ async function fixture(page: Page, conflict = false) {
     const path = new URL(route.request().url()).pathname;
     if (path === "/api/me")
       return route.fulfill({ json: { username: "liis", passkeys: 0 } });
+    if (path === "/api/alerts/summary")
+      return route.fulfill({ json: alertSummary });
+    if (path === "/api/alerts")
+      return route.fulfill({
+        json: {
+          enabled: alertSummary.enabled,
+          token_configured: true,
+          send_paused: false,
+          send_pause_reason: null,
+          core_status: "available",
+          core_checked_at: null,
+          core_error: null,
+          recipients: [],
+          groups: [],
+          alerts: [],
+          pending_deliveries: 0,
+          permanent_errors: 0,
+        },
+      });
+    if (path === "/api/alerts/definition")
+      return route.fulfill({ json: { alert: null } });
     if (path === "/api/series/favorites") {
       if (route.request().method() === "GET")
         return route.fulfill({ json: { keys: favorites } });
@@ -165,6 +198,45 @@ test("server tiles link to reloadable detail pages and preserve query scope", as
   await page.keyboard.press("Escape");
   await expect(dialog).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Настроить" })).toBeFocused();
+});
+
+test("enabled alert eye appears for any metric and is muted while global alerts are paused", async ({
+  page,
+}) => {
+  let summaryRequests = 0;
+  await fixture(page);
+  await page.route("**/api/alerts/summary", async (route) => {
+    summaryRequests++;
+    await route.fulfill({
+      json: {
+        enabled: false,
+        alerts: [
+          {
+            key: {
+              server: "server-a",
+              service: "billing",
+              name: "requests",
+              origin: "counter",
+            },
+            enabled: true,
+            state: "firing",
+            no_recipients: true,
+          },
+        ],
+      },
+    });
+  });
+  await page.goto("/metrics");
+  const eye = page.getByRole("link", {
+    name: "Алерт включён в настройке, но глобально приостановлен",
+  });
+  await expect(eye).toBeVisible();
+  await expect(eye).toHaveAttribute(
+    "title",
+    "Алерт приостановлен: глобальная отправка выключена",
+  );
+  await expect(page.locator(".metric-alert-indicator.paused")).toHaveCount(1);
+  expect(summaryRequests).toBe(1);
 });
 test("manual creation uses dependent selects and scoped editor on mobile", async ({
   page,

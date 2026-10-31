@@ -7,9 +7,22 @@ import {
   type SeriesMetric,
   type SeriesQuery,
   type SeriesReply,
+  type MetricAlertSummary,
 } from "../api";
 import Chart from "../components/Chart";
 import MetricCreate from "./MetricCreate";
+
+let alertSummaryRequest: Promise<MetricAlertSummary> | null = null;
+function loadAlertSummary() {
+  if (!alertSummaryRequest) {
+    alertSummaryRequest = api<MetricAlertSummary>("GET", "/api/alerts/summary").finally(
+      () => {
+        alertSummaryRequest = null;
+      },
+    );
+  }
+  return alertSummaryRequest;
+}
 
 export function metricUrl(metric: SeriesMetric): string {
   return (
@@ -126,11 +139,15 @@ function Tile({
   onUnauthorized,
   favorite,
   busy,
+  alert,
+  alertsEnabled,
   onFavorite,
 }: {
   metric: ListedMetric;
   favorite: boolean;
   busy: boolean;
+  alert: MetricAlertSummary["alerts"][number] | undefined;
+  alertsEnabled: boolean;
   onFavorite: (metric: ListedMetric) => void;
   loader: ReturnType<typeof chartLoader>;
   to: number;
@@ -186,7 +203,7 @@ function Tile({
   return (
     <article
       ref={ref}
-      className={"metric-tile" + (disabled ? " disabled" : "")}
+      className={"metric-tile" + (disabled ? " disabled" : "") + (alert?.enabled ? " has-alert" : "")}
     >
       <button
         className={"metric-favorite" + (favorite ? " selected" : "")}
@@ -197,6 +214,31 @@ function Tile({
       >
         {favorite ? "★" : "☆"}
       </button>
+      {alert?.enabled && (
+        <Link
+          to={metricUrl(metric)}
+          className={"metric-alert-indicator" + (!alertsEnabled ? " paused" : "")}
+          aria-label={
+            !alertsEnabled
+              ? "Алерт включён в настройке, но глобально приостановлен"
+              : alert.no_recipients
+                ? "Алерт включён, но нет получателей"
+                : "Настроить алерт метрики"
+          }
+          title={
+            !alertsEnabled
+              ? "Алерт приостановлен: глобальная отправка выключена"
+              : alert.no_recipients
+                ? "Алерт включён, но для него нет получателей"
+                : "Алерт метрики включён"
+          }
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6S2 12 2 12Z" />
+            <circle cx="12" cy="12" r="3" />
+          </svg>
+        </Link>
+      )}
       <Link to={metricUrl(metric)} className="metric-tile-link">
         <div className="metric-tile-heading">
           <strong>{metric.definition?.title || metric.name}</strong>
@@ -239,6 +281,8 @@ type TileContext = {
   onUnauthorized: () => void;
   favorites: Set<string>;
   busy: Set<string>;
+  alerts: Map<string, MetricAlertSummary["alerts"][number]>;
+  alertsEnabled: boolean;
   onFavorite: (metric: ListedMetric) => void;
 };
 function Grid({
@@ -259,6 +303,8 @@ function Grid({
           onUnauthorized={context.onUnauthorized}
           favorite={context.favorites.has(metricKey(metric))}
           busy={context.busy.has(metricKey(metric))}
+          alert={context.alerts.get(metricKey(metric))}
+          alertsEnabled={context.alertsEnabled}
           onFavorite={context.onFavorite}
         />
       ))}
@@ -451,6 +497,10 @@ export default function Metrics({
   const [generation, setGeneration] = useState(0);
   const [othersOpen, setOthersOpen] = useState(false);
   const [busy, setBusy] = useState(new Set<string>());
+  const [alertSummary, setAlertSummary] = useState<MetricAlertSummary>({
+    enabled: false,
+    alerts: [],
+  });
   const pending = useRef(new Set<string>());
   const [to, setTo] = useState(() => Math.floor(Date.now() / 60000) * 60000);
   const loader = useMemo(chartLoader, [generation]);
@@ -505,6 +555,21 @@ export default function Metrics({
     });
     return () => controller.abort();
   }, [generation]);
+  useEffect(() => {
+    let active = true;
+    loadAlertSummary()
+      .then((summary) => {
+        if (active) setAlertSummary(summary);
+      })
+      .catch((cause) => {
+        if (!active) return;
+        if (cause instanceof ApiError && cause.status === 401) onUnauthorized();
+        else setError(errorText(cause));
+      });
+    return () => {
+      active = false;
+    };
+  }, [generation, onUnauthorized]);
   const refresh = () => {
     setGeneration((g) => g + 1);
     setTo(Math.floor(Date.now() / 60000) * 60000);
@@ -541,6 +606,8 @@ export default function Metrics({
     onUnauthorized,
     favorites,
     busy,
+    alerts: new Map(alertSummary.alerts.map((alert) => [metricKey(alert.key), alert])),
+    alertsEnabled: alertSummary.enabled,
     onFavorite,
   };
   const servers = [...new Set(items.map((m) => m.server))].sort();

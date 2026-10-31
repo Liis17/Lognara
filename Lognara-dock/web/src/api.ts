@@ -6,6 +6,7 @@ export class ApiError extends Error {
     public code: string,
     /** Текст ошибки валидации от core (код invalid). */
     public detail?: string,
+    public data?: unknown,
   ) {
     super(code);
   }
@@ -27,7 +28,7 @@ export async function api<T = unknown>(
   const text = await response.text();
   const data = text ? JSON.parse(text) : null;
   if (!response.ok) {
-    throw new ApiError(response.status, data?.error ?? "unknown", data?.detail);
+    throw new ApiError(response.status, data?.error ?? "unknown", data?.detail, data);
   }
   return data as T;
 }
@@ -115,6 +116,80 @@ export interface SeriesReply {
   series: SeriesLine[];
 }
 
+export type AlertAggregate = "avg" | "min" | "max" | "sum" | "count" | "increase";
+export type AlertState = "unknown" | "ok" | "firing";
+export interface MetricAlertKey {
+  server: string;
+  service: string;
+  name: string;
+  origin: Origin;
+}
+export interface MetricAlertTrigger {
+  window_seconds: number;
+  aggregate: AlertAggregate;
+  comparator: ">" | "<";
+  threshold: number;
+}
+export interface MetricAlertDefinition {
+  id: string;
+  key: MetricAlertKey;
+  enabled: boolean;
+  environment: string | null;
+  no_data: "normal" | "loss";
+  combine: "and" | "or";
+  group_ids: string[];
+  triggers: MetricAlertTrigger[];
+  revision: number;
+  enabled_at: number;
+  state: AlertState;
+  loss_registered: boolean;
+  loss_at: number | null;
+  last_point_at: number | null;
+  last_as_of: number | null;
+  no_recipients: boolean;
+}
+export interface MetricAlertSummary {
+  enabled: boolean;
+  alerts: Pick<MetricAlertDefinition, "key" | "enabled" | "state" | "no_recipients">[];
+}
+export interface MetricAlertRecipient {
+  id: string;
+  kind: "personal" | "channel";
+  name: string;
+  chat_id: number;
+  last_error: string | null;
+}
+export interface MetricAlertGroup {
+  id: string;
+  kind: "personal" | "channel";
+  name: string;
+  recipient_ids: string[];
+  alerts: MetricAlertKey[];
+}
+export interface MetricAlertSettings {
+  enabled: boolean;
+  token_configured: boolean;
+  send_paused: boolean;
+  send_pause_reason: string | null;
+  core_status: "unknown" | "available" | "busy" | "incompatible" | "unavailable" | "disabled";
+  core_checked_at: number | null;
+  core_error: string | null;
+  recipients: MetricAlertRecipient[];
+  groups: MetricAlertGroup[];
+  alerts: MetricAlertDefinition[];
+  pending_deliveries: number;
+  permanent_errors: number;
+}
+export interface MetricAlertDefinitionInput {
+  key: MetricAlertKey;
+  enabled: boolean;
+  environment: string | null;
+  no_data: "normal" | "loss";
+  combine: "and" | "or";
+  group_ids: string[];
+  triggers: MetricAlertTrigger[];
+}
+
 export interface PreviewSample {
   timestamp: string;
   message: string;
@@ -168,6 +243,15 @@ const messages: Record<string, string> = {
   challenge_expired: "Время подтверждения истекло, попробуйте снова",
   passkey_rejected: "Ключ не принят",
   passkey_exists: "Этот ключ уже добавлен",
+  invalid_bot_token: "Telegram отклонил токен. Проверьте его и повторите",
+  telegram_unavailable: "Не удалось проверить бота в Telegram",
+  bot_token_required: "Сначала сохраните и проверьте токен Telegram-бота",
+  global_disabled_or_alert_limit: "Включите алерты глобально или уменьшите число включённых правил до 100",
+  recipient_exists: "Этот Telegram chat ID уже добавлен",
+  recipient_kind_in_use: "Сначала удалите получателя из его групп, затем измените тип",
+  group_in_use: "Сначала отсоедините группу от алертов",
+  group_not_found: "Группа не найдена",
+  recipient_not_found: "Получатель не найден",
 };
 
 export function errorText(error: unknown): string {
