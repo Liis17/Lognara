@@ -181,7 +181,7 @@ Query API сохраняет безопасную классификацию о�
 
 ## Инфраструктура
 
-`/infrastructure` показывает цепочку, зарегистрированные relay/агенты, heartbeat/версию/spool/последнее событие, lag публикации и WAL core, SSE/сессии Dock и текущее место на filesystem core. `GET /api/infrastructure` требует сессию, no-store; query/admin секреты остаются в Dock. Опрос через 10 секунд после завершения предыдущего запроса; ошибка сохраняет явно устаревший снимок.
+`/infrastructure` показывает цепочку, зарегистрированные relay/агенты, heartbeat/версию/spool/последнее событие, lag публикации и WAL core, SSE/сессии Dock и текущее место на filesystem core. Кнопка «Дерево инфраструктуры» открывает lazy-loaded `/infrastructure/tree` с группировкой по ID relay, статическими связями и выбором пути. `GET /api/infrastructure` требует сессию, no-store; query/admin секреты остаются в Dock. Обе страницы используют последовательный опрос через 10 секунд после завершения предыдущего запроса; ошибка сохраняет явно устаревший снимок.
 
 У agent/relay `LOGNARA_HEARTBEAT_INTERVAL_MS` default 10000, диапазон 1..30000 мс. TTL 60 с, idle 300 с, spool degraded от 80%; до первого heartbeat «Нет данных», молчащий relay не доказывает отключение агента. История, per-node dropped, p95 доставки и прогноз диска не реализованы; source-ссылки строят фильтр по конфигурации, не проверяют agent_id событий. [Полный контракт](../docs/DockInfrastructureContract.md).
 

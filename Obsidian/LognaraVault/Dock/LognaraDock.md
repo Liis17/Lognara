@@ -86,11 +86,13 @@ API: `POST /api/issues/search`, `POST /api/issues/{fingerprint}/details`, `POST 
 
 ## Инфраструктура
 
-`/infrastructure` использует `GET /api/infrastructure` с сессией и no-store. `infra::overview(State<AppState>, AuthUser): Json<Infrastructure>` параллельно объединяет query status core, admin-реестр и активные сессии Dock. `CoreClient::status(&self): Result<CoreStatus, CoreQueryError>` получает типизированный status; `Live::clients(): usize` считает открытые SSE receivers, `Sessions::active(): Result<u64, StoreError>` — записи сессий в пределах TTL/idle (ошибка → null).
+`/infrastructure` использует `GET /api/infrastructure` с сессией и no-store. `infra::overview(State<AppState>, AuthUser): Json<Infrastructure>` параллельно объединяет query status core, admin-реестр и активные сессии Dock. `CoreClient::status(&self): Result<CoreStatus, CoreQueryError>` получает типизированный status; `Live::clients(): usize` считает открытые SSE receivers, `Sessions::active(): Result<u64, StoreError>` — записи сессий в пределах TTL/idle (ошибка → null). В узле агента additive `relay_id` сохраняет числовую принадлежность из реестра даже без heartbeat или найденного профиля; у узла relay поле `null`. Полный wire- и UI-контракт: [контракт инфраструктуры](../../../docs/DockInfrastructureContract.md).
 
 Свежесть относительно as_of core: TTL 60 секунд, idle 300 секунд, spool degraded от 80%; недавняя ошибка после последнего успеха тоже degraded. До первого heartbeat unknown; устаревший агент при молчащем relay unknown/relay_silent. Узлы сортируются по приоритету offline/degraded/unknown/idle/online. Опрос UI через 10 секунд после завершения предыдущего запроса, ручное обновление; при ошибке последний снимок помечается устаревшим. Core ready=false и недоступность/частичный отказ реестра показываются отдельно.
 
-Хранилище: filesystem total/free, Parquet/индексы (включая активный)/WAL, oldest event и retention. Source-ссылки агента строят фильтры по конфигурации за час, не подтверждают agent_id события. История телеметрии, per-node dropped, p95 доставки и прогноз диска отсутствуют. Полный [контракт инфраструктуры](../../../docs/DockInfrastructureContract.md).
+`/infrastructure/tree` — отдельная lazy-loaded страница от кнопки в сводке; раздел навигации остаётся активным. Она группирует узлы по ID, показывает orphan-группы без выдуманного relay, рисует статические рёбра реестра и выбираемые пути, используя общий `useInfrastructure` poller и `infraPresentation` helpers. Геометрия и правила выбора лежат в `web/src/infraTree.ts`; подробная семантика — в [контракте инфраструктуры](../../../docs/DockInfrastructureContract.md).
+
+Хранилище: filesystem total/free, Parquet/индексы (включая активный)/WAL, oldest event и retention. Source-ссылки агента строят фильтры по конфигурации за час, не подтверждают agent_id события. История телеметрии, per-node dropped, p95 доставки и прогноз диска отсутствуют.
 Опрос `Live` использует общий `CoreClient` из `App`, а не собственный клиент.
 
 ## Метрики
