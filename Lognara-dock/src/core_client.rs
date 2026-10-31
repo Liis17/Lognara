@@ -73,6 +73,43 @@ pub struct LogSourcesPage {
     pub as_of: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AlertSeriesQuery {
+    pub server: String,
+    pub service: String,
+    pub name: String,
+    pub origin: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
+    pub windows_seconds: Vec<u64>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct AlertSeriesReply {
+    pub as_of: String,
+    pub last_point_at: Option<String>,
+    pub windows: Vec<AlertSeriesWindow>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct AlertSeriesWindow {
+    pub seconds: u64,
+    pub count: u64,
+    pub sum: f64,
+    pub avg: Option<f64>,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub increase: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlertSeriesStatus {
+    Busy,
+    Timeout,
+    Unavailable,
+    Misconfigured,
+}
+
 impl From<reqwest::Error> for CoreQueryError {
     fn from(error: reqwest::Error) -> Self {
         if error.is_timeout() {
@@ -486,6 +523,81 @@ impl CoreClient {
             SERIES_QUERY_TIMEOUT,
         )
         .await
+    }
+
+    /// Exact raw aggregates for metric alerts. Capacity is managed by Core's dedicated slot.
+    pub async fn alert_series_query(
+        &self,
+        query: &AlertSeriesQuery,
+    ) -> Result<AlertSeriesReply, AlertSeriesStatus> {
+        let url = self
+            .query_url
+            .join("series/alerts/query")
+            .expect("core url joins path");
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(&self.query_token)
+            .timeout(SERIES_QUERY_TIMEOUT)
+            .json(query)
+            .send()
+            .await
+            .map_err(|error| {
+                if error.is_timeout() {
+                    AlertSeriesStatus::Timeout
+                } else {
+                    AlertSeriesStatus::Unavailable
+                }
+            })?;
+        let status = response.status();
+        let bytes = response.bytes().await.map_err(|error| {
+            if error.is_timeout() {
+                AlertSeriesStatus::Timeout
+            } else {
+                AlertSeriesStatus::Unavailable
+            }
+        })?;
+        if !status.is_success() {
+            let reply: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+            return Err(match status {
+                StatusCode::TOO_MANY_REQUESTS => AlertSeriesStatus::Busy,
+                StatusCode::GATEWAY_TIMEOUT => AlertSeriesStatus::Timeout,
+                StatusCode::SERVICE_UNAVAILABLE
+                    if reply["error"].as_str() == Some("query capacity is exhausted") =>
+                {
+                    AlertSeriesStatus::Busy
+                }
+                StatusCode::SERVICE_UNAVAILABLE
+                    if reply["error"].as_str() == Some("query deadline exceeded") =>
+                {
+                    AlertSeriesStatus::Timeout
+                }
+                StatusCode::BAD_REQUEST
+                | StatusCode::UNAUTHORIZED
+                | StatusCode::FORBIDDEN
+                | StatusCode::NOT_FOUND => AlertSeriesStatus::Misconfigured,
+                status if status.is_client_error() => AlertSeriesStatus::Misconfigured,
+                _ => AlertSeriesStatus::Unavailable,
+            });
+        }
+        let reply: AlertSeriesReply =
+            serde_json::from_slice(&bytes).map_err(|_| AlertSeriesStatus::Misconfigured)?;
+        let mut returned: Vec<_> = reply.windows.iter().map(|window| window.seconds).collect();
+        let mut expected = query.windows_seconds.clone();
+        returned.sort_unstable();
+        expected.sort_unstable();
+        if returned != expected
+            || reply.windows.iter().any(|window| {
+                !window.sum.is_finite()
+                    || window.avg.is_some_and(|value| !value.is_finite())
+                    || window.min.is_some_and(|value| !value.is_finite())
+                    || window.max.is_some_and(|value| !value.is_finite())
+                    || window.increase.is_some_and(|value| !value.is_finite())
+            })
+        {
+            return Err(AlertSeriesStatus::Misconfigured);
+        }
+        Ok(reply)
     }
 
     /// Определения метрик: `GET /v1/admin/series/definitions`.
