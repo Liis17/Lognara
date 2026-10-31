@@ -40,6 +40,12 @@ async function fixture(page: Page, initiallyAuthenticated = true, dataset = even
     if (!authenticated) return reply({ error: 'unauthorized' }, 401);
     if (path === '/api/me') return reply({ username: 'liis', passkeys: 0 });
     if (path === '/api/account/passkeys') return reply({ passkeys: [] });
+    if (path === '/api/alerts') return reply({
+      enabled: false, token_configured: false, send_paused: false,
+      send_pause_reason: null, core_status: 'unknown', core_checked_at: null,
+      core_error: null, recipients: [], groups: [], alerts: [],
+      pending_deliveries: 0, permanent_errors: 0,
+    });
     if (path === '/api/account/password') return reply({});
     if (path === '/api/relays') return reply({ relays: [{ id: 1, name: 'relay-eu', created_at: new Date(now).toISOString() }] });
     if (path === '/api/agents') return reply({ agents: [] });
@@ -107,6 +113,8 @@ test('password login and existing account forms remain usable', async ({ page })
   await page.getByRole('button', { name: 'Войти', exact: true }).click();
   await expect(page.getByRole('link', { name: 'Настройки', exact: true })).toBeVisible();
   await page.getByRole('link', { name: 'Настройки', exact: true }).click();
+  await expect(page).toHaveURL(/\/settings$/);
+  await expect(page.getByRole('heading', { name: 'Пароль', exact: true })).toBeVisible();
   await page.getByLabel('Текущий пароль', { exact: true }).fill('test-password');
   await page.getByLabel('Новый пароль', { exact: true }).fill('new-long-password');
   await page.getByLabel('Повторите новый пароль', { exact: true }).fill('new-long-password');
