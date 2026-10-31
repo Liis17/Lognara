@@ -129,7 +129,15 @@ export default function App() {
               <Route path="/access" element={<Access onUnauthorized={() => setMe(null)} />} />
               <Route path="/mcp-access" element={<McpAccess />} />
               <Route path="/oauth/consent" element={<OAuthConsent />} />
-              <Route path="/settings" element={<Settings onChange={refresh} />} />
+              <Route
+                path="/settings"
+                element={
+                  <Settings
+                    onChange={refresh}
+                    onUnauthorized={() => setMe(null)}
+                  />
+                }
+              />
               <Route path="*" element={<Navigate to="/logs" replace />} />
             </Routes>
           </Suspense>

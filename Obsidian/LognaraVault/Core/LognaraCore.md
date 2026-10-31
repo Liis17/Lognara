@@ -168,6 +168,12 @@ Relay с персональным токеном отправляет `POST /v1/
 
 Ошибки разбора и отброшенные точки считаются в `lognara_core_series_*`; построение агрегатов: `lognara_core_series_rollups_built_total` и `lognara_core_series_rollup_errors_total`. Маршруты определений и предпросмотра требуют `LOGNARA_ADMIN_TOKEN`; query-токен даёт только чтение серий. Операционные детали (каталог, слияние, счётчики): `Lognara-core/docs/operations.md`. Структура модулей: [[Core/LognaraCore-ProjectMap]].
 
+### Запросы Dock алертов
+
+`POST /v1/series/alerts/query` защищён query-токеном и возвращает точные raw `count`, `sum`, `avg`, `min`, `max`, reset-aware `increase`, `as_of` Core и свежесть. Запрос фиксирует `(server, service, name, origin)`, optional environment, `need_increase` и до 20 окон 60..604800 секунд. Отсутствующий `need_increase` означает `true` для совместимости; Dock передаёт `true`, только если есть trigger `increase`. Границы каждого окна `[as_of - seconds, as_of)`. Источники и повторные доставки обрабатываются тем же снимком и `dedup`, что и графики; rollups, buckets, split и MAX_SERIES cutoff не применяются. `increase` вычисляется отдельно для полной identity точки; последняя точка до окна служит baseline, уменьшение счётчика трактуется как reset, первая точка без baseline только начинает накопление. При `need_increase=false` baseline Parquet не читается, а `increase` возвращается null; `last_point_at` ищется только за последние пять минут и старшая точка представляется null. Каталог хранит время по области метрики, но не полную identity series: если точная baseline нужна для новой identity при наличии старых данных той же метрики, core всё ещё может читать исторические файлы, пока не найдёт baseline или не исчерпает подходящие файлы.
+
+Endpoint использует отдельный одновременный слот `Core::alert_slots` (один запрос), не занимает два `analytics_slots` интерфейса и исполняется на общем DataFusion runtime с теми же memory pool и query timeout. Dock не проксирует endpoint браузеру. Для раскатки Core обновляется первым; старый Core отвечает Dock статусом incompatible, без события потери Core.
+
 | Метод | Назначение |
 |---|---|
 | `series::schema(): SchemaRef` | Схема Parquet точек: время UTC, источник, `name`, `origin`, `rule_id`, `labels`, `value`, `event_id`. |
@@ -187,6 +193,7 @@ Relay с персональным токеном отправляет `POST /v1/
 | `definitions::delete(core: &Core, id: &str): Result<bool, QueryError>` | Удаляет определение и пересобирает правила. |
 | `series_query::list(core: Arc<Core>): Result<ListResponse, QueryError>` | `GET /v1/series`: серии каталога и открытого сегмента, окружения (`environments`), определения без точек. |
 | `series_query::query(core: Arc<Core>, request: QueryRequest): Result<QueryResponse, QueryError>` | `POST /v1/series/query`: корзины, split, `environment`, приращения для cumulative, суточные агрегаты для полных суток; до 20 серий и явные `truncated`/`truncated_count`. |
+| `series_query::alert_query(core: Arc<Core>, request: AlertQueryRequest): Result<AlertQueryResponse, QueryError>` | `POST /v1/series/alerts/query`: точные сырые агрегаты окон и freshness без rollup и обрезки серий. |
 | `analytics::preview(core: &Core, request: PreviewRequest): Result<PreviewResponse, QueryError>` | Применяет правило к последним строкам сервиса: до 5000 строк, до 50 образцов. |
 | `columns::write_parquet_with(path: &Path, schema: SchemaRef, batches: &[RecordBatch], failpoint_name: &str): Result<()>` | Общая запись Parquet для логов и серий. |
 | `columns::stream_batches(path: &Path): Result<impl Iterator<Item = Result<RecordBatch>>>` | Потоковое чтение Parquet для слияния дня. |

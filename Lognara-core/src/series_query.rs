@@ -2,6 +2,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
@@ -30,6 +31,662 @@ use crate::{
     series::{self, Origin},
     storage::{Core, Snapshot},
 };
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AlertQueryRequest {
+    pub server: String,
+    pub service: String,
+    pub name: String,
+    pub origin: Origin,
+    #[serde(default)]
+    pub environment: Option<String>,
+    pub windows_seconds: Vec<u64>,
+    #[serde(default = "alert_query_need_increase")]
+    pub need_increase: bool,
+}
+
+fn alert_query_need_increase() -> bool {
+    true
+}
+
+#[derive(Debug, Serialize)]
+pub struct AlertQueryResponse {
+    pub as_of: String,
+    pub last_point_at: Option<String>,
+    pub windows: Vec<AlertWindow>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AlertWindow {
+    pub seconds: u64,
+    pub count: u64,
+    pub sum: f64,
+    pub avg: Option<f64>,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub increase: Option<f64>,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct AlertPoint {
+    timestamp: i64,
+    identity: Identity,
+    value: f64,
+}
+
+/// Query-auth endpoint for alerts. It intentionally reads raw points and does not bucket,
+/// split or truncate the selected source/environment.
+pub async fn alert_query(
+    core: Arc<Core>,
+    request: AlertQueryRequest,
+) -> Result<AlertQueryResponse, QueryError> {
+    validate_alert_request(&request)?;
+    let as_of = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| QueryError::Storage(error.into()))?
+        .as_nanos()
+        .min(i64::MAX as u128) as i64;
+    let longest = *request.windows_seconds.iter().max().unwrap();
+    let from = as_of.saturating_sub((longest as i64).saturating_mul(1_000_000_000));
+    let snapshot = core.snapshot();
+    let window_frame = frame(&core, &snapshot, from, as_of)
+        .await?
+        .filter(alert_scope(&request))?
+        .filter(
+            col("timestamp")
+                .gt_eq(timestamp(from))
+                .and(col("timestamp").lt(timestamp(as_of))),
+        )?;
+    let target_identities = if request.need_increase {
+        collect_alert_identities(window_frame.clone()).await?.0
+    } else {
+        BTreeSet::new()
+    };
+
+    // Freshness is only needed to distinguish data in the last five minutes. Restrict that
+    // lookup to recent files; older points do not improve a stale/no-data decision.
+    let freshness_from = as_of.saturating_sub(300_i64 * 1_000_000_000);
+    let last_point = latest_alert_timestamp(
+        frame(&core, &snapshot, freshness_from, as_of)
+            .await?
+            .filter(alert_scope(&request))?
+            .filter(
+                col("timestamp")
+                    .gt_eq(timestamp(freshness_from))
+                    .and(col("timestamp").lt(timestamp(as_of))),
+            )?,
+    )
+    .await?;
+
+    // The exact increase baseline is the latest pre-window point per observed identity. The
+    // catalog only indexes metric scope, so older files still need a targeted scan when a
+    // requested identity may have a baseline.
+    let mut baselines = BTreeMap::<Identity, (i64, f64)>::new();
+    if request.need_increase
+        && !target_identities.is_empty()
+        && metric_scope_has_points_before(&core, &snapshot, &request, from).await?
+    {
+        if let Some(active) = &snapshot.active {
+            let active_batches = if active.points.is_empty() {
+                vec![RecordBatch::new_empty(series::schema())]
+            } else {
+                active.points.clone()
+            };
+            let active_frame = SessionContext::new_with_config_rt(
+                SessionConfig::new()
+                    .with_target_partitions(2)
+                    .with_batch_size(8192),
+                core.query_runtime.clone(),
+            )
+            .read_table(Arc::new(MemTable::try_new(
+                series::schema(),
+                vec![active_batches],
+            )?))?;
+            collect_alert_baselines(
+                active_frame
+                    .filter(alert_scope(&request))?
+                    .filter(col("timestamp").lt(timestamp(from)))?,
+                &target_identities,
+                &mut baselines,
+            )
+            .await?;
+        }
+
+        let mut files: Vec<_> = snapshot
+            .series_files
+            .iter()
+            .filter(|file| file.meta.min_timestamp < from)
+            .cloned()
+            .collect();
+        files.sort_by_key(|file| std::cmp::Reverse(file.meta.max_timestamp));
+        for file in files {
+            let baselines_complete = target_identities
+                .iter()
+                .all(|identity| baselines.contains_key(identity));
+            let baseline_safe = baselines_complete
+                && baselines
+                    .values()
+                    .all(|(point_at, _)| file.meta.max_timestamp < *point_at);
+            if baseline_safe {
+                break;
+            }
+            let context = session(&core);
+            let file_frame = context
+                .read_parquet(
+                    vec![file.path.to_string_lossy().into_owned()],
+                    ParquetReadOptions::default().schema(&series::schema()),
+                )
+                .await?
+                .filter(alert_scope(&request))?
+                .filter(col("timestamp").lt(timestamp(from)))?;
+            collect_alert_baselines(file_frame, &target_identities, &mut baselines).await?;
+        }
+    }
+
+    let windows = aggregate_alert_windows(
+        window_frame,
+        &request.windows_seconds,
+        as_of,
+        &baselines,
+        request.need_increase,
+    )
+    .await?;
+    Ok(AlertQueryResponse {
+        as_of: format_timestamp(as_of),
+        last_point_at: last_point.map(format_timestamp),
+        windows,
+    })
+}
+
+fn validate_alert_request(request: &AlertQueryRequest) -> Result<(), QueryError> {
+    if request.server.is_empty()
+        || request.server.len() > 128
+        || request.service.is_empty()
+        || request.service.len() > 128
+        || request.name.is_empty()
+        || request.name.len() > 128
+        || request
+            .environment
+            .as_ref()
+            .is_some_and(|value| value.len() > 128)
+        || request.windows_seconds.is_empty()
+        || request.windows_seconds.len() > 20
+        || request
+            .windows_seconds
+            .iter()
+            .any(|seconds| !(60..=604_800).contains(seconds))
+    {
+        return Err(QueryError::Invalid("invalid alert series request".into()));
+    }
+    Ok(())
+}
+
+fn alert_scope(request: &AlertQueryRequest) -> Expr {
+    let mut predicate = col("server")
+        .eq(lit(request.server.as_str()))
+        .and(col("service").eq(lit(request.service.as_str())))
+        .and(col("name").eq(lit(request.name.as_str())))
+        .and(col("origin").eq(lit(request.origin.as_str())));
+    if let Some(environment) = &request.environment {
+        predicate = predicate.and(col("environment").eq(lit(environment.as_str())));
+    }
+    predicate
+}
+
+async fn collect_alert_identities(
+    frame: DataFrame,
+) -> Result<(BTreeSet<Identity>, Option<i64>), QueryError> {
+    let selected = dedup(frame)?.select([
+        col("timestamp"),
+        col("environment"),
+        col("server"),
+        col("backend"),
+        col("service_instance"),
+        col("origin"),
+        col("rule_id"),
+        col("labels"),
+    ])?;
+    let mut stream = selected.execute_stream().await?;
+    let mut identities = BTreeSet::new();
+    let mut last_point = None;
+    while let Some(batch) = stream.try_next().await? {
+        let timestamps = column::<TimestampNanosecondArray>(&batch, "timestamp")?;
+        let columns = identity_columns(&batch)?;
+        for row in 0..batch.num_rows() {
+            identities.insert(identity_at(&columns, row));
+            last_point = Some(last_point.map_or(timestamps.value(row), |old: i64| {
+                old.max(timestamps.value(row))
+            }));
+        }
+    }
+    Ok((identities, last_point))
+}
+
+async fn latest_alert_timestamp(frame: DataFrame) -> Result<Option<i64>, QueryError> {
+    let mut stream = frame
+        .aggregate(vec![], vec![max(col("timestamp")).alias("timestamp")])?
+        .execute_stream()
+        .await?;
+    let Some(batch) = stream.try_next().await? else {
+        return Ok(None);
+    };
+    let timestamps = column::<TimestampNanosecondArray>(&batch, "timestamp")?;
+    Ok((batch.num_rows() > 0 && !timestamps.is_null(0)).then(|| timestamps.value(0)))
+}
+
+async fn metric_scope_has_points_before(
+    core: &Core,
+    snapshot: &Snapshot,
+    request: &AlertQueryRequest,
+    from: i64,
+) -> Result<bool, QueryError> {
+    let active_has_prior = snapshot.active.as_ref().is_some_and(|active| {
+        active.scoped.names.iter().any(
+            |((server, service, name, origin, environment), (first_seen, _))| {
+                server == &request.server
+                    && service == &request.service
+                    && name == &request.name
+                    && origin == request.origin.as_str()
+                    && request
+                        .environment
+                        .as_ref()
+                        .is_none_or(|selected| selected == environment)
+                    && *first_seen < from
+            },
+        )
+    });
+    if active_has_prior {
+        return Ok(true);
+    }
+
+    let journal = core.journal.clone();
+    let server = request.server.clone();
+    let service = request.service.clone();
+    let name = request.name.clone();
+    let origin = request.origin.as_str().to_owned();
+    let environment = request.environment.clone();
+    tokio::task::spawn_blocking(move || {
+        let catalog = journal
+            .catalog
+            .lock()
+            .map_err(|_| anyhow::anyhow!("catalog lock poisoned"))?;
+        let exists = catalog.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM scoped_series
+             WHERE server=?1 AND service=?2 AND name=?3 AND origin=?4
+               AND (?5 IS NULL OR environment=?5) AND first_seen<?6)",
+            rusqlite::params![server, service, name, origin, environment, from],
+            |row| row.get::<_, bool>(0),
+        )?;
+        anyhow::Result::<bool>::Ok(exists)
+    })
+    .await
+    .map_err(|error| QueryError::Storage(error.into()))?
+    .map_err(QueryError::Storage)
+}
+
+async fn collect_alert_baselines(
+    frame: DataFrame,
+    target_identities: &BTreeSet<Identity>,
+    baselines: &mut BTreeMap<Identity, (i64, f64)>,
+) -> Result<(), QueryError> {
+    let selected = dedup(frame)?.select([
+        col("timestamp"),
+        col("environment"),
+        col("server"),
+        col("backend"),
+        col("service_instance"),
+        col("origin"),
+        col("rule_id"),
+        col("labels"),
+        col("value"),
+    ])?;
+    let mut stream = selected.execute_stream().await?;
+    while let Some(batch) = stream.try_next().await? {
+        let timestamps = column::<TimestampNanosecondArray>(&batch, "timestamp")?;
+        let values = column::<Float64Array>(&batch, "value")?;
+        let columns = identity_columns(&batch)?;
+        for row in 0..batch.num_rows() {
+            let timestamp = timestamps.value(row);
+            let identity = identity_at(&columns, row);
+            if target_identities.contains(&identity) {
+                baselines
+                    .entry(identity)
+                    .and_modify(|baseline| {
+                        if timestamp > baseline.0 {
+                            *baseline = (timestamp, values.value(row));
+                        } else if timestamp == baseline.0 {
+                            baseline.1 = baseline.1.max(values.value(row));
+                        }
+                    })
+                    .or_insert((timestamp, values.value(row)));
+            }
+        }
+    }
+    Ok(())
+}
+
+type IdentityColumns<'a> = (
+    &'a StringArray,
+    &'a StringArray,
+    &'a StringArray,
+    &'a StringArray,
+    &'a StringArray,
+    &'a StringArray,
+    &'a StringArray,
+);
+
+fn identity_columns(batch: &RecordBatch) -> Result<IdentityColumns<'_>> {
+    Ok((
+        column(batch, "environment")?,
+        column(batch, "server")?,
+        column(batch, "backend")?,
+        column(batch, "service_instance")?,
+        column(batch, "origin")?,
+        column(batch, "rule_id")?,
+        column(batch, "labels")?,
+    ))
+}
+
+fn identity_at(columns: &IdentityColumns<'_>, row: usize) -> Identity {
+    (
+        text(columns.0, row),
+        columns.1.value(row).to_owned(),
+        columns.2.value(row).to_owned(),
+        text(columns.3, row),
+        columns.4.value(row).to_owned(),
+        text(columns.5, row),
+        columns.6.value(row).to_owned(),
+    )
+}
+
+#[derive(Default)]
+struct AlertWindowAccumulator {
+    count: u64,
+    sum: f64,
+    min: Option<f64>,
+    max: Option<f64>,
+    increase: f64,
+    has_increase: bool,
+}
+
+async fn aggregate_alert_windows(
+    frame: DataFrame,
+    windows: &[u64],
+    end: i64,
+    baselines: &BTreeMap<Identity, (i64, f64)>,
+    need_increase: bool,
+) -> Result<Vec<AlertWindow>, QueryError> {
+    let seconds: BTreeSet<_> = windows.iter().copied().collect();
+    let starts: BTreeMap<_, _> = seconds
+        .iter()
+        .map(|seconds| {
+            (
+                *seconds,
+                end.saturating_sub((*seconds as i64).saturating_mul(1_000_000_000)),
+            )
+        })
+        .collect();
+    let mut totals: BTreeMap<u64, AlertWindowAccumulator> = seconds
+        .iter()
+        .map(|seconds| (*seconds, AlertWindowAccumulator::default()))
+        .collect();
+    let mut selected = dedup(frame)?.select([
+        col("timestamp"),
+        col("environment"),
+        col("server"),
+        col("backend"),
+        col("service_instance"),
+        col("origin"),
+        col("rule_id"),
+        col("labels"),
+        col("event_id"),
+        col("value"),
+    ])?;
+    if need_increase {
+        selected = selected.sort(vec![
+            col("environment").sort(true, false),
+            col("server").sort(true, false),
+            col("backend").sort(true, false),
+            col("service_instance").sort(true, false),
+            col("origin").sort(true, false),
+            col("rule_id").sort(true, false),
+            col("labels").sort(true, false),
+            col("timestamp").sort(true, false),
+            col("event_id").sort(true, false),
+        ])?;
+    }
+    let mut stream = selected.execute_stream().await?;
+    let mut current_identity: Option<Identity> = None;
+    let mut previous = BTreeMap::<u64, Option<f64>>::new();
+    while let Some(batch) = stream.try_next().await? {
+        let timestamps = column::<TimestampNanosecondArray>(&batch, "timestamp")?;
+        let values = column::<Float64Array>(&batch, "value")?;
+        let columns = need_increase
+            .then(|| identity_columns(&batch))
+            .transpose()?;
+        for row in 0..batch.num_rows() {
+            let timestamp = timestamps.value(row);
+            let value = values.value(row);
+            if let Some(columns) = &columns {
+                let identity = identity_at(columns, row);
+                if current_identity.as_ref() != Some(&identity) {
+                    previous = seconds
+                        .iter()
+                        .map(|seconds| {
+                            (*seconds, baselines.get(&identity).map(|(_, value)| *value))
+                        })
+                        .collect();
+                    current_identity = Some(identity);
+                }
+            }
+            for seconds in &seconds {
+                if timestamp < starts[seconds] {
+                    if need_increase {
+                        *previous.get_mut(seconds).expect("all windows initialized") = Some(value);
+                    }
+                    continue;
+                }
+                let total = totals.get_mut(seconds).expect("all windows initialized");
+                total.count += 1;
+                total.sum += value;
+                total.min = Some(total.min.map_or(value, |old| old.min(value)));
+                total.max = Some(total.max.map_or(value, |old| old.max(value)));
+                if need_increase {
+                    let before = previous.get_mut(seconds).expect("all windows initialized");
+                    if let Some(old) = *before {
+                        total.increase += if value >= old { value - old } else { value };
+                        total.has_increase = true;
+                    }
+                    *before = Some(value);
+                }
+            }
+        }
+    }
+    windows
+        .iter()
+        .map(|seconds| {
+            let total = totals
+                .get(seconds)
+                .expect("all requested windows initialized");
+            if !total.sum.is_finite() || !total.increase.is_finite() {
+                return Err(QueryError::Invalid("alert aggregate is not finite".into()));
+            }
+            Ok(AlertWindow {
+                seconds: *seconds,
+                count: total.count,
+                sum: total.sum,
+                avg: (total.count > 0).then(|| total.sum / total.count as f64),
+                min: total.min,
+                max: total.max,
+                increase: (need_increase && total.has_increase).then_some(total.increase),
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+fn aggregate_alert_window(
+    seconds: u64,
+    start: i64,
+    end: i64,
+    points: &[AlertPoint],
+    baselines: &BTreeMap<Identity, (i64, f64)>,
+) -> AlertWindow {
+    let selected: Vec<_> = points
+        .iter()
+        .filter(|point| point.timestamp >= start && point.timestamp < end)
+        .collect();
+    let sum: f64 = selected.iter().map(|point| point.value).sum();
+    let count = selected.len() as u64;
+    let min = selected.iter().map(|point| point.value).reduce(f64::min);
+    let max = selected.iter().map(|point| point.value).reduce(f64::max);
+    let mut series_points = BTreeMap::<Identity, BTreeMap<i64, f64>>::new();
+    for point in points.iter().filter(|point| point.timestamp < end) {
+        series_points
+            .entry(point.identity.clone())
+            .or_default()
+            .entry(point.timestamp)
+            .and_modify(|value| *value = value.max(point.value))
+            .or_insert(point.value);
+    }
+    let mut increase = 0.0;
+    let mut has_increase = false;
+    for (identity, values) in &series_points {
+        let old = baselines
+            .get(identity)
+            .filter(|(timestamp, _)| *timestamp < start)
+            .copied();
+        let recent = values
+            .range(..start)
+            .next_back()
+            .map(|(timestamp, value)| (*timestamp, *value));
+        let mut previous = match (old, recent) {
+            (Some(old), Some(recent)) if recent.0 > old.0 => Some(recent.1),
+            (Some(old), _) => Some(old.1),
+            (None, Some(recent)) => Some(recent.1),
+            (None, None) => None,
+        };
+        for (_, current) in values.range(start..end) {
+            if let Some(before) = previous {
+                has_increase = true;
+                increase += if *current >= before {
+                    *current - before
+                } else {
+                    *current
+                };
+            }
+            previous = Some(*current);
+        }
+    }
+    let increase = (count > 0 && has_increase).then_some(increase);
+    AlertWindow {
+        seconds,
+        count,
+        sum,
+        avg: (count > 0).then(|| sum / count as f64),
+        min,
+        max,
+        increase,
+    }
+}
+
+#[cfg(test)]
+mod alert_query_tests {
+    use super::*;
+
+    fn point(timestamp: i64, instance: Option<&str>, value: f64) -> AlertPoint {
+        AlertPoint {
+            timestamp,
+            identity: (
+                Some("production".into()),
+                "eu-prod-01".into(),
+                "barkcloud".into(),
+                instance.map(Into::into),
+                "counter".into(),
+                None,
+                String::new(),
+            ),
+            value,
+        }
+    }
+
+    #[test]
+    fn alert_windows_are_half_open_and_each_increase_uses_the_last_prior_value() {
+        let identity = point(800, Some("one"), 1.0).identity;
+        let points = vec![
+            point(900, Some("one"), 3.0),
+            point(950, Some("one"), 4.0),
+            point(999, Some("one"), 5.0),
+            point(1000, Some("one"), 99.0),
+            point(970, Some("new"), 10.0),
+            point(980, Some("new"), 13.0),
+        ];
+        let baselines = BTreeMap::from([(identity, (800, 1.0))]);
+
+        let wide = aggregate_alert_window(100, 900, 1000, &points, &baselines);
+        assert_eq!(wide.count, 5);
+        assert_eq!(wide.sum, 35.0);
+        assert_eq!(wide.min, Some(3.0));
+        assert_eq!(wide.max, Some(13.0));
+        // one: 2 + 1 + 1; new series: its first sample establishes a baseline, then +3.
+        assert_eq!(wide.increase, Some(7.0));
+
+        let narrow = aggregate_alert_window(50, 950, 1000, &points, &baselines);
+        assert_eq!(narrow.count, 4);
+        assert_eq!(narrow.sum, 32.0);
+        // The point at 950 is included; 1000 is excluded. The prior point at 900 is baseline.
+        assert_eq!(narrow.increase, Some(5.0));
+    }
+
+    #[test]
+    fn increase_without_a_baseline_counts_resets_from_the_current_value() {
+        let points = vec![
+            point(100, Some("one"), 20.0),
+            point(200, Some("one"), 25.0),
+            point(299, Some("one"), 3.0),
+        ];
+        let result = aggregate_alert_window(300, 0, 300, &points, &BTreeMap::new());
+        // 20 establishes the baseline, then +5 and a reset to 3 contribute 8 in total.
+        assert_eq!(result.increase, Some(8.0));
+
+        let baseline = BTreeMap::from([(point(-50, Some("one"), 30.0).identity, (-50, 30.0))]);
+        let result = aggregate_alert_window(300, 0, 300, &points, &baseline);
+        // The first value after the reset is counted from zero; the following reset counts 3.
+        assert_eq!(result.increase, Some(28.0));
+    }
+
+    #[test]
+    fn increase_is_unknown_without_a_pair_and_zero_with_an_equal_pair() {
+        let singleton = aggregate_alert_window(
+            300,
+            0,
+            300,
+            &[point(100, Some("one"), 7.0)],
+            &BTreeMap::new(),
+        );
+        assert_eq!(singleton.increase, None);
+
+        let identities_without_pairs = aggregate_alert_window(
+            300,
+            0,
+            300,
+            &[point(100, Some("one"), 7.0), point(200, Some("two"), 7.0)],
+            &BTreeMap::new(),
+        );
+        assert_eq!(identities_without_pairs.increase, None);
+
+        let equal_pair = aggregate_alert_window(
+            300,
+            0,
+            300,
+            &[point(100, Some("one"), 7.0), point(200, Some("one"), 7.0)],
+            &BTreeMap::new(),
+        );
+        assert_eq!(equal_pair.increase, Some(0.0));
+    }
+}
 
 const MAX_BUCKETS: i128 = 10_000;
 const MAX_SERIES: usize = 20;

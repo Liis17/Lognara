@@ -18,6 +18,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::access;
 use crate::account;
+use crate::alerts;
 use crate::auth::{self, LoginLimiter};
 use crate::config::Config;
 use crate::core_client::{CoreClient, CoreError};
@@ -52,6 +53,7 @@ pub struct App {
     pub mcp_limiter: crate::mcp::McpLimiter,
     /// Signs temporary MCP search cursors; changes on restart to invalidate stale pages.
     pub mcp_cursor_key: [u8; 32],
+    pub telegram: alerts::TelegramClient,
 }
 
 impl App {
@@ -75,6 +77,7 @@ impl App {
             live: Live::new(&config, core.clone(), shutdown.clone()),
             mcp_limiter: crate::mcp::McpLimiter::default(),
             mcp_cursor_key,
+            telegram: alerts::TelegramClient::new(),
             core,
             config,
             shutdown,
@@ -92,10 +95,13 @@ pub enum ApiError {
     NotFound,
     RelayNotFound,
     Conflict(&'static str),
+    GroupInUse(Vec<crate::series::MetricKey>),
     TooManyRequests(Duration),
     Internal,
     /// Core недоступен или ответил неожиданно.
     CoreUnavailable,
+    TelegramUnavailable,
+    TelegramRateLimited(Duration),
     CursorExpired,
     QueryUnavailable,
     QueryTimeout,
@@ -179,6 +185,13 @@ impl IntoResponse for ApiError {
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             Self::RelayNotFound => (StatusCode::NOT_FOUND, "relay_not_found"),
             Self::Conflict(code) => (StatusCode::CONFLICT, code),
+            Self::GroupInUse(alerts) => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({ "error": "group_in_use", "alerts": alerts })),
+                )
+                    .into_response();
+            }
             Self::TooManyRequests(wait) => {
                 let body = Json(json!({ "error": "too_many_attempts" }));
                 let retry = (wait.as_secs() + 1).to_string();
@@ -187,6 +200,13 @@ impl IntoResponse for ApiError {
             }
             Self::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
             Self::CoreUnavailable => (StatusCode::BAD_GATEWAY, "core_unavailable"),
+            Self::TelegramUnavailable => (StatusCode::BAD_GATEWAY, "telegram_unavailable"),
+            Self::TelegramRateLimited(wait) => {
+                let body = Json(json!({ "error": "telegram_rate_limited" }));
+                let retry = (wait.as_secs() + 1).to_string();
+                return (StatusCode::TOO_MANY_REQUESTS, [(RETRY_AFTER, retry)], body)
+                    .into_response();
+            }
             Self::CursorExpired => (StatusCode::GONE, "cursor_expired"),
             Self::QueryUnavailable => (StatusCode::SERVICE_UNAVAILABLE, "query_unavailable"),
             Self::QueryTimeout => (StatusCode::GATEWAY_TIMEOUT, "query_timeout"),
@@ -264,6 +284,26 @@ pub fn router(app: AppState) -> Router {
             put(series::update_definition).delete(series::delete_definition),
         )
         .route("/series/preview", post(series::preview))
+        .route("/alerts", get(alerts::settings))
+        .route("/alerts/summary", get(alerts::summary))
+        .route(
+            "/alerts/definition",
+            get(alerts::definition)
+                .put(alerts::save_definition)
+                .delete(alerts::delete_definition),
+        )
+        .route("/alerts/global", put(alerts::set_global))
+        .route("/alerts/token", put(alerts::set_token))
+        .route("/alerts/recipients", post(alerts::create_recipient))
+        .route(
+            "/alerts/recipients/{id}",
+            put(alerts::update_recipient).delete(alerts::delete_recipient),
+        )
+        .route("/alerts/groups", post(alerts::create_group))
+        .route(
+            "/alerts/groups/{id}",
+            put(alerts::update_group).delete(alerts::delete_group),
+        )
         .route(
             "/relays",
             get(access::list_relays).post(access::create_relay),

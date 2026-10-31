@@ -3,6 +3,7 @@
 
 pub mod access;
 pub mod account;
+pub mod alerts;
 pub mod api;
 pub mod auth;
 pub mod config;
@@ -36,6 +37,7 @@ pub async fn run(
 ) -> io::Result<()> {
     let stop = app.shutdown.clone();
     tokio::spawn(issues::watch(app.clone()));
+    tokio::spawn(alerts::watch(app.clone()));
     axum::serve(listener, api::router(app))
         .with_graceful_shutdown(async move {
             shutdown.cancelled().await;

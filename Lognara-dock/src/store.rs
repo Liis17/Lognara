@@ -131,6 +131,103 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX oauth_tokens_grant ON oauth_tokens(grant_id, kind);
     ",
+    "
+    CREATE TABLE metric_alert_global (
+        singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+        enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0, 1)),
+        telegram_token TEXT,
+        send_paused INTEGER NOT NULL DEFAULT 0 CHECK(send_paused IN (0, 1)),
+        send_pause_reason TEXT,
+        throttle_until INTEGER NOT NULL DEFAULT 0,
+        revision INTEGER NOT NULL DEFAULT 0,
+        core_status TEXT NOT NULL DEFAULT 'unknown',
+        core_checked_at INTEGER,
+        core_error TEXT,
+        core_loss_registered INTEGER NOT NULL DEFAULT 0 CHECK(core_loss_registered IN (0, 1)),
+        core_loss_event_id TEXT
+    );
+    INSERT INTO metric_alert_global(singleton) VALUES(1);
+    CREATE TABLE metric_alert_recipients (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL CHECK(kind IN ('personal', 'channel')),
+        name TEXT NOT NULL,
+        chat_id INTEGER NOT NULL UNIQUE,
+        last_error TEXT,
+        created_at INTEGER NOT NULL
+    );
+    CREATE TABLE metric_alert_groups (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL CHECK(kind IN ('personal', 'channel')),
+        name TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+    );
+    CREATE TABLE metric_alert_group_recipients (
+        group_id TEXT NOT NULL REFERENCES metric_alert_groups(id) ON DELETE CASCADE,
+        recipient_id TEXT NOT NULL REFERENCES metric_alert_recipients(id) ON DELETE CASCADE,
+        PRIMARY KEY(group_id, recipient_id)
+    );
+    CREATE TABLE metric_alerts (
+        id TEXT PRIMARY KEY,
+        server TEXT NOT NULL,
+        service TEXT NOT NULL,
+        name TEXT NOT NULL,
+        origin TEXT NOT NULL CHECK(origin IN ('counter', 'gauge', 'rule')),
+        enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
+        environment TEXT,
+        no_data TEXT NOT NULL CHECK(no_data IN ('normal', 'loss')),
+        combine_mode TEXT NOT NULL CHECK(combine_mode IN ('and', 'or')),
+        revision INTEGER NOT NULL,
+        enabled_at INTEGER NOT NULL,
+        UNIQUE(server, service, name, origin)
+    );
+    CREATE INDEX metric_alerts_enabled ON metric_alerts(enabled, server, service, name, origin);
+    CREATE TABLE metric_alert_triggers (
+        alert_id TEXT NOT NULL REFERENCES metric_alerts(id) ON DELETE CASCADE,
+        position INTEGER NOT NULL,
+        window_seconds INTEGER NOT NULL CHECK(window_seconds BETWEEN 60 AND 604800),
+        aggregate TEXT NOT NULL CHECK(aggregate IN ('avg', 'min', 'max', 'sum', 'count', 'increase')),
+        comparator TEXT NOT NULL CHECK(comparator IN ('>', '<')),
+        threshold REAL NOT NULL,
+        PRIMARY KEY(alert_id, position)
+    );
+    CREATE TABLE metric_alert_groups_used (
+        alert_id TEXT NOT NULL REFERENCES metric_alerts(id) ON DELETE CASCADE,
+        group_id TEXT NOT NULL REFERENCES metric_alert_groups(id),
+        PRIMARY KEY(alert_id, group_id)
+    );
+    CREATE TABLE metric_alert_states (
+        alert_id TEXT PRIMARY KEY REFERENCES metric_alerts(id) ON DELETE CASCADE,
+        condition_state TEXT NOT NULL DEFAULT 'unknown' CHECK(condition_state IN ('unknown', 'ok', 'firing')),
+        loss_registered INTEGER NOT NULL DEFAULT 0 CHECK(loss_registered IN (0, 1)),
+        loss_at INTEGER,
+        last_point_at INTEGER,
+        last_as_of INTEGER
+    );
+    CREATE TABLE metric_alert_outbox (
+        id TEXT PRIMARY KEY,
+        alert_id TEXT REFERENCES metric_alerts(id) ON DELETE CASCADE,
+        alert_revision INTEGER,
+        event_kind TEXT NOT NULL,
+        message TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        finished_at INTEGER
+    );
+    CREATE INDEX metric_alert_outbox_created ON metric_alert_outbox(created_at, id);
+    CREATE TABLE metric_alert_deliveries (
+        event_id TEXT NOT NULL REFERENCES metric_alert_outbox(id) ON DELETE CASCADE,
+        recipient_id TEXT NOT NULL,
+        recipient_name TEXT NOT NULL,
+        recipient_chat_id INTEGER NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('pending', 'sending', 'sent', 'permanent_error', 'expired', 'cancelled')),
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at INTEGER NOT NULL,
+        last_error TEXT,
+        sent_at INTEGER,
+        PRIMARY KEY(event_id, recipient_id)
+    );
+    CREATE INDEX metric_alert_deliveries_pending ON metric_alert_deliveries(status, next_attempt_at, event_id);
+    ",
 ];
 
 /// Предел строк статусов: Dock передаёт решённые и вернувшиеся fingerprint в core.
@@ -775,6 +872,11 @@ impl Store {
         })?;
         let mut conn = Connection::open(dir.join("dock.sqlite3")).map_err(io::Error::other)?;
         migrate(&mut conn).map_err(io::Error::other)?;
+        conn.execute(
+            "UPDATE metric_alert_deliveries SET status='pending' WHERE status='sending'",
+            [],
+        )
+        .map_err(io::Error::other)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             _lock: Arc::new(lock),

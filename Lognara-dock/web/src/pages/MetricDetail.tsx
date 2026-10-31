@@ -8,10 +8,12 @@ import {
   type SeriesQuery,
   type SeriesReply,
   type Split,
+  type MetricAlertKey,
 } from "../api";
 import Chart from "../components/Chart";
 import MetricDialog from "../components/MetricDialog";
 import MetricEditor, { aggregationText, kindText } from "./MetricEditor";
+import MetricAlertEditor from "./MetricAlertEditor";
 
 const DAY = 86400000;
 const ranges = [
@@ -33,6 +35,15 @@ export default function MetricDetail({
 }) {
   const [params] = useSearchParams();
   const identity = params.toString();
+  const alertKey: MetricAlertKey = {
+    server: params.get("server") ?? "",
+    service: params.get("service") ?? "",
+    name: params.get("name") ?? "",
+    origin: (params.get("origin") ?? "counter") as MetricAlertKey["origin"],
+  };
+  const alertKeyValid =
+    !!alertKey.server && !!alertKey.service && !!alertKey.name &&
+    ["counter", "gauge", "rule"].includes(alertKey.origin);
   const [metric, setMetric] = useState<SeriesMetric | null>(null);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState("");
@@ -124,6 +135,14 @@ export default function MetricDetail({
   return (
     <section className="metrics metric-detail">
       <Link to="/metrics">← Все метрики</Link>
+      {alertKeyValid && (
+        <MetricAlertEditor
+          key={identity}
+          keyValue={alertKey}
+          metric={metric}
+          onUnauthorized={onUnauthorized}
+        />
+      )}
       {!ready && <p className="muted">Загрузка…</p>}
       {error && <p className="error">{error}</p>}
       {ready && !metric && !error && (

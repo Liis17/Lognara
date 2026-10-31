@@ -48,6 +48,7 @@ pub fn router(core: Arc<Core>) -> Router {
         .route("/v1/series", get(list_series))
         .route("/v1/series/sources", get(series_sources))
         .route("/v1/series/query", post(query_series))
+        .route("/v1/series/alerts/query", post(query_alerts))
         .route("/v1/series/lookup", post(lookup_series))
         .route_layer(middleware::from_fn_with_state(
             token_hash(&core.journal.config.query_token),
@@ -233,6 +234,23 @@ async fn query_series(
         Ok(Json(request)) => run_analytics(&core, series_query::query(core.clone(), request)).await,
         Err(error) => QueryError::Invalid(error.body_text()).into_response(),
     }
+}
+
+async fn query_alerts(
+    State(core): State<Arc<Core>>,
+    request: Result<Json<series_query::AlertQueryRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let request = match request {
+        Ok(Json(request)) => request,
+        Err(error) => return QueryError::Invalid(error.body_text()).into_response(),
+    };
+    if !core.journal.ready() {
+        return unavailable();
+    }
+    let Ok(_permit) = core.alert_slots.clone().try_acquire_owned() else {
+        return QueryError::Busy.into_response();
+    };
+    run_query(&core, series_query::alert_query(core.clone(), request)).await
 }
 
 async fn run_analytics<T: serde::Serialize>(
