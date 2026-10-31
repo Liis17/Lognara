@@ -25,6 +25,16 @@ export function bytes(value: number): string {
   return `${number.format(value)} ${units[unit]}`;
 }
 
+const hourMinute = new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-digit" });
+
+/** До 10 минут — сколько прошло с обновления; дальше — время часов и минут. */
+export function refreshedText(loadedAt: Date, now: number): string {
+  const elapsed = Math.max(0, now - loadedAt.getTime());
+  if (elapsed < 60_000) return `${Math.floor(elapsed / 1000)} сек назад`;
+  if (elapsed < 600_000) return `${Math.floor(elapsed / 60_000)} мин назад`;
+  return hourMinute.format(loadedAt);
+}
+
 /** Возраст отметки по часам core. */
 export function age(value: string | null, asOf: string): string {
   if (!value) return "—";

@@ -1,6 +1,7 @@
 import { memo, type RefCallback, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "react-router";
-import { age, bytes, corePresentation, plural, REASON, STATUS } from "../infraPresentation";
+import { Link, useNavigate } from "react-router";
+import { sourceQuery } from "../logs";
+import { age, bytes, corePresentation, plural, REASON, refreshedText, STATUS } from "../infraPresentation";
 import {
   groupInfrastructure,
   hasInfrastructureTreeCard,
@@ -20,17 +21,39 @@ function Chip({ tone, children }: { tone: string; children: string }) {
   return <span className={`node-status ${tone}`}>{children}</span>;
 }
 
+function RefreshButton({ loadedAt, loading, onRefresh }: { loadedAt: Date | null; loading: boolean; onRefresh: () => void }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  return <button type="button" className="button" disabled={loading} onClick={onRefresh}>
+    {loadedAt ? `Обновлено ${refreshedText(loadedAt, now)}` : "Обновить"}
+  </button>;
+}
+
+/** Логи агента по его source; диапазон берётся по давности последнего события, чтобы не открыть пустую выдачу. */
+function agentLogsPath(node: InfraNode, asOf: string): string | null {
+  if (!node.source) return null;
+  const silence = node.last_event_at ? Date.parse(asOf) - Date.parse(node.last_event_at) : Infinity;
+  const range = silence <= 3_600_000 ? "1h" : silence <= 86_400_000 ? "24h" : "7d";
+  return `/logs?${new URLSearchParams({ view: "events", range, q: sourceQuery(node.source) })}`;
+}
+
 const NodeButton = memo(function NodeButton({
-  node, asOf, selected, onSelect,
-}: { node: InfraNode; asOf: string; selected: boolean; onSelect: (key: string) => void }) {
+  node, asOf, selected, onSelect, onOpenLogs,
+}: { node: InfraNode; asOf: string; selected: boolean; onSelect: (key: string) => void; onOpenLogs: (path: string) => void }) {
   const key = infraNodeKey(node);
   const status = STATUS[node.status];
+  const logsPath = agentLogsPath(node, asOf);
   return <button
     type="button"
     className={`infra-tree-node${selected ? " is-selected" : ""}`}
     data-infra-node-key={key}
     aria-pressed={selected}
+    title={logsPath ? "Двойной клик — открыть логи агента" : undefined}
     onClick={() => onSelect(key)}
+    onDoubleClick={() => { if (logsPath) onOpenLogs(logsPath); }}
   >
     <span className="infra-tree-node-head"><strong>{node.name}</strong><Chip tone={status.tone}>{status.label}</Chip></span>
     <span className="infra-tree-node-sub">{node.kind} #{node.id} · последнее событие {age(node.last_event_at, asOf)}</span>
@@ -60,6 +83,8 @@ const RelayButton = memo(function RelayButton({
 function InfraTreeGraph({ data, stale }: { data: InfrastructureResponse; stale: boolean }) {
   const groups = useMemo(() => groupInfrastructure(data.nodes), [data.nodes]);
   const [selection, setSelection] = useState<string | null>(null);
+  const navigate = useNavigate();
+  const statusByKey = useMemo(() => new Map(data.nodes.map((node) => [infraNodeKey(node), node.status])), [data.nodes]);
   const [measuredHeights, setMeasuredHeights] = useState<ReadonlyMap<string, number>>(() => new Map());
   const scrollRef = useRef<HTMLDivElement>(null);
   const cardElements = useRef(new Map<HTMLDivElement, string>());
@@ -182,6 +207,13 @@ function InfraTreeGraph({ data, stale }: { data: InfrastructureResponse; stale: 
               d={edge.path}
               fill="none"
             />)}
+            {!stale && edges.filter((edge) => statusByKey.get(edge.from) === "online").map((edge) => <path
+              key={`${edge.key}:flow`}
+              className="infra-tree-flow"
+              data-infra-flow-key={edge.key}
+              d={edge.path}
+              fill="none"
+            />)}
           </svg>
           {layout.positions.map((position) => <div
             key={position.key}
@@ -195,6 +227,7 @@ function InfraTreeGraph({ data, stale }: { data: InfrastructureResponse; stale: 
               asOf={data.as_of}
               selected={selectedKeys.has(position.key)}
               onSelect={select}
+              onOpenLogs={navigate}
             />}
             {position.kind === "relay" && position.node && <RelayButton
               node={position.node}
@@ -231,7 +264,6 @@ function InfraTreeGraph({ data, stale }: { data: InfrastructureResponse; stale: 
           </div>)}
         </div>
       </div>
-      <p className="page-note infra-tree-note">Связи показывают соответствие реестру; они не подтверждают текущую доступность сети. Выберите карточку мышью или клавиатурой; повторный выбор и Escape сбрасывают выделение.</p>
     </section>
   </>;
 }
@@ -245,9 +277,7 @@ export default function InfrastructureTree({ onUnauthorized }: { onUnauthorized:
         <div className="infra-tree-title"><Link className="button" to="/infrastructure">← Инфраструктура</Link><h1>Дерево инфраструктуры</h1></div>
         <p className="muted">Agent → Relay → Core → Dock</p>
       </div>
-      <button type="button" className="button" disabled={loading} onClick={refresh}>
-        {loadedAt ? `Обновлено ${clock.format(loadedAt)}` : "Обновить"}
-      </button>
+      <RefreshButton loadedAt={loadedAt} loading={loading} onRefresh={refresh} />
     </header>
     {error && <p className="error" role="alert">Не удалось обновить состояние: {error}. {loadedAt ? `Последний успешный снимок ${clock.format(loadedAt)}; данные устарели.` : "Снимок ещё не получен."}</p>}
     {!data && loading && <p className="empty" role="status">Загружаем дерево инфраструктуры…</p>}
