@@ -145,7 +145,7 @@ pub struct GlobalInput {
     pub enabled: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TokenInput {
     pub token: String,
