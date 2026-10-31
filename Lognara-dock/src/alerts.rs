@@ -1986,7 +1986,11 @@ fn evaluate_conditions(
                     "max" => window.max,
                     "sum" => Some(window.sum),
                     "count" => Some(window.count as f64),
-                    "increase" => window.increase,
+                    "increase" => match window.increase {
+                        Some(value) => Some(value),
+                        None if alert.no_data == "normal" => return Some(false),
+                        None => return None,
+                    },
                     _ => None,
                 }
             };
@@ -2363,7 +2367,7 @@ mod tests {
 
         let and_unknown = condition_alert(
             "and",
-            "normal",
+            "loss",
             vec![trigger(60, "avg"), trigger(180, "increase")],
         );
         assert_eq!(
@@ -2394,14 +2398,14 @@ mod tests {
             evaluate_conditions(&or_true, &by_seconds),
             ConditionState::Firing
         );
-        let or_unknown = condition_alert(
+        let or_mixed_false = condition_alert(
             "or",
             "normal",
             vec![trigger(120, "avg"), trigger(180, "increase")],
         );
         assert_eq!(
-            evaluate_conditions(&or_unknown, &by_seconds),
-            ConditionState::Unknown
+            evaluate_conditions(&or_mixed_false, &by_seconds),
+            ConditionState::Ok
         );
         let or_false = condition_alert("or", "normal", vec![trigger(120, "avg")]);
         assert_eq!(
@@ -2424,6 +2428,43 @@ mod tests {
             evaluate_conditions(&empty_loss, &by_seconds),
             ConditionState::Unknown
         );
+    }
+
+    #[tokio::test]
+    async fn normal_less_than_with_insufficient_increase_does_not_fire_or_recover() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, configured, _) = configured_store(directory.path(), "normal", 1).await;
+        let mut definition = input(configured.key.clone(), "normal", configured.group_ids);
+        definition.triggers[0].aggregate = "increase".into();
+        definition.triggers[0].comparator = "<".into();
+        definition.triggers[0].threshold = 10.0;
+        store.save_alert_definition(definition).await.unwrap();
+        let (global, alerts) = store.alert_rows_for_worker().await.unwrap();
+        let alert = alerts.into_iter().next().unwrap();
+        let as_of = alert.enabled_at + 60_000;
+        let mut insufficient = reply(as_of, Some(as_of - 1_000), 1);
+        insufficient.windows[0].increase = None;
+
+        store
+            .commit_alert_evaluation(
+                global.revision,
+                alert.clone(),
+                insufficient,
+                Url::parse("https://dock.example/").unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store
+                .alert_definition(alert.key)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            "ok"
+        );
+        assert!(outbox_rows(&store).await.is_empty());
     }
 
     async fn configured_store(
@@ -3072,9 +3113,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn loss_unknown_preserves_firing_state_without_duplicate_firing_on_recovery() {
+    async fn loss_insufficient_increase_preserves_firing_without_false_recovery() {
         let directory = tempfile::tempdir().unwrap();
-        let (store, alert, _) = configured_store(directory.path(), "loss", 1).await;
+        let (store, configured, _) = configured_store(directory.path(), "loss", 1).await;
+        let mut definition = input(configured.key.clone(), "loss", configured.group_ids);
+        definition.triggers[0] = trigger(60, "increase");
+        store.save_alert_definition(definition).await.unwrap();
+        let alert = store
+            .alert_definition(configured.key)
+            .await
+            .unwrap()
+            .unwrap();
         let url = Url::parse("https://dock.example/").unwrap();
         let (global, _) = store.alert_rows_for_worker().await.unwrap();
         let firing_at = alert.enabled_at + 60_000;
@@ -3087,13 +3136,10 @@ mod tests {
             )
             .await
             .unwrap();
+        let mut insufficient = reply(firing_at + 60_000, Some(firing_at), 2);
+        insufficient.windows[0].increase = None;
         store
-            .commit_alert_evaluation(
-                global.revision,
-                alert.clone(),
-                reply(firing_at + 60_000, Some(firing_at), 0),
-                url.clone(),
-            )
+            .commit_alert_evaluation(global.revision, alert.clone(), insufficient, url.clone())
             .await
             .unwrap();
         assert_eq!(
@@ -3108,13 +3154,10 @@ mod tests {
         assert_eq!(outbox_rows(&store).await[0].0, "firing");
 
         let loss_at = firing_at + NO_DATA_LOSS_MS;
+        let mut loss = reply(loss_at, Some(firing_at), 2);
+        loss.windows[0].increase = None;
         store
-            .commit_alert_evaluation(
-                global.revision,
-                alert.clone(),
-                reply(loss_at, Some(firing_at), 0),
-                url.clone(),
-            )
+            .commit_alert_evaluation(global.revision, alert.clone(), loss, url.clone())
             .await
             .unwrap();
         store

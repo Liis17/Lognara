@@ -321,15 +321,37 @@ async fn alert_query_uses_production_aggregate_for_parquet_reset_baselines() {
             .format(&Rfc3339)
             .unwrap()
     };
-    let reports = vec![
-        report(1, &ago(400), json!({"requests": 50}), json!({})),
-        report(2, &ago(200), json!({"requests": 70}), json!({})),
-        report(3, &ago(90), json!({"requests": 3}), json!({})),
-        report(4, &ago(30), json!({"requests": 8}), json!({})),
+    let groups = vec![
+        (
+            source("api", Some("eu-1")),
+            vec![
+                report(1, &ago(400), json!({"requests": 50}), json!({})),
+                report(2, &ago(200), json!({"requests": 70}), json!({})),
+                report(3, &ago(90), json!({"requests": 3}), json!({})),
+                report(4, &ago(30), json!({"requests": 8}), json!({})),
+            ],
+        ),
+        (
+            source("api", Some("singleton")),
+            vec![report(5, &ago(20), json!({"singleton": 17}), json!({}))],
+        ),
+        (
+            source("api", Some("multi-a")),
+            vec![report(6, &ago(25), json!({"multiple": 4}), json!({}))],
+        ),
+        (
+            source("api", Some("multi-b")),
+            vec![report(7, &ago(15), json!({"multiple": 9}), json!({}))],
+        ),
+        (
+            source("api", Some("zero")),
+            vec![
+                report(8, &ago(40), json!({"zero": 7}), json!({})),
+                report(9, &ago(20), json!({"zero": 7}), json!({})),
+            ],
+        ),
     ];
-    core.journal
-        .accept(&batch(vec![(source("api", Some("eu-1")), reports)]))
-        .unwrap();
+    core.journal.accept(&batch(groups)).unwrap();
     wait(|| {
         let snapshot = core.snapshot();
         snapshot.watermark >= 4
@@ -338,7 +360,7 @@ async fn alert_query_uses_production_aggregate_for_parquet_reset_baselines() {
                 .iter()
                 .map(|file| file.meta.rows)
                 .sum::<usize>()
-                >= 4
+                >= 9
     });
 
     let (status, reply) = send(
@@ -367,6 +389,38 @@ async fn alert_query_uses_production_aggregate_for_parquet_reset_baselines() {
     assert_eq!(reply["windows"][1]["increase"], 8.0);
     assert_eq!(reply["windows"][2]["count"], 3);
     assert_eq!(reply["windows"][2]["increase"], 28.0);
+
+    for (name, expected_count) in [("singleton", 1), ("multiple", 2)] {
+        let (status, reply) = send(
+            &router,
+            "POST",
+            ALERT_QUERY,
+            Some("query"),
+            Some(json!({
+                "server": "eu-prod-01", "service": "api", "name": name,
+                "origin": "counter", "environment": "production", "windows_seconds": [60]
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{reply}");
+        assert_eq!(reply["windows"][0]["count"], expected_count);
+        assert!(reply["windows"][0]["increase"].is_null(), "{reply}");
+    }
+
+    let (status, zero) = send(
+        &router,
+        "POST",
+        ALERT_QUERY,
+        Some("query"),
+        Some(json!({
+            "server": "eu-prod-01", "service": "api", "name": "zero",
+            "origin": "counter", "environment": "production", "windows_seconds": [60]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{zero}");
+    assert_eq!(zero["windows"][0]["count"], 2);
+    assert_eq!(zero["windows"][0]["increase"], 0.0);
     core.shutdown().unwrap();
 }
 

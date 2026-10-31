@@ -408,6 +408,7 @@ struct AlertWindowAccumulator {
     min: Option<f64>,
     max: Option<f64>,
     increase: f64,
+    has_increase: bool,
 }
 
 async fn aggregate_alert_windows(
@@ -494,8 +495,10 @@ async fn aggregate_alert_windows(
                 total.max = Some(total.max.map_or(value, |old| old.max(value)));
                 if need_increase {
                     let before = previous.get_mut(seconds).expect("all windows initialized");
-                    total.increase +=
-                        before.map_or(0.0, |old| if value >= old { value - old } else { value });
+                    if let Some(old) = *before {
+                        total.increase += if value >= old { value - old } else { value };
+                        total.has_increase = true;
+                    }
                     *before = Some(value);
                 }
             }
@@ -517,7 +520,7 @@ async fn aggregate_alert_windows(
                 avg: (total.count > 0).then(|| total.sum / total.count as f64),
                 min: total.min,
                 max: total.max,
-                increase: (need_increase && total.count > 0).then_some(total.increase),
+                increase: (need_increase && total.has_increase).then_some(total.increase),
             })
         })
         .collect()
@@ -548,46 +551,36 @@ fn aggregate_alert_window(
             .and_modify(|value| *value = value.max(point.value))
             .or_insert(point.value);
     }
-    let increase = if count == 0 {
-        None
-    } else {
-        Some(
-            series_points
-                .iter()
-                .map(|(identity, values)| {
-                    let old = baselines
-                        .get(identity)
-                        .filter(|(timestamp, _)| *timestamp < start)
-                        .copied();
-                    let recent = values
-                        .range(..start)
-                        .next_back()
-                        .map(|(timestamp, value)| (*timestamp, *value));
-                    let mut previous = match (old, recent) {
-                        (Some(old), Some(recent)) if recent.0 > old.0 => Some(recent.1),
-                        (Some(old), _) => Some(old.1),
-                        (None, Some(recent)) => Some(recent.1),
-                        (None, None) => None,
-                    };
-                    values
-                        .range(start..end)
-                        .map(|(_, value)| value)
-                        .map(|current| {
-                            let delta = previous.map_or(0.0, |before| {
-                                if *current >= before {
-                                    *current - before
-                                } else {
-                                    *current
-                                }
-                            });
-                            previous = Some(*current);
-                            delta
-                        })
-                        .sum::<f64>()
-                })
-                .sum(),
-        )
-    };
+    let mut increase = 0.0;
+    let mut has_increase = false;
+    for (identity, values) in &series_points {
+        let old = baselines
+            .get(identity)
+            .filter(|(timestamp, _)| *timestamp < start)
+            .copied();
+        let recent = values
+            .range(..start)
+            .next_back()
+            .map(|(timestamp, value)| (*timestamp, *value));
+        let mut previous = match (old, recent) {
+            (Some(old), Some(recent)) if recent.0 > old.0 => Some(recent.1),
+            (Some(old), _) => Some(old.1),
+            (None, Some(recent)) => Some(recent.1),
+            (None, None) => None,
+        };
+        for (_, current) in values.range(start..end) {
+            if let Some(before) = previous {
+                has_increase = true;
+                increase += if *current >= before {
+                    *current - before
+                } else {
+                    *current
+                };
+            }
+            previous = Some(*current);
+        }
+    }
+    let increase = (count > 0 && has_increase).then_some(increase);
     AlertWindow {
         seconds,
         count,
@@ -662,6 +655,36 @@ mod alert_query_tests {
         let result = aggregate_alert_window(300, 0, 300, &points, &baseline);
         // The first value after the reset is counted from zero; the following reset counts 3.
         assert_eq!(result.increase, Some(28.0));
+    }
+
+    #[test]
+    fn increase_is_unknown_without_a_pair_and_zero_with_an_equal_pair() {
+        let singleton = aggregate_alert_window(
+            300,
+            0,
+            300,
+            &[point(100, Some("one"), 7.0)],
+            &BTreeMap::new(),
+        );
+        assert_eq!(singleton.increase, None);
+
+        let identities_without_pairs = aggregate_alert_window(
+            300,
+            0,
+            300,
+            &[point(100, Some("one"), 7.0), point(200, Some("two"), 7.0)],
+            &BTreeMap::new(),
+        );
+        assert_eq!(identities_without_pairs.increase, None);
+
+        let equal_pair = aggregate_alert_window(
+            300,
+            0,
+            300,
+            &[point(100, Some("one"), 7.0), point(200, Some("one"), 7.0)],
+            &BTreeMap::new(),
+        );
+        assert_eq!(equal_pair.increase, Some(0.0));
     }
 }
 
