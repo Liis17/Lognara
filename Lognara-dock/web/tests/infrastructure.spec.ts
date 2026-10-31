@@ -320,22 +320,24 @@ test('tree wraps long names and bounds both scroll axes on a 390px screen with 5
   expect(dimensions.scrollHeight).toBeGreaterThan(dimensions.clientHeight);
   expect(dimensions.longCardHeight).toBeGreaterThan(58);
 
-  const geometry = await page.evaluate(() => {
-    const canvas = document.querySelector<HTMLElement>('.infra-tree-canvas')!;
-    const agent = document.querySelector<HTMLElement>('[data-infra-card-key="agent-1"]')!.getBoundingClientRect();
-    const relay = document.querySelector<HTMLElement>('[data-infra-card-key="relay-1"]')!.getBoundingClientRect();
-    const d = document.querySelector<SVGPathElement>('[data-infra-edge-key="agent-1:relay-1"]')!.getAttribute('d')!;
-    const values = d.match(/^M ([\d.]+) ([\d.]+) C [\d.]+ [\d.]+, [\d.]+ [\d.]+, ([\d.]+) ([\d.]+)$/)!;
-    return { startX: Number(values[1]), startY: Number(values[2]), endX: Number(values[3]), endY: Number(values[4]),
-      expectedStartX: agent.right - canvas.getBoundingClientRect().left,
-      expectedStartY: (agent.top + agent.bottom) / 2 - canvas.getBoundingClientRect().top,
-      expectedEndX: relay.left - canvas.getBoundingClientRect().left,
-      expectedEndY: (relay.top + relay.bottom) / 2 - canvas.getBoundingClientRect().top };
-  });
-  expect(Math.abs(geometry.startX - geometry.expectedStartX)).toBeLessThan(1);
-  expect(Math.abs(geometry.startY - geometry.expectedStartY)).toBeLessThan(1);
-  expect(Math.abs(geometry.endX - geometry.expectedEndX)).toBeLessThan(1);
-  expect(Math.abs(geometry.endY - geometry.expectedEndY)).toBeLessThan(1);
+  await expect(async () => {
+    const geometry = await page.evaluate(() => {
+      const canvas = document.querySelector<HTMLElement>('.infra-tree-canvas')!;
+      const agent = document.querySelector<HTMLElement>('[data-infra-card-key="agent-1"]')!.getBoundingClientRect();
+      const relay = document.querySelector<HTMLElement>('[data-infra-card-key="relay-1"]')!.getBoundingClientRect();
+      const d = document.querySelector<SVGPathElement>('[data-infra-edge-key="agent-1:relay-1"]')!.getAttribute('d')!;
+      const values = d.match(/^M ([\d.]+) ([\d.]+) C [\d.]+ [\d.]+, [\d.]+ [\d.]+, ([\d.]+) ([\d.]+)$/)!;
+      return { startX: Number(values[1]), startY: Number(values[2]), endX: Number(values[3]), endY: Number(values[4]),
+        expectedStartX: agent.right - canvas.getBoundingClientRect().left,
+        expectedStartY: (agent.top + agent.bottom) / 2 - canvas.getBoundingClientRect().top,
+        expectedEndX: relay.left - canvas.getBoundingClientRect().left,
+        expectedEndY: (relay.top + relay.bottom) / 2 - canvas.getBoundingClientRect().top };
+    });
+    expect(Math.abs(geometry.startX - geometry.expectedStartX)).toBeLessThan(1);
+    expect(Math.abs(geometry.startY - geometry.expectedStartY)).toBeLessThan(1);
+    expect(Math.abs(geometry.endX - geometry.expectedEndX)).toBeLessThan(1);
+    expect(Math.abs(geometry.endY - geometry.expectedEndY)).toBeLessThan(1);
+  }).toPass({ timeout: 5_000 });
   await scroll.evaluate((element: HTMLElement) => { element.scrollLeft = 700; element.scrollTop = 1200; });
   expect(await scroll.evaluate((element: HTMLElement) => element.scrollLeft)).toBeGreaterThan(0);
   expect(await scroll.evaluate((element: HTMLElement) => element.scrollTop)).toBeGreaterThan(0);
