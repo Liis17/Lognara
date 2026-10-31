@@ -127,7 +127,7 @@ export interface IssueDetailsResponse {
 export type NodeStatus = "offline" | "degraded" | "unknown" | "idle" | "online";
 export interface SpoolUsage { used_bytes: number; limit_bytes: number; records: number }
 export interface InfraNode {
-  kind: "relay" | "agent"; id: number; name: string; relay: string | null;
+  kind: "relay" | "agent"; id: number; name: string; relay_id: number | null; relay: string | null;
   status: NodeStatus; reason: "no_heartbeat" | "relay_silent" | "spool" | "delivery" | null;
   heartbeat_at: string | null; last_event_at: string | null; version: string | null;
   spool: SpoolUsage | null; delivery_failures: number | null; events_per_second: number | null;

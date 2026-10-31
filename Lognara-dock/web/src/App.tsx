@@ -7,6 +7,7 @@ const Access = lazy(() => import("./pages/Access"));
 const Analytics = lazy(() => import("./pages/Analytics"));
 const Errors = lazy(() => import("./pages/Errors"));
 const Infrastructure = lazy(() => import("./pages/Infrastructure"));
+const InfrastructureTree = lazy(() => import("./pages/InfrastructureTree"));
 const Login = lazy(() => import("./pages/Login"));
 const Logs = lazy(() => import("./pages/Logs"));
 const Metrics = lazy(() => import("./pages/Metrics"));
@@ -119,6 +120,7 @@ export default function App() {
               <Route path="/errors" element={<Errors onUnauthorized={() => setMe(null)} />} />
               <Route path="/analytics" element={<Analytics onUnauthorized={() => setMe(null)} />} />
               <Route path="/infrastructure" element={<Infrastructure onUnauthorized={() => setMe(null)} />} />
+              <Route path="/infrastructure/tree" element={<InfrastructureTree onUnauthorized={() => setMe(null)} />} />
               <Route
                 path="/metrics"
                 element={<Metrics onUnauthorized={() => setMe(null)} />}

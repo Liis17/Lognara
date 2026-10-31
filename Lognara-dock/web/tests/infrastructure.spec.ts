@@ -6,7 +6,7 @@ const source = (server: string) => ({ environment: 'prod', server, backend: 'api
 
 function node(kind: 'relay' | 'agent', id: number, name: string, status: string, extra: Record<string, unknown> = {}) {
   return {
-    kind, id, name, relay: kind === 'agent' ? 'relay-eu-1' : null, status, reason: null,
+    kind, id, name, relay_id: kind === 'agent' ? 1 : null, relay: kind === 'agent' ? 'relay-eu-1' : null, status, reason: null,
     heartbeat_at: ago(2), last_event_at: ago(1), version: '0.1.0',
     spool: { used_bytes: 4, limit_bytes: 100, records: 1 }, delivery_failures: 0,
     events_per_second: kind === 'relay' ? 2100 : null, source: kind === 'agent' ? source(name) : null, ...extra,
@@ -126,4 +126,219 @@ test('not-ready core and unknown nodes never claim a healthy pipeline', async ({
   await page.reload();
   await expect(page.getByRole('heading', { name: 'Состояние 1 узла неизвестно' })).toBeVisible();
   await expect(page.getByRole('region', { name: 'Цепочка доставки' })).toContainText('нет данных');
+});
+
+test('tree navigation keeps infrastructure active, supports direct route, back, and manual refresh', async ({ page }) => {
+  await page.clock.install();
+  await fixture(page, response);
+  await page.goto('/infrastructure');
+  await page.getByRole('link', { name: 'Дерево инфраструктуры' }).click();
+  await expect(page.getByRole('heading', { name: 'Дерево инфраструктуры' })).toBeVisible();
+  await expect(page.getByRole('navigation', { name: 'Разделы' }).getByRole('link', { name: 'Инфраструктура' }))
+    .toHaveAttribute('aria-current', 'page');
+  await page.getByRole('link', { name: '← Инфраструктура' }).click();
+  await expect(page.getByRole('heading', { name: 'Узлы' })).toBeVisible();
+
+  let requests = 0;
+  await page.route('**/api/infrastructure', route => { requests++; return route.fulfill({ json: response }); });
+  await page.goto('/infrastructure/tree');
+  await expect(page.getByRole('heading', { name: 'Дерево инфраструктуры' })).toBeVisible();
+  await expect(page.getByRole('button', { name: /^Обновлено/ })).toBeEnabled();
+  const beforeRefresh = requests;
+  await page.getByRole('button', { name: /^Обновлено/ }).click();
+  await expect.poll(() => requests).toBe(beforeRefresh + 1);
+});
+
+test('tree cards select paths with pointer and keyboard; Escape remains available to logout dialog', async ({ page }) => {
+  await fixture(page, response);
+  await page.goto('/infrastructure/tree');
+  const scroll = page.getByRole('group', { name: 'Дерево инфраструктуры' });
+  const agent = page.locator('[data-infra-node-key="agent-1"]');
+  const sibling = page.locator('[data-infra-node-key="agent-2"]');
+  const relay = page.locator('[data-infra-node-key="relay-1"]');
+  const core = page.locator('[data-infra-node-key="core"]');
+  const dock = page.locator('[data-infra-node-key="dock"]');
+
+  await agent.click();
+  await expect(agent).toHaveAttribute('aria-pressed', 'true');
+  await expect(relay).toHaveAttribute('aria-pressed', 'true');
+  await expect(core).toHaveAttribute('aria-pressed', 'true');
+  await expect(dock).toHaveAttribute('aria-pressed', 'true');
+  await expect(sibling).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('.infra-tree-selection')).toContainText('Агент srv-eu-12 (#1) → Relay relay-eu-1 (#1) → Core → Dock');
+  await expect(page.locator('[data-infra-edge-key="agent-1:relay-1"]')).toHaveClass(/is-active/);
+  await agent.click();
+  await expect(agent).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('.infra-tree-selection')).toContainText('Выберите карточку');
+
+  await relay.focus();
+  await page.keyboard.press('Space');
+  await expect(relay).toHaveAttribute('aria-pressed', 'true');
+  await expect(agent).toHaveAttribute('aria-pressed', 'true');
+  await expect(sibling).toHaveAttribute('aria-pressed', 'true');
+  await page.keyboard.press('Escape');
+  await expect(relay).toHaveAttribute('aria-pressed', 'false');
+
+  await agent.focus();
+  await page.keyboard.press('Enter');
+  await expect(agent).toHaveAttribute('aria-pressed', 'true');
+  await page.getByRole('button', { name: 'Выйти', exact: true }).click();
+  const logout = page.getByRole('dialog', { name: 'Выйти из Lognara?' });
+  await expect(logout).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(logout).toBeHidden();
+  await expect(scroll).toBeVisible();
+});
+
+test('tree preserves selection and scroll through reordered polling, then clears deleted selection and restores focus', async ({ page }) => {
+  await page.clock.install();
+  await page.setViewportSize({ width: 390, height: 844 });
+  const many = Array.from({ length: 24 }, (_, i) => node('agent', i + 1, `agent-${i + 1}`, 'online', { relay_id: 1 }));
+  const initial = { ...response, nodes: [node('relay', 1, 'relay-eu-1', 'online'), ...many] };
+  const reordered = {
+    ...initial,
+    nodes: [
+      ...[...initial.nodes].reverse().map(item => item.kind === 'agent' && item.id === 1 ? { ...item, status: 'offline' } : item),
+    ],
+  };
+  const deleted = { ...reordered, nodes: reordered.nodes.filter(item => !(item.kind === 'agent' && item.id === 1)) };
+  let requests = 0;
+  let snapshot = initial;
+  await page.route('**/api/**', route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === '/api/me') return route.fulfill({ json: { username: 'liis', passkeys: 0 } });
+    if (path === '/api/infrastructure') {
+      requests++;
+      return route.fulfill({ json: snapshot });
+    }
+    return route.fulfill({ status: 404, json: { error: 'not_found' } });
+  });
+  await page.goto('/infrastructure/tree');
+  const scroll = page.getByRole('group', { name: 'Дерево инфраструктуры' });
+  const agent = page.locator('[data-infra-node-key="agent-1"]');
+  await expect(page.getByRole('button', { name: /^Обновлено/ })).toBeEnabled();
+  await agent.click();
+  await scroll.evaluate((element: HTMLElement) => { element.scrollLeft = 150; element.scrollTop = 120; });
+  const beforeReorder = requests;
+  snapshot = reordered;
+  await page.clock.fastForward(10_001);
+  await expect.poll(() => requests).toBe(beforeReorder + 1);
+  await expect(agent).toContainText('Отключён');
+  await expect(agent).toHaveAttribute('aria-pressed', 'true');
+  const preserved = await scroll.evaluate((element: HTMLElement) => ({ left: element.scrollLeft, top: element.scrollTop }));
+  expect(preserved).toEqual({ left: 150, top: 120 });
+
+  const beforeDelete = requests;
+  snapshot = deleted;
+  await page.clock.fastForward(10_001);
+  await expect.poll(() => requests).toBe(beforeDelete + 1);
+  await expect(page.locator('[data-infra-node-key="agent-1"]')).toHaveCount(0);
+  await expect(page.locator('.infra-tree-selection')).toContainText('Выберите карточку');
+  await expect.poll(() => scroll.evaluate((element: HTMLElement) => document.activeElement === element)).toBe(true);
+});
+
+test('tree distinguishes initial loading, registry failure, empty registry, and unavailable core', async ({ page }) => {
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  const partial = { ...response, core: { status: 'unavailable', version: null, visibility_lag_ms: null, wal_bytes: null, wal_limit_bytes: null }, storage: null, registry: false, nodes: [] };
+  const empty = { ...response, registry: true, nodes: [] };
+  let requests = 0;
+  await page.route('**/api/**', async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === '/api/me') return route.fulfill({ json: { username: 'liis', passkeys: 0 } });
+    if (path === '/api/infrastructure') {
+      requests++;
+      if (requests <= 2) { await pending; return route.fulfill({ status: 502, json: { error: 'core_unavailable' } }); }
+      return route.fulfill({ json: requests === 3 ? partial : empty });
+    }
+    return route.fulfill({ status: 404, json: { error: 'not_found' } });
+  });
+  await page.goto('/infrastructure/tree');
+  await expect(page.getByRole('heading', { name: 'Дерево инфраструктуры' })).toBeVisible();
+  await expect.poll(() => requests).toBe(2);
+  await expect(page.getByRole('status')).toContainText('Загружаем дерево инфраструктуры');
+  release();
+  await expect(page.getByRole('alert')).toContainText('Снимок ещё не получен');
+  await expect(page.getByText('Данные инфраструктуры пока недоступны.')).toBeVisible();
+  await page.getByRole('button', { name: 'Обновить' }).click();
+  await expect(page.getByRole('alert')).toContainText('список узлов из Core');
+  await expect(page.getByRole('link', { name: 'Управление подключениями' })).toHaveAttribute('href', '/access');
+  await expect(page.locator('[data-infra-node-key="core"]')).toContainText('Недоступен');
+  await expect(page.locator('[data-infra-node-key="dock"]')).toContainText('Онлайн');
+  await expect(page.locator('[data-infra-node-key^="agent-"]')).toHaveCount(0);
+
+  await page.getByRole('button', { name: /^Обновлено/ }).click();
+  await expect(page.getByText('Нет зарегистрированных relay и агентов.')).toBeVisible();
+  await expect(page.locator('[data-infra-node-key="core"]')).toContainText('Онлайн');
+  await expect(page.getByRole('link', { name: 'Подключениях' })).toHaveAttribute('href', '/access');
+});
+
+test('failed tree refresh keeps a stale snapshot and removes fresh Dock health styling', async ({ page }) => {
+  await page.clock.install();
+  await fixture(page, { ...response, nodes: [node('relay', 1, 'relay-eu-1', 'online'), node('agent', 1, 'agent-one', 'online', { relay_id: 1 })] });
+  await page.goto('/infrastructure/tree');
+  const agent = page.locator('[data-infra-node-key="agent-1"]');
+  await agent.click();
+  await page.route('**/api/infrastructure', route => route.fulfill({ status: 502, json: { error: 'core_unavailable' } }));
+  await page.clock.fastForward(10_001);
+  await expect(page.getByRole('alert')).toContainText('данные устарели');
+  await expect(page.locator('.infra-tree-stale')).toBeVisible();
+  await expect(agent).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.locator('[data-infra-node-key="dock"]')).toContainText('Не подтверждено');
+  await expect(page.locator('.infra-tree-edge.is-active')).toHaveCount(3);
+});
+
+test('tree wraps long names and bounds both scroll axes on a 390px screen with 500 agents', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const longName = 'agent-with-a-long-name-'.repeat(6);
+  const agents = Array.from({ length: 500 }, (_, i) => node('agent', i + 1, i === 0 ? longName : `agent-${i + 1}`, 'online', { relay_id: 1 }));
+  await fixture(page, { ...response, nodes: [node('relay', 1, 'relay-eu-1', 'online'), ...agents] });
+  await page.goto('/infrastructure/tree');
+  const scroll = page.getByRole('group', { name: 'Дерево инфраструктуры' });
+  await expect(page.locator('[data-infra-node-key^="agent-"]')).toHaveCount(500);
+  const longCard = page.locator('[data-infra-node-key="agent-1"]');
+  await expect(longCard).toContainText(longName);
+  const dimensions = await page.evaluate(() => {
+    const viewport = document.querySelector<HTMLElement>('.infra-tree-scroll')!;
+    const canvas = document.querySelector<HTMLElement>('.infra-tree-canvas')!;
+    return { pageWidth: document.documentElement.scrollWidth, clientWidth: viewport.clientWidth, scrollWidth: viewport.scrollWidth,
+      clientHeight: viewport.clientHeight, scrollHeight: viewport.scrollHeight, canvasHeight: canvas.offsetHeight,
+      longCardHeight: document.querySelector<HTMLElement>('[data-infra-node-key="agent-1"]')!.getBoundingClientRect().height };
+  });
+  expect(dimensions.pageWidth).toBeLessThanOrEqual(390);
+  expect(dimensions.scrollWidth).toBeGreaterThan(dimensions.clientWidth);
+  expect(dimensions.scrollHeight).toBeGreaterThan(dimensions.clientHeight);
+  expect(dimensions.longCardHeight).toBeGreaterThan(58);
+
+  const geometry = await page.evaluate(() => {
+    const canvas = document.querySelector<HTMLElement>('.infra-tree-canvas')!;
+    const agent = document.querySelector<HTMLElement>('[data-infra-card-key="agent-1"]')!.getBoundingClientRect();
+    const relay = document.querySelector<HTMLElement>('[data-infra-card-key="relay-1"]')!.getBoundingClientRect();
+    const d = document.querySelector<SVGPathElement>('[data-infra-edge-key="agent-1:relay-1"]')!.getAttribute('d')!;
+    const values = d.match(/^M ([\d.]+) ([\d.]+) C [\d.]+ [\d.]+, [\d.]+ [\d.]+, ([\d.]+) ([\d.]+)$/)!;
+    return { startX: Number(values[1]), startY: Number(values[2]), endX: Number(values[3]), endY: Number(values[4]),
+      expectedStartX: agent.right - canvas.getBoundingClientRect().left,
+      expectedStartY: (agent.top + agent.bottom) / 2 - canvas.getBoundingClientRect().top,
+      expectedEndX: relay.left - canvas.getBoundingClientRect().left,
+      expectedEndY: (relay.top + relay.bottom) / 2 - canvas.getBoundingClientRect().top };
+  });
+  expect(Math.abs(geometry.startX - geometry.expectedStartX)).toBeLessThan(1);
+  expect(Math.abs(geometry.startY - geometry.expectedStartY)).toBeLessThan(1);
+  expect(Math.abs(geometry.endX - geometry.expectedEndX)).toBeLessThan(1);
+  expect(Math.abs(geometry.endY - geometry.expectedEndY)).toBeLessThan(1);
+  await scroll.evaluate((element: HTMLElement) => { element.scrollLeft = 700; element.scrollTop = 1200; });
+  expect(await scroll.evaluate((element: HTMLElement) => element.scrollLeft)).toBeGreaterThan(0);
+  expect(await scroll.evaluate((element: HTMLElement) => element.scrollTop)).toBeGreaterThan(0);
+  await page.locator('[data-infra-node-key="agent-500"]').click();
+  await expect(page.locator('.infra-tree-selection')).toContainText('Агент agent-500');
+  const sticky = await page.evaluate(() => {
+    const viewport = document.querySelector<HTMLElement>('.infra-tree-scroll')!;
+    const summary = document.querySelector<HTMLElement>('.infra-tree-selection')!;
+    const viewportBox = viewport.getBoundingClientRect();
+    const summaryBox = summary.getBoundingClientRect();
+    return { left: summaryBox.left, top: summaryBox.top, viewportLeft: viewportBox.left + viewport.clientLeft,
+      viewportTop: viewportBox.top + viewport.clientTop };
+  });
+  expect(Math.abs(sticky.left - sticky.viewportLeft)).toBeLessThan(1);
+  expect(Math.abs(sticky.top - sticky.viewportTop)).toBeLessThan(1);
 });
