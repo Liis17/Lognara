@@ -606,7 +606,7 @@ pre.json, .event-details pre, tr.details pre { margin: 0; padding: 12px; backgro
 .infra-tree-panel-head { flex-wrap: wrap; gap: 8px 16px; }
 .infra-tree-panel-head h2 { margin: 0; }
 .infra-tree-registry { overflow-wrap: anywhere; }
-.infra-tree-scroll { width: 100%; max-height: min(72vh, 720px); min-height: 220px; overflow: auto; overscroll-behavior: contain; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--bg); }
+.infra-tree-scroll { width: 100%; min-height: 220px; overflow: auto; overscroll-behavior: contain; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--bg); }
 .infra-tree-scroll:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .infra-tree-canvas { position: relative; min-width: 1100px; }
 .infra-tree-selection { position: sticky; z-index: 3; top: 0; left: 0; width: max-content; max-width: min(720px,calc(100vw - 64px)); max-height: 80px; min-height: 36px; margin: 0; padding: 7px 12px; border: 1px solid var(--line); border-radius: 0 0 10px 0; background: var(--raised); color: var(--ink); font: 12px/1.5 var(--mono); overflow-wrap: anywhere; overflow-y: auto; }
@@ -614,8 +614,11 @@ pre.json, .event-details pre, tr.details pre { margin: 0; padding: 12px; backgro
 .infra-tree-svg { position: absolute; z-index: 0; top: 0; left: 0; overflow: visible; pointer-events: none; }
 .infra-tree-edge { stroke: var(--ink4); stroke-width: 1.5; opacity: .75; vector-effect: non-scaling-stroke; }
 .infra-tree-edge.is-active { stroke: var(--accent); stroke-width: 3; opacity: 1; }
+.infra-tree-flow { stroke: var(--ok); stroke-width: 2; stroke-linecap: round; stroke-dasharray: 2 10; opacity: .85; pointer-events: none; animation: infra-tree-flow 1.4s linear infinite; }
+@keyframes infra-tree-flow { to { stroke-dashoffset: -12; } }
+@media (prefers-reduced-motion: reduce) { .infra-tree-flow { animation: none; } }
 .infra-tree-card-slot { position: absolute; z-index: 1; }
-.infra-tree-node { display: flex; width: 100%; min-width: 0; min-height: 58px; flex-direction: column; align-items: stretch; justify-content: center; gap: 5px; margin: 0; padding: 11px 14px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); color: var(--ink); text-align: left; white-space: normal; overflow-wrap: anywhere; cursor: pointer; }
+.infra-tree-node { display: flex; width: 100%; min-width: 0; min-height: 58px; flex-direction: column; align-items: stretch; justify-content: center; gap: 5px; margin: 0; padding: 11px 14px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); color: var(--ink); text-align: left; white-space: normal; overflow-wrap: anywhere; cursor: pointer; user-select: none; }
 .infra-tree-node:hover { border-color: var(--ink3); }
 .infra-tree-node:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .infra-tree-node.is-selected { border-color: var(--accent); box-shadow: inset 0 0 0 2px var(--accent); }
@@ -625,7 +628,6 @@ pre.json, .event-details pre, tr.details pre { margin: 0; padding: 12px; backgro
 .infra-tree-node-sub { display: block; color: var(--ink3); font: 11px/1.4 var(--mono); overflow-wrap: anywhere; white-space: normal; }
 .infra-tree-orphan { display: flex; min-height: 66px; flex-direction: column; justify-content: center; gap: 4px; padding: 10px 14px; border: 1px dashed var(--line); border-radius: 14px; background: var(--bg); color: var(--ink3); font: 11px/1.4 var(--mono); overflow-wrap: anywhere; }
 .infra-tree-orphan strong { color: var(--warn); font-weight: 600; overflow-wrap: anywhere; }
-.infra-tree-note { margin: 10px 14px 14px; }
 .infra-tree-stale .infra-tree-edge { stroke: var(--ink4); opacity: .35; }
 .infra-tree-stale .infra-tree-edge.is-active { stroke: var(--ink3); stroke-width: 3; opacity: .55; }
 .infra-tree-stale .infra-tree-node .node-status { border-color: var(--line); background: var(--raised); color: var(--ink3); }

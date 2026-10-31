@@ -228,15 +228,17 @@ test('tree preserves selection and scroll through reordered polling, then clears
   const agent = page.locator('[data-infra-node-key="agent-1"]');
   await expect(page.getByRole('button', { name: /^Обновлено/ })).toBeEnabled();
   await agent.click();
-  await scroll.evaluate((element: HTMLElement) => { element.scrollLeft = 150; element.scrollTop = 120; });
+  await scroll.evaluate((element: HTMLElement) => { element.scrollLeft = 150; });
+  await page.evaluate(() => window.scrollTo(0, 120));
   const beforeReorder = requests;
   snapshot = reordered;
   await page.clock.fastForward(10_001);
   await expect.poll(() => requests).toBe(beforeReorder + 1);
   await expect(agent).toContainText('Отключён');
   await expect(agent).toHaveAttribute('aria-pressed', 'true');
-  const preserved = await scroll.evaluate((element: HTMLElement) => ({ left: element.scrollLeft, top: element.scrollTop }));
-  expect(preserved).toEqual({ left: 150, top: 120 });
+  const preserved = await scroll.evaluate((element: HTMLElement) => element.scrollLeft);
+  expect(preserved).toBe(150);
+  expect(await page.evaluate(() => window.scrollY)).toBe(120);
 
   const beforeDelete = requests;
   snapshot = deleted;
@@ -293,16 +295,18 @@ test('failed tree refresh keeps a stale snapshot and removes fresh Dock health s
   await page.goto('/infrastructure/tree');
   const agent = page.locator('[data-infra-node-key="agent-1"]');
   await agent.click();
+  await expect(page.locator('.infra-tree-flow')).toHaveCount(2);
   await page.route('**/api/infrastructure', route => route.fulfill({ status: 502, json: { error: 'core_unavailable' } }));
   await page.clock.fastForward(10_001);
   await expect(page.getByRole('alert')).toContainText('данные устарели');
   await expect(page.locator('.infra-tree-stale')).toBeVisible();
+  await expect(page.locator('.infra-tree-flow')).toHaveCount(0);
   await expect(agent).toHaveAttribute('aria-pressed', 'true');
   await expect(page.locator('[data-infra-node-key="dock"]')).toContainText('Не подтверждено');
   await expect(page.locator('.infra-tree-edge.is-active')).toHaveCount(3);
 });
 
-test('tree wraps long names and bounds both scroll axes on a 390px screen with 500 agents', async ({ page }) => {
+test('tree wraps long names and scrolls only horizontally inside the graph on a 390px screen with 500 agents', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   const longName = 'agent-with-a-long-name-'.repeat(6);
   const agents = Array.from({ length: 500 }, (_, i) => node('agent', i + 1, i === 0 ? longName : `agent-${i + 1}`, 'online', { relay_id: 1 }));
@@ -321,7 +325,7 @@ test('tree wraps long names and bounds both scroll axes on a 390px screen with 5
   });
   expect(dimensions.pageWidth).toBeLessThanOrEqual(390);
   expect(dimensions.scrollWidth).toBeGreaterThan(dimensions.clientWidth);
-  expect(dimensions.scrollHeight).toBeGreaterThan(dimensions.clientHeight);
+  expect(dimensions.scrollHeight).toBeLessThanOrEqual(dimensions.clientHeight + 1);
   expect(dimensions.longCardHeight).toBeGreaterThan(58);
 
   await expect(async () => {
@@ -342,19 +346,54 @@ test('tree wraps long names and bounds both scroll axes on a 390px screen with 5
     expect(Math.abs(geometry.endX - geometry.expectedEndX)).toBeLessThan(1);
     expect(Math.abs(geometry.endY - geometry.expectedEndY)).toBeLessThan(1);
   }).toPass({ timeout: 5_000 });
-  await scroll.evaluate((element: HTMLElement) => { element.scrollLeft = 700; element.scrollTop = 1200; });
+  await scroll.evaluate((element: HTMLElement) => { element.scrollLeft = 700; });
   expect(await scroll.evaluate((element: HTMLElement) => element.scrollLeft)).toBeGreaterThan(0);
-  expect(await scroll.evaluate((element: HTMLElement) => element.scrollTop)).toBeGreaterThan(0);
+  await page.evaluate(() => window.scrollTo(0, 1200));
+  expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
   await page.locator('[data-infra-node-key="agent-500"]').click();
   await expect(page.locator('.infra-tree-selection')).toContainText('Агент agent-500');
   const sticky = await page.evaluate(() => {
     const viewport = document.querySelector<HTMLElement>('.infra-tree-scroll')!;
     const summary = document.querySelector<HTMLElement>('.infra-tree-selection')!;
-    const viewportBox = viewport.getBoundingClientRect();
-    const summaryBox = summary.getBoundingClientRect();
-    return { left: summaryBox.left, top: summaryBox.top, viewportLeft: viewportBox.left + viewport.clientLeft,
-      viewportTop: viewportBox.top + viewport.clientTop };
+    return { left: summary.getBoundingClientRect().left, viewportLeft: viewport.getBoundingClientRect().left + viewport.clientLeft };
   });
   expect(Math.abs(sticky.left - sticky.viewportLeft)).toBeLessThan(1);
-  expect(Math.abs(sticky.top - sticky.viewportTop)).toBeLessThan(1);
+});
+
+test('agent card keeps name, status and last event in two lines', async ({ page }) => {
+  await fixture(page, { ...response, nodes: [node('relay', 1, 'relay-eu-1', 'online'), node('agent', 123, 'srv-eu-12-prod', 'idle', { last_event_at: ago(259_200) })] });
+  await page.goto('/infrastructure/tree');
+  const card = page.locator('[data-infra-node-key="agent-123"]');
+  await expect(card).toContainText('последнее событие');
+  const head = await card.locator('.infra-tree-node-head').boundingBox();
+  const sub = await card.locator('.infra-tree-node-sub').first().boundingBox();
+  const relay = await page.locator('[data-infra-card-key="relay-1"]').boundingBox();
+  expect(head!.height).toBeLessThan(26);
+  expect(sub!.height).toBeLessThan(20);
+  expect(head!.x + head!.width).toBeLessThan(relay!.x);
+});
+
+test('double click on an agent opens its logs with a range covering its last event', async ({ page }) => {
+  await fixture(page, { ...response, nodes: [node('relay', 1, 'relay-eu-1', 'online'), node('agent', 3, 'srv-eu-07', 'idle', { last_event_at: ago(90_000) })] });
+  await page.goto('/infrastructure/tree');
+  await page.locator('[data-infra-node-key="agent-3"]').dblclick();
+  await expect(page).toHaveURL(/\/logs\?/);
+  const params = new URL(page.url()).searchParams;
+  expect(params.get('view')).toBe('events');
+  expect(params.get('range')).toBe('7d');
+  expect(params.get('q')).toContain('server:"srv-eu-07"');
+});
+
+test('flow animation runs only on links leaving online agents and relays', async ({ page }) => {
+  await fixture(page, { ...response, nodes: [
+    node('relay', 1, 'relay-eu-1', 'online'),
+    node('agent', 1, 'agent-online', 'online', { relay_id: 1 }),
+    node('agent', 2, 'agent-offline', 'offline', { relay_id: 1 }),
+  ] });
+  await page.goto('/infrastructure/tree');
+  await expect(page.locator('[data-infra-node-key="agent-2"]')).toBeVisible();
+  await expect(page.locator('.infra-tree-flow')).toHaveCount(2);
+  await expect(page.locator('[data-infra-flow-key="agent-1:relay-1"]')).toHaveCount(1);
+  await expect(page.locator('[data-infra-flow-key="relay-1:core"]')).toHaveCount(1);
+  await expect(page.locator('[data-infra-flow-key="agent-2:relay-1"]')).toHaveCount(0);
 });
