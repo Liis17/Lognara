@@ -275,11 +275,25 @@ async fn alert_query_uses_exact_raw_windows_baselines_and_selected_environment()
         "POST",
         ALERT_QUERY,
         Some("query"),
-        Some(all_environments),
+        Some(all_environments.clone()),
     )
     .await;
     assert_eq!(all["windows"][0]["count"], 2);
     assert_eq!(all["windows"][0]["sum"], 108.0);
+
+    let mut nonincrease = all_environments;
+    nonincrease["need_increase"] = json!(false);
+    let (_, nonincrease) = send(
+        &router,
+        "POST",
+        ALERT_QUERY,
+        Some("query"),
+        Some(nonincrease),
+    )
+    .await;
+    assert_eq!(nonincrease["windows"][0]["sum"], 108.0);
+    assert!(nonincrease["windows"][0]["increase"].is_null());
+    assert!(nonincrease["last_point_at"].as_str().is_some());
 
     let (status, _) = send(
         &router,
@@ -293,6 +307,100 @@ async fn alert_query_uses_exact_raw_windows_baselines_and_selected_environment()
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+    core.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn alert_query_uses_production_aggregate_for_parquet_reset_baselines() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = Core::open(config(dir.path(), 1)).unwrap();
+    let router = api::router(core.clone());
+    let now = OffsetDateTime::now_utc();
+    let ago = |seconds: i64| {
+        (now - time::Duration::seconds(seconds))
+            .format(&Rfc3339)
+            .unwrap()
+    };
+    let reports = vec![
+        report(1, &ago(400), json!({"requests": 50}), json!({})),
+        report(2, &ago(200), json!({"requests": 70}), json!({})),
+        report(3, &ago(90), json!({"requests": 3}), json!({})),
+        report(4, &ago(30), json!({"requests": 8}), json!({})),
+    ];
+    core.journal
+        .accept(&batch(vec![(source("api", Some("eu-1")), reports)]))
+        .unwrap();
+    wait(|| {
+        let snapshot = core.snapshot();
+        snapshot.watermark >= 4
+            && snapshot
+                .series_files
+                .iter()
+                .map(|file| file.meta.rows)
+                .sum::<usize>()
+                >= 4
+    });
+
+    let (status, reply) = send(
+        &router,
+        "POST",
+        ALERT_QUERY,
+        Some("query"),
+        Some(json!({
+            "server": "eu-prod-01", "service": "api", "name": "requests",
+            "origin": "counter", "environment": "production", "windows_seconds": [60, 180, 300]
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{reply}");
+    assert!(
+        core.snapshot()
+            .series_files
+            .iter()
+            .map(|file| file.meta.rows)
+            .sum::<usize>()
+            >= 4
+    );
+    assert_eq!(reply["windows"][0]["count"], 1);
+    assert_eq!(reply["windows"][0]["increase"], 5.0);
+    assert_eq!(reply["windows"][1]["count"], 2);
+    assert_eq!(reply["windows"][1]["increase"], 8.0);
+    assert_eq!(reply["windows"][2]["count"], 3);
+    assert_eq!(reply["windows"][2]["increase"], 28.0);
+    core.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn alert_query_nonincrease_freshness_is_limited_to_five_minutes() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = Core::open(config(dir.path(), 1)).unwrap();
+    let router = api::router(core.clone());
+    let timestamp = (OffsetDateTime::now_utc() - time::Duration::minutes(10))
+        .format(&Rfc3339)
+        .unwrap();
+    core.journal
+        .accept(&batch(vec![(
+            source("api", Some("eu-1")),
+            vec![report(1, &timestamp, json!({"requests": 9}), json!({}))],
+        )]))
+        .unwrap();
+    wait(|| core.snapshot().watermark >= 1 && !core.snapshot().series_files.is_empty());
+
+    let (status, reply) = send(
+        &router,
+        "POST",
+        ALERT_QUERY,
+        Some("query"),
+        Some(json!({
+            "server": "eu-prod-01", "service": "api", "name": "requests",
+            "origin": "counter", "windows_seconds": [60], "need_increase": false
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{reply}");
+    assert_eq!(reply["windows"][0]["count"], 0);
+    assert!(reply["windows"][0]["increase"].is_null());
+    assert!(reply["last_point_at"].is_null());
     core.shutdown().unwrap();
 }
 

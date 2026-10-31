@@ -245,6 +245,7 @@ const messages: Record<string, string> = {
   passkey_exists: "Этот ключ уже добавлен",
   invalid_bot_token: "Telegram отклонил токен. Проверьте его и повторите",
   telegram_unavailable: "Не удалось проверить бота в Telegram",
+  telegram_rate_limited: "Telegram просит подождать перед повторной проверкой",
   bot_token_required: "Сначала сохраните и проверьте токен Telegram-бота",
   global_disabled_or_alert_limit: "Включите алерты глобально или уменьшите число включённых правил до 100",
   recipient_exists: "Этот Telegram chat ID уже добавлен",

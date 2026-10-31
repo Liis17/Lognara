@@ -82,6 +82,7 @@ pub struct AlertSeriesQuery {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub environment: Option<String>,
     pub windows_seconds: Vec<u64>,
+    pub need_increase: bool,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -559,26 +560,7 @@ impl CoreClient {
         })?;
         if !status.is_success() {
             let reply: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-            return Err(match status {
-                StatusCode::TOO_MANY_REQUESTS => AlertSeriesStatus::Busy,
-                StatusCode::GATEWAY_TIMEOUT => AlertSeriesStatus::Timeout,
-                StatusCode::SERVICE_UNAVAILABLE
-                    if reply["error"].as_str() == Some("query capacity is exhausted") =>
-                {
-                    AlertSeriesStatus::Busy
-                }
-                StatusCode::SERVICE_UNAVAILABLE
-                    if reply["error"].as_str() == Some("query deadline exceeded") =>
-                {
-                    AlertSeriesStatus::Timeout
-                }
-                StatusCode::BAD_REQUEST
-                | StatusCode::UNAUTHORIZED
-                | StatusCode::FORBIDDEN
-                | StatusCode::NOT_FOUND => AlertSeriesStatus::Misconfigured,
-                status if status.is_client_error() => AlertSeriesStatus::Misconfigured,
-                _ => AlertSeriesStatus::Unavailable,
-            });
+            return Err(classify_alert_series_status(status, &reply));
         }
         let reply: AlertSeriesReply =
             serde_json::from_slice(&bytes).map_err(|_| AlertSeriesStatus::Misconfigured)?;
@@ -758,6 +740,29 @@ impl CoreClient {
     }
 }
 
+fn classify_alert_series_status(status: StatusCode, reply: &Value) -> AlertSeriesStatus {
+    match status {
+        StatusCode::TOO_MANY_REQUESTS => AlertSeriesStatus::Busy,
+        StatusCode::GATEWAY_TIMEOUT => AlertSeriesStatus::Timeout,
+        StatusCode::SERVICE_UNAVAILABLE
+            if reply["error"].as_str() == Some("query capacity is exhausted") =>
+        {
+            AlertSeriesStatus::Busy
+        }
+        StatusCode::SERVICE_UNAVAILABLE
+            if reply["error"].as_str() == Some("query deadline exceeded") =>
+        {
+            AlertSeriesStatus::Timeout
+        }
+        StatusCode::BAD_REQUEST
+        | StatusCode::UNAUTHORIZED
+        | StatusCode::FORBIDDEN
+        | StatusCode::NOT_FOUND => AlertSeriesStatus::Misconfigured,
+        status if status.is_client_error() => AlertSeriesStatus::Misconfigured,
+        _ => AlertSeriesStatus::Unavailable,
+    }
+}
+
 /// Ошибка по ответу core с не-2xx статусом. Текст поля `error` сохраняется, но обрезается.
 async fn status_error(response: reqwest::Response) -> CoreError {
     let status = response.status();
@@ -784,4 +789,46 @@ fn valid_duration(duration: &DurationStats, total: u64) -> bool {
                 .p95_ms
                 .is_some_and(|value| value.is_finite() && value >= 0.0)
         }
+}
+
+#[cfg(test)]
+mod alert_status_tests {
+    use super::*;
+
+    #[test]
+    fn alert_query_http_status_and_error_body_are_classified() {
+        assert_eq!(
+            classify_alert_series_status(StatusCode::TOO_MANY_REQUESTS, &Value::Null),
+            AlertSeriesStatus::Busy
+        );
+        assert_eq!(
+            classify_alert_series_status(StatusCode::GATEWAY_TIMEOUT, &Value::Null),
+            AlertSeriesStatus::Timeout
+        );
+        assert_eq!(
+            classify_alert_series_status(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &json!({"error":"query capacity is exhausted"}),
+            ),
+            AlertSeriesStatus::Busy
+        );
+        assert_eq!(
+            classify_alert_series_status(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &json!({"error":"query deadline exceeded"}),
+            ),
+            AlertSeriesStatus::Timeout
+        );
+        assert_eq!(
+            classify_alert_series_status(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &json!({"error":"storage unavailable"}),
+            ),
+            AlertSeriesStatus::Unavailable
+        );
+        assert_eq!(
+            classify_alert_series_status(StatusCode::UNAUTHORIZED, &Value::Null),
+            AlertSeriesStatus::Misconfigured
+        );
+    }
 }

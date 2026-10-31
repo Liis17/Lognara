@@ -11,7 +11,6 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use reqwest::Method;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -22,13 +21,15 @@ use uuid::Uuid;
 
 use crate::{
     api::{ApiError, AppState},
-    core_client::{AlertSeriesQuery, AlertSeriesReply, AlertSeriesStatus},
+    core_client::{AlertSeriesQuery, AlertSeriesReply, AlertSeriesStatus, AlertSeriesWindow},
     series::MetricKey,
     store::{Store, StoreError, now_ms},
 };
 
 const MAX_ENABLED: i64 = 100;
 const MAX_TRIGGERS: usize = 20;
+const ALERT_SEND_PASS_LIMIT: usize = 10;
+const ALERT_SEND_PASS_BUDGET: Duration = Duration::from_secs(30);
 const NO_DATA_LOSS_MS: i64 = 5 * 60 * 1000;
 const OUTBOX_TTL_MS: i64 = 24 * 60 * 60 * 1000;
 const OUTBOX_RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
@@ -385,7 +386,7 @@ fn read_alerts(conn: &Connection) -> rusqlite::Result<Vec<AlertDefinition>> {
 
 impl Store {
     async fn alert_global(&self) -> Result<GlobalConfig, AlertStoreError> {
-        Ok(self.call(read_global).await?)
+        Ok(self.call(|conn| read_global(conn)).await?)
     }
 
     async fn alert_token(&self) -> Result<Option<String>, StoreError> {
@@ -419,19 +420,24 @@ impl Store {
                 tx.commit()?;
                 return Ok(false);
             }
-            if current.enabled != enabled {
+            let enabled_changed = current.enabled != enabled;
+            let clear_pause = enabled && current.send_paused;
+            if enabled_changed || clear_pause {
                 tx.execute(
-                    "UPDATE metric_alert_global SET enabled=?1,revision=revision+1 WHERE singleton=1",
+                    "UPDATE metric_alert_global SET enabled=?1,
+                     send_paused=CASE WHEN ?1=1 THEN 0 ELSE send_paused END,
+                     send_pause_reason=CASE WHEN ?1=1 THEN NULL ELSE send_pause_reason END,
+                     revision=revision+1 WHERE singleton=1",
                     [if enabled { 1 } else { 0 }],
                 )?;
-                if !enabled {
+                if enabled_changed && !enabled {
                     tx.execute(
                         "UPDATE metric_alert_deliveries SET status='cancelled',last_error=NULL
                          WHERE status IN ('pending','sending')",
                         [],
                     )?;
                     finish_outbox(&tx, now_ms())?;
-                } else {
+                } else if enabled_changed {
                     tx.execute(
                         "UPDATE metric_alert_states SET condition_state='unknown',loss_registered=0,
                          loss_at=NULL,last_point_at=NULL,last_as_of=NULL
@@ -740,7 +746,7 @@ impl Store {
             }
         })
         .await
-        .map_err(map_duplicate)?
+        .map_err(map_duplicate)
     }
 
     async fn update_recipient(
@@ -808,7 +814,7 @@ impl Store {
             let tx = conn.transaction()?;
             tx.execute(
                 "UPDATE metric_alert_deliveries SET status='cancelled'
-                 WHERE recipient_id=?1 AND status='pending'",
+                 WHERE recipient_id=?1 AND status IN ('pending','sending')",
                 [&id],
             )?;
             let changed = tx.execute("DELETE FROM metric_alert_recipients WHERE id=?1", [&id])?;
@@ -880,16 +886,18 @@ impl Store {
                     )?;
                 }
                 tx.execute("UPDATE metric_alert_global SET revision=revision+1 WHERE singleton=1", [])?;
-                let mut alert_statement = tx.prepare(
-                    "SELECT a.server,a.service,a.name,a.origin FROM metric_alert_groups_used u
-                     JOIN metric_alerts a ON a.id=u.alert_id WHERE u.group_id=?1
-                     ORDER BY a.server,a.service,a.name,a.origin",
-                )?;
-                let alerts = alert_statement
-                    .query_map([&id], |row| Ok(MetricKey {
-                        server: row.get(0)?, service: row.get(1)?, name: row.get(2)?, origin: row.get(3)?,
-                    }))?
-                    .collect::<Result<Vec<_>, _>>()?;
+                let alerts = {
+                    let mut alert_statement = tx.prepare(
+                        "SELECT a.server,a.service,a.name,a.origin FROM metric_alert_groups_used u
+                         JOIN metric_alerts a ON a.id=u.alert_id WHERE u.group_id=?1
+                         ORDER BY a.server,a.service,a.name,a.origin",
+                    )?;
+                    alert_statement
+                        .query_map([&id], |row| Ok(MetricKey {
+                            server: row.get(0)?, service: row.get(1)?, name: row.get(2)?, origin: row.get(3)?,
+                        }))?
+                        .collect::<Result<Vec<_>, _>>()?
+                };
                 tx.commit()?;
                 Ok(Group { id, kind: input.kind, name: input.name, recipient_ids: input.recipient_ids, alerts })
             }
@@ -1069,10 +1077,7 @@ pub async fn set_global(
         app.telegram
             .verify_token(&token)
             .await
-            .map_err(|error| match error {
-                TelegramFailure::InvalidToken => ApiError::BadRequest("invalid_bot_token"),
-                _ => ApiError::CoreUnavailable,
-            })?;
+            .map_err(telegram_verification_api_error)?;
     }
     if !app.store.set_alert_global(input.enabled).await? {
         return Err(ApiError::Conflict("bot_token_required"));
@@ -1092,10 +1097,7 @@ pub async fn set_token(
     app.telegram
         .verify_token(&token)
         .await
-        .map_err(|error| match error {
-            TelegramFailure::InvalidToken => ApiError::BadRequest("invalid_bot_token"),
-            _ => ApiError::CoreUnavailable,
-        })?;
+        .map_err(telegram_verification_api_error)?;
     app.store.set_alert_token(token).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -1184,7 +1186,7 @@ struct PendingDelivery {
     attempts: u32,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ConditionState {
     Unknown,
     Ok,
@@ -1229,172 +1231,185 @@ pub async fn watch(app: AppState) {
             continue;
         }
 
-        let mut outcomes = Vec::new();
-        for alert in alerts.into_iter().filter(|alert| alert.enabled) {
-            if app.shutdown.is_cancelled() {
-                return;
-            }
-            let Ok(current) = app.store.alert_global().await else {
-                break;
-            };
-            if !current.enabled || current.revision != global.revision {
-                break;
-            }
-            let windows: Vec<u64> = alert
+        run_alert_pass(&app, global, alerts, &mut core_unavailable_since).await;
+    }
+}
+
+async fn run_alert_pass(
+    app: &AppState,
+    global: GlobalConfig,
+    alerts: Vec<AlertDefinition>,
+    core_unavailable_since: &mut Option<Instant>,
+) {
+    let mut outcomes = Vec::new();
+    for alert in alerts.into_iter().filter(|alert| alert.enabled) {
+        if app.shutdown.is_cancelled() {
+            return;
+        }
+        let Ok(current) = app.store.alert_global().await else {
+            break;
+        };
+        if !current.enabled || current.revision != global.revision {
+            break;
+        }
+        let windows: Vec<u64> = alert
+            .triggers
+            .iter()
+            .map(|trigger| trigger.window_seconds)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let query = AlertSeriesQuery {
+            server: alert.key.server.clone(),
+            service: alert.key.service.clone(),
+            name: alert.key.name.clone(),
+            origin: alert.key.origin.clone(),
+            environment: alert.environment.clone(),
+            windows_seconds: windows,
+            need_increase: alert
                 .triggers
                 .iter()
-                .map(|trigger| trigger.window_seconds)
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect();
-            let query = AlertSeriesQuery {
-                server: alert.key.server.clone(),
-                service: alert.key.service.clone(),
-                name: alert.key.name.clone(),
-                origin: alert.key.origin.clone(),
-                environment: alert.environment.clone(),
-                windows_seconds: windows,
-            };
-            match app.core.alert_series_query(&query).await {
-                Ok(reply) => {
-                    outcomes.push(Ok(()));
-                    if let Err(error) = app
-                        .store
-                        .commit_alert_evaluation(
-                            global.revision,
-                            alert,
-                            reply,
-                            app.config.public_url.clone(),
-                        )
-                        .await
-                    {
-                        tracing::warn!("metric alert evaluation could not be committed: {error}");
-                    }
-                }
-                Err(status) => outcomes.push(Err(status)),
-            }
-        }
-
-        if !outcomes.is_empty() {
-            let health = classify_health(&outcomes);
-            match health {
-                PassHealth::Available => {
-                    core_unavailable_since = None;
-                    let _ = app
-                        .store
-                        .record_core_health("available", None, None, app.config.public_url.clone())
-                        .await;
-                }
-                PassHealth::Busy => {
-                    core_unavailable_since = None;
-                    let _ = app
-                        .store
-                        .record_core_health(
-                            "busy",
-                            Some("overloaded"),
-                            None,
-                            app.config.public_url.clone(),
-                        )
-                        .await;
-                }
-                PassHealth::Misconfigured => {
-                    core_unavailable_since = None;
-                    let _ = app
-                        .store
-                        .record_core_health(
-                            "incompatible",
-                            Some("incompatible"),
-                            None,
-                            app.config.public_url.clone(),
-                        )
-                        .await;
-                }
-                PassHealth::Unavailable => {
-                    let started = *core_unavailable_since.get_or_insert_with(Instant::now);
-                    let lost = (Instant::now() - started).as_millis() >= NO_DATA_LOSS_MS as u128;
-                    let _ = app.store.record_core_health(
-                        "unavailable",
-                        Some("unavailable"),
-                        lost.then(|| {
-                            format!("Core не отвечает более 5 минут. Алерты метрик приостановлены до восстановления.\n{}",
-                                settings_link(&app.config.public_url))
-                        }),
+                .any(|trigger| trigger.aggregate == "increase"),
+        };
+        match app.core.alert_series_query(&query).await {
+            Ok(reply) => {
+                outcomes.push(Ok(()));
+                if let Err(error) = app
+                    .store
+                    .commit_alert_evaluation(
+                        global.revision,
+                        alert,
+                        reply,
                         app.config.public_url.clone(),
-                    ).await;
+                    )
+                    .await
+                {
+                    tracing::warn!("metric alert evaluation could not be committed: {error}");
                 }
             }
-        } else if let Ok(current) = app.store.alert_global().await {
-            if current.enabled && current.revision == global.revision {
-                let probe = AlertSeriesQuery {
-                    server: "__dock_health_check__".into(),
-                    service: "dock".into(),
-                    name: "health_check".into(),
-                    origin: "counter".into(),
-                    environment: None,
-                    windows_seconds: vec![60],
-                };
-                let result = app.core.alert_series_query(&probe).await;
-                let health = classify_health(&[result.map(|_| ()).map_err(|status| status)]);
-                match health {
-                    PassHealth::Available => {
-                        core_unavailable_since = None;
-                        let _ = app
-                            .store
-                            .record_core_health(
-                                "available",
-                                None,
-                                None,
-                                app.config.public_url.clone(),
-                            )
-                            .await;
-                    }
-                    PassHealth::Busy => {
-                        core_unavailable_since = None;
-                        let _ = app
-                            .store
-                            .record_core_health(
-                                "busy",
-                                Some("overloaded"),
-                                None,
-                                app.config.public_url.clone(),
-                            )
-                            .await;
-                    }
-                    PassHealth::Misconfigured => {
-                        core_unavailable_since = None;
-                        let _ = app
-                            .store
-                            .record_core_health(
-                                "incompatible",
-                                Some("incompatible"),
-                                None,
-                                app.config.public_url.clone(),
-                            )
-                            .await;
-                    }
-                    PassHealth::Unavailable => {
-                        let started = *core_unavailable_since.get_or_insert_with(Instant::now);
-                        let lost =
-                            (Instant::now() - started).as_millis() >= NO_DATA_LOSS_MS as u128;
-                        let loss_message = lost.then(|| format!(
-                            "Core не отвечает более 5 минут. Алерты метрик приостановлены до восстановления.\n{}",
-                            settings_link(&app.config.public_url),
-                        ));
-                        let _ = app
-                            .store
-                            .record_core_health(
-                                "unavailable",
-                                Some("unavailable"),
-                                loss_message,
-                                app.config.public_url.clone(),
-                            )
-                            .await;
-                    }
+            Err(status) => {
+                outcomes.push(Err(status));
+                if matches!(
+                    status,
+                    AlertSeriesStatus::Unavailable | AlertSeriesStatus::Timeout
+                ) {
+                    record_core_unavailable(app, core_unavailable_since).await;
+                    send_pending(app).await;
+                    return;
                 }
             }
         }
-        send_pending(&app).await;
     }
+
+    if !outcomes.is_empty() {
+        match classify_health(&outcomes) {
+            PassHealth::Available => {
+                *core_unavailable_since = None;
+                let _ = app
+                    .store
+                    .record_core_health("available", None, None, app.config.public_url.clone())
+                    .await;
+            }
+            PassHealth::Busy => {
+                *core_unavailable_since = None;
+                let _ = app
+                    .store
+                    .record_core_health(
+                        "busy",
+                        Some("overloaded"),
+                        None,
+                        app.config.public_url.clone(),
+                    )
+                    .await;
+            }
+            PassHealth::Misconfigured => {
+                *core_unavailable_since = None;
+                let _ = app
+                    .store
+                    .record_core_health(
+                        "incompatible",
+                        Some("incompatible"),
+                        None,
+                        app.config.public_url.clone(),
+                    )
+                    .await;
+            }
+            PassHealth::Unavailable => {
+                record_core_unavailable(app, core_unavailable_since).await;
+            }
+        }
+    } else if let Ok(current) = app.store.alert_global().await
+        && current.enabled
+        && current.revision == global.revision
+    {
+        let probe = AlertSeriesQuery {
+            server: "__dock_health_check__".into(),
+            service: "dock".into(),
+            name: "health_check".into(),
+            origin: "counter".into(),
+            environment: None,
+            windows_seconds: vec![60],
+            need_increase: false,
+        };
+        let result = app.core.alert_series_query(&probe).await;
+        match classify_health(&[result.map(|_| ())]) {
+            PassHealth::Available => {
+                *core_unavailable_since = None;
+                let _ = app
+                    .store
+                    .record_core_health("available", None, None, app.config.public_url.clone())
+                    .await;
+            }
+            PassHealth::Busy => {
+                *core_unavailable_since = None;
+                let _ = app
+                    .store
+                    .record_core_health(
+                        "busy",
+                        Some("overloaded"),
+                        None,
+                        app.config.public_url.clone(),
+                    )
+                    .await;
+            }
+            PassHealth::Misconfigured => {
+                *core_unavailable_since = None;
+                let _ = app
+                    .store
+                    .record_core_health(
+                        "incompatible",
+                        Some("incompatible"),
+                        None,
+                        app.config.public_url.clone(),
+                    )
+                    .await;
+            }
+            PassHealth::Unavailable => {
+                record_core_unavailable(app, core_unavailable_since).await;
+            }
+        }
+    }
+    send_pending(app).await;
+}
+
+async fn record_core_unavailable(app: &AppState, since: &mut Option<Instant>) {
+    let started = *since.get_or_insert_with(Instant::now);
+    let lost = (Instant::now() - started).as_millis() >= NO_DATA_LOSS_MS as u128;
+    let loss_message = lost.then(|| {
+        format!(
+            "Core не отвечает более 5 минут. Алерты метрик приостановлены до восстановления.\n{}",
+            settings_link(&app.config.public_url),
+        )
+    });
+    let _ = app
+        .store
+        .record_core_health(
+            "unavailable",
+            Some("unavailable"),
+            loss_message,
+            app.config.public_url.clone(),
+        )
+        .await;
 }
 
 fn classify_health(outcomes: &[Result<(), AlertSeriesStatus>]) -> PassHealth {
@@ -1445,16 +1460,20 @@ impl Store {
                 tx.commit()?;
                 return Ok(());
             }
-            let (old_state, loss_registered): (String, bool) = tx.query_row(
-                "SELECT condition_state,loss_registered FROM metric_alert_states WHERE alert_id=?1",
+            let (old_state, loss_registered, previous_last_point): (String, bool, Option<i64>) =
+                tx.query_row(
+                "SELECT condition_state,loss_registered,last_point_at FROM metric_alert_states WHERE alert_id=?1",
                 [&alert.id],
-                |row| Ok((row.get(0)?, row.get::<_, i64>(1)? != 0)),
+                |row| Ok((row.get(0)?, row.get::<_, i64>(1)? != 0, row.get(2)?)),
             )?;
+            let previous_state = state_from_str(&old_state);
             let as_of = parse_timestamp_ms(&reply.as_of).ok_or(rusqlite::Error::InvalidQuery)?;
-            let last_point = reply.last_point_at.as_deref().and_then(parse_timestamp_ms);
+            let latest_point = reply.last_point_at.as_deref().and_then(parse_timestamp_ms);
             let enabled_at = alert.enabled_at;
-            let fresh_point = last_point.filter(|point| *point >= enabled_at);
-            let freshness_reference = fresh_point.unwrap_or(enabled_at);
+            let last_point = latest_point
+                .filter(|point| *point >= enabled_at)
+                .or_else(|| previous_last_point.filter(|point| *point >= enabled_at));
+            let freshness_reference = last_point.unwrap_or(enabled_at);
             let stale = as_of.saturating_sub(freshness_reference) >= NO_DATA_LOSS_MS;
             let windows: BTreeMap<u64, &AlertSeriesWindow> = reply
                 .windows
@@ -1480,9 +1499,14 @@ impl Store {
                     } else {
                         Vec::new()
                     };
-                    (state_from_str(&old_state), true, loss_at, events)
+                    (previous_state, true, loss_at, events)
                 } else {
-                    let next_state = evaluate_conditions(&alert, &windows);
+                    let evaluated_state = evaluate_conditions(&alert, &windows);
+                    let next_state = if evaluated_state == ConditionState::Unknown {
+                        previous_state
+                    } else {
+                        evaluated_state
+                    };
                     let mut events = Vec::new();
                     if loss_registered {
                         events.push((
@@ -1497,11 +1521,10 @@ impl Store {
                             ),
                         ));
                     }
-                    let previous = state_from_str(&old_state);
-                    if previous != next_state {
+                    if previous_state != next_state {
                         let kind = match next_state {
                             ConditionState::Firing => Some("firing"),
-                            ConditionState::Ok if previous == ConditionState::Firing => {
+                            ConditionState::Ok if previous_state == ConditionState::Firing => {
                                 Some("recovered")
                             }
                             _ => None,
@@ -1533,7 +1556,7 @@ impl Store {
                     next_state.as_str(),
                     if next_loss_registered { 1 } else { 0 },
                     loss_at,
-                    fresh_point,
+                    last_point,
                     as_of,
                 ],
             )?;
@@ -1578,28 +1601,31 @@ impl Store {
                     &format!("Core снова отвечает. Проверка метрик возобновлена.\n{}", settings_link(&public_url)),
                     now,
                 )?;
-                if let Some(previous) = previous_event.as_deref() {
-                    let recipients = snapshot_event_recipients(&tx, previous)?;
-                    insert_deliveries(&tx, &event_id, &recipients, now)?;
-                }
+                let recipients = previous_event
+                    .as_deref()
+                    .map(|previous| snapshot_event_recipients(&tx, previous))
+                    .transpose()?
+                    .unwrap_or_default();
+                insert_deliveries(&tx, &event_id, &recipients, now)?;
                 finish_single_outbox(&tx, &event_id, now)?;
                 tx.execute(
                     "UPDATE metric_alert_global SET core_loss_registered=0,core_loss_event_id=NULL WHERE singleton=1",
                     [],
                 )?;
-            } else if status == "unavailable" && registered == 0 {
-                if let Some(message) = loss_message {
-                    let event_id = Uuid::new_v4().to_string();
-                    let now = now_ms();
-                    insert_core_event(&tx, &event_id, "core_unavailable", &message, now)?;
-                    let recipients = current_enabled_recipients(&tx)?;
-                    insert_deliveries(&tx, &event_id, &recipients, now)?;
-                    finish_single_outbox(&tx, &event_id, now)?;
-                    tx.execute(
-                        "UPDATE metric_alert_global SET core_loss_registered=1,core_loss_event_id=?1 WHERE singleton=1",
-                        [&event_id],
-                    )?;
-                }
+            } else if status == "unavailable"
+                && registered == 0
+                && let Some(message) = loss_message
+            {
+                let event_id = Uuid::new_v4().to_string();
+                let now = now_ms();
+                insert_core_event(&tx, &event_id, "core_unavailable", &message, now)?;
+                let recipients = current_enabled_recipients(&tx)?;
+                insert_deliveries(&tx, &event_id, &recipients, now)?;
+                finish_single_outbox(&tx, &event_id, now)?;
+                tx.execute(
+                    "UPDATE metric_alert_global SET core_loss_registered=1,core_loss_event_id=?1 WHERE singleton=1",
+                    [&event_id],
+                )?;
             }
             tx.commit()?;
             Ok(())
@@ -1630,6 +1656,7 @@ impl Store {
             let row: Option<(String, String, i64, String, String, i64)> = tx.query_row(
                 "SELECT d.event_id,d.recipient_id,d.recipient_chat_id,o.message,g.telegram_token,d.attempts
                  FROM metric_alert_deliveries d
+                 JOIN metric_alert_recipients r ON r.id=d.recipient_id AND r.chat_id=d.recipient_chat_id
                  JOIN metric_alert_outbox o ON o.id=d.event_id
                  JOIN metric_alert_global g ON g.singleton=1
                  WHERE d.status='pending' AND d.next_attempt_at<=?1 AND o.expires_at>?1
@@ -1680,6 +1707,16 @@ impl Store {
         self.call(move |conn| {
             let tx = conn.transaction()?;
             let now = now_ms();
+            let still_sending: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM metric_alert_deliveries
+                 WHERE event_id=?1 AND recipient_id=?2 AND status='sending')",
+                params![delivery.event_id,delivery.recipient_id],
+                |row| row.get(0),
+            )?;
+            if !still_sending {
+                tx.commit()?;
+                return Ok(());
+            }
             match result {
                 Ok(()) => {
                     tx.execute(
@@ -1744,8 +1781,13 @@ impl Store {
 }
 
 async fn send_pending(app: &AppState) {
-    loop {
-        if app.shutdown.is_cancelled() {
+    send_pending_bounded(app, ALERT_SEND_PASS_LIMIT, ALERT_SEND_PASS_BUDGET).await;
+}
+
+async fn send_pending_bounded(app: &AppState, limit: usize, budget: Duration) {
+    let deadline = Instant::now() + budget;
+    for _ in 0..limit {
+        if app.shutdown.is_cancelled() || Instant::now() >= deadline {
             return;
         }
         let delivery = match app.store.next_alert_delivery().await {
@@ -1754,14 +1796,21 @@ async fn send_pending(app: &AppState) {
         };
         let result = tokio::select! {
             _ = app.shutdown.cancelled() => return,
-            result = app.telegram.send(&delivery.token, delivery.chat_id, &delivery.message) => result,
+            result = tokio::time::timeout_at(
+                deadline,
+                app.telegram.send(&delivery.token, delivery.chat_id, &delivery.message),
+            ) => result.unwrap_or(Err(TelegramFailure::Transient)),
         };
+        let deadline_reached = Instant::now() >= deadline;
         if app
             .store
             .finish_alert_delivery(delivery, result)
             .await
             .is_err()
         {
+            return;
+        }
+        if deadline_reached {
             return;
         }
     }
@@ -1854,8 +1903,10 @@ fn snapshot_event_recipients(
     event_id: &str,
 ) -> rusqlite::Result<Vec<(String, String, i64)>> {
     let mut statement = tx.prepare(
-        "SELECT recipient_id,recipient_name,recipient_chat_id FROM metric_alert_deliveries
-         WHERE event_id=?1 ORDER BY recipient_id",
+        "SELECT d.recipient_id,d.recipient_name,d.recipient_chat_id
+         FROM metric_alert_deliveries d
+         JOIN metric_alert_recipients r ON r.id=d.recipient_id AND r.chat_id=d.recipient_chat_id
+         WHERE d.event_id=?1 AND d.status!='cancelled' ORDER BY d.recipient_id",
     )?;
     statement
         .query_map([event_id], |row| {
@@ -1919,12 +1970,11 @@ fn evaluate_conditions(
         .triggers
         .iter()
         .map(|trigger| {
-            let Some(window) = windows.get(&trigger.window_seconds) else {
-                return None;
-            };
+            let window = windows.get(&trigger.window_seconds)?;
             let value = if window.count == 0 {
                 match trigger.aggregate.as_str() {
                     "sum" | "count" if alert.no_data == "normal" => Some(0.0),
+                    _ if alert.no_data == "loss" => return None,
                     // An empty normal window is a known false condition for aggregates that
                     // require observations; it is distinct from a missing query result.
                     _ => return Some(false),
@@ -1940,7 +1990,7 @@ fn evaluate_conditions(
                     _ => None,
                 }
             };
-            let Some(value) = value else { return None };
+            let value = value?;
             Some(if trigger.comparator == ">" {
                 value > trigger.threshold
             } else {
@@ -1949,14 +1999,14 @@ fn evaluate_conditions(
         })
         .collect();
     if alert.combine == "and" {
-        if values.iter().any(|value| *value == Some(false)) {
+        if values.contains(&Some(false)) {
             ConditionState::Ok
         } else if values.iter().all(|value| *value == Some(true)) {
             ConditionState::Firing
         } else {
             ConditionState::Unknown
         }
-    } else if values.iter().any(|value| *value == Some(true)) {
+    } else if values.contains(&Some(true)) {
         ConditionState::Firing
     } else if values.iter().all(|value| *value == Some(false)) {
         ConditionState::Ok
@@ -2009,7 +2059,7 @@ fn alert_message(
             trigger.window_seconds,
             trigger.comparator,
             trigger.threshold,
-            value.map_or_else(|| "нет значения".into(), |value| value.to_string()),
+            value.map_or_else(|| String::from("нет значения"), |value| value.to_string()),
         ));
     }
     append_message_link(body, metric_link(public_url, alert))
@@ -2048,7 +2098,15 @@ fn append_message_link(mut body: String, link: String) -> String {
 }
 
 fn retry_delay(attempt: u32) -> i64 {
-    (30_i64.saturating_mul(1_i64 << attempt.saturating_sub(1).min(7))).min(3_600_000)
+    (30_000_i64.saturating_mul(1_i64 << attempt.saturating_sub(1).min(7))).min(3_600_000)
+}
+
+fn telegram_verification_api_error(error: TelegramFailure) -> ApiError {
+    match error {
+        TelegramFailure::InvalidToken => ApiError::BadRequest("invalid_bot_token"),
+        TelegramFailure::RateLimited(wait) => ApiError::TelegramRateLimited(wait),
+        _ => ApiError::TelegramUnavailable,
+    }
 }
 
 impl TelegramClient {
@@ -2093,11 +2151,15 @@ impl TelegramClient {
             .bytes()
             .await
             .map_err(|_| TelegramFailure::Transient)?;
-        let ok = telegram_ok(&body);
+        let reply: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        let ok = reply["ok"].as_bool();
+        let code = reply["error_code"].as_u64();
         if status.is_success() && ok == Some(true) {
             Ok(())
-        } else if status == StatusCode::UNAUTHORIZED || ok == Some(false) {
+        } else if status == StatusCode::UNAUTHORIZED || code == Some(401) {
             Err(TelegramFailure::InvalidToken)
+        } else if status == StatusCode::TOO_MANY_REQUESTS || code == Some(429) {
+            Err(telegram_rate_limit(&reply))
         } else {
             Err(TelegramFailure::Transient)
         }
@@ -2125,16 +2187,18 @@ impl TelegramClient {
             return Err(TelegramFailure::InvalidToken);
         }
         if status == StatusCode::TOO_MANY_REQUESTS || reply["error_code"] == 429 {
-            let seconds = reply["parameters"]["retry_after"]
-                .as_u64()
-                .unwrap_or(30)
-                .clamp(1, 86_400);
-            return Err(TelegramFailure::RateLimited(Duration::from_secs(seconds)));
+            return Err(telegram_rate_limit(&reply));
         }
         if status == StatusCode::BAD_REQUEST || status == StatusCode::FORBIDDEN {
             return Err(TelegramFailure::PermanentRecipient);
         }
         Err(TelegramFailure::Transient)
+    }
+}
+
+impl Default for TelegramClient {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -2146,11 +2210,12 @@ enum TelegramFailure {
     Transient,
 }
 
-fn telegram_ok(body: &[u8]) -> Option<bool> {
-    serde_json::from_slice::<Value>(body)
-        .ok()?
-        .get("ok")?
-        .as_bool()
+fn telegram_rate_limit(reply: &Value) -> TelegramFailure {
+    let seconds = reply["parameters"]["retry_after"]
+        .as_u64()
+        .unwrap_or(30)
+        .clamp(1, 86_400);
+    TelegramFailure::RateLimited(Duration::from_secs(seconds))
 }
 
 fn valid_token(token: &str) -> bool {
@@ -2171,14 +2236,20 @@ mod tests {
     use super::*;
     use axum::{
         Json, Router,
+        body::Body,
         extract::{Path, State},
+        http::Request,
         routing::{get, post},
     };
     use std::{
         collections::VecDeque,
-        sync::{Arc, Mutex},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
     use tokio::net::TcpListener;
+    use tower::ServiceExt;
 
     const BOT_TOKEN: &str = "123456:abcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -2348,6 +2419,11 @@ mod tests {
             evaluate_conditions(&empty_sum, &by_seconds),
             ConditionState::Ok
         );
+        let empty_loss = condition_alert("and", "loss", vec![trigger(240, "avg")]);
+        assert_eq!(
+            evaluate_conditions(&empty_loss, &by_seconds),
+            ConditionState::Unknown
+        );
     }
 
     async fn configured_store(
@@ -2356,6 +2432,15 @@ mod tests {
         recipient_count: usize,
     ) -> (Store, AlertDefinition, Vec<Recipient>) {
         let store = Store::open(directory).unwrap();
+        let (alert, recipients) = configured_alert_store(&store, no_data, recipient_count).await;
+        (store, alert, recipients)
+    }
+
+    async fn configured_alert_store(
+        store: &Store,
+        no_data: &str,
+        recipient_count: usize,
+    ) -> (AlertDefinition, Vec<Recipient>) {
         store.set_alert_token(BOT_TOKEN.into()).await.unwrap();
         assert!(store.set_alert_global(true).await.unwrap());
         let mut recipients = Vec::new();
@@ -2391,7 +2476,93 @@ mod tests {
             .await
             .unwrap();
         let alert = store.alert_definition(key).await.unwrap().unwrap();
-        (store, alert, recipients)
+        (alert, recipients)
+    }
+
+    fn test_app_config(directory: &std::path::Path, core_url: &str) -> crate::config::Config {
+        let htpasswd = directory.join("htpasswd");
+        std::fs::write(
+            &htpasswd,
+            format!("admin:{}\n", bcrypt::hash("test-password", 4).unwrap()),
+        )
+        .unwrap();
+        let values = [
+            ("LOGNARA_DOCK_PUBLIC_URL", "http://localhost".to_owned()),
+            ("LOGNARA_DOCK_CORE_URL", core_url.to_owned()),
+            ("LOGNARA_DOCK_CORE_TOKEN", "abcdefghijklmnopqrst".to_owned()),
+            (
+                "LOGNARA_DOCK_CORE_ADMIN_TOKEN",
+                "bcdefghijklmnopqrstu".to_owned(),
+            ),
+            (
+                "LOGNARA_DOCK_HTPASSWD_FILE",
+                htpasswd.to_string_lossy().into_owned(),
+            ),
+            (
+                "LOGNARA_DOCK_DATA_DIR",
+                directory.join("data").to_string_lossy().into_owned(),
+            ),
+            (
+                "LOGNARA_DOCK_WEB_DIR",
+                directory.to_string_lossy().into_owned(),
+            ),
+        ];
+        crate::config::Config::from_lookup(|key| {
+            values
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| value.clone())
+        })
+        .unwrap()
+    }
+
+    fn test_app(directory: &std::path::Path, core_url: &str) -> AppState {
+        crate::api::App::open(test_app_config(directory, core_url)).unwrap()
+    }
+
+    async fn api_request(
+        app: AppState,
+        session: Option<&str>,
+        origin: Option<&str>,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, Value) {
+        let mut request = Request::builder().method(method).uri(path);
+        if let Some(session) = session {
+            request = request.header(
+                axum::http::header::COOKIE,
+                format!("{}={session}", crate::session::SESSION_COOKIE),
+            );
+        }
+        if let Some(origin) = origin {
+            request = request.header(axum::http::header::ORIGIN, origin);
+        }
+        let request = match body {
+            Some(body) => request
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+            None => request.body(Body::empty()).unwrap(),
+        };
+        let response = crate::api::router(app).oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    async fn serve(router: Router) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        (format!("http://{address}/"), server)
     }
 
     async fn outbox_rows(store: &Store) -> Vec<(String, String, i64)> {
@@ -2733,16 +2904,29 @@ mod tests {
                 .iter()
                 .any(|recipient| recipient.id == first.recipient_id)
         );
+        let next = store.next_alert_delivery().await.unwrap().unwrap();
+        assert_eq!(first.event_id, next.event_id);
+        assert_ne!(first.recipient_id, next.recipient_id);
+        let second_recipient_id = next.recipient_id.clone();
+        store.finish_alert_delivery(next, Ok(())).await.unwrap();
+        let recovery_for_second = store.next_alert_delivery().await.unwrap().unwrap();
+        assert_ne!(first.event_id, recovery_for_second.event_id);
+        assert_eq!(second_recipient_id, recovery_for_second.recipient_id);
+        store
+            .finish_alert_delivery(recovery_for_second, Ok(()))
+            .await
+            .unwrap();
         store
             .finish_alert_delivery(first.clone(), Ok(()))
             .await
             .unwrap();
-        let next = store.next_alert_delivery().await.unwrap().unwrap();
-        assert_eq!(first.event_id, next.event_id);
-        assert_ne!(first.recipient_id, next.recipient_id);
-        store.finish_alert_delivery(next, Ok(())).await.unwrap();
-        let later = store.next_alert_delivery().await.unwrap().unwrap();
-        assert_ne!(first.event_id, later.event_id);
+        let recovery_for_first = store.next_alert_delivery().await.unwrap().unwrap();
+        assert_ne!(first.event_id, recovery_for_first.event_id);
+        assert_eq!(first.recipient_id, recovery_for_first.recipient_id);
+        store
+            .finish_alert_delivery(recovery_for_first, Ok(()))
+            .await
+            .unwrap();
 
         let mut edited = input(alert.key.clone(), "normal", alert.group_ids.clone());
         edited.triggers[0].threshold = 100.0;
@@ -2831,6 +3015,138 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn loss_uses_last_known_point_after_core_freshness_is_capped() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, alert, _) = configured_store(directory.path(), "loss", 1).await;
+        let url = Url::parse("https://dock.example/").unwrap();
+        let (global, _) = store.alert_rows_for_worker().await.unwrap();
+        let point_at = alert.enabled_at + 60_000;
+        store
+            .commit_alert_evaluation(
+                global.revision,
+                alert.clone(),
+                reply(point_at + 1_000, Some(point_at), 2),
+                url.clone(),
+            )
+            .await
+            .unwrap();
+
+        let before_loss = point_at + NO_DATA_LOSS_MS - 1;
+        store
+            .commit_alert_evaluation(
+                global.revision,
+                alert.clone(),
+                reply(before_loss, None, 0),
+                url.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(outbox_rows(&store).await.len(), 1);
+        assert!(
+            !store
+                .alert_definition(alert.key.clone())
+                .await
+                .unwrap()
+                .unwrap()
+                .loss_registered
+        );
+
+        store
+            .commit_alert_evaluation(
+                global.revision,
+                alert.clone(),
+                reply(point_at + NO_DATA_LOSS_MS, None, 0),
+                url,
+            )
+            .await
+            .unwrap();
+        let rows = outbox_rows(&store).await;
+        assert_eq!(
+            rows.iter().map(|row| row.0.as_str()).collect::<Vec<_>>(),
+            ["firing", "data_loss"]
+        );
+        let current = store.alert_definition(alert.key).await.unwrap().unwrap();
+        assert!(current.loss_registered);
+        assert_eq!(current.loss_at, Some(point_at + NO_DATA_LOSS_MS));
+        assert_eq!(current.last_point_at, Some(point_at));
+    }
+
+    #[tokio::test]
+    async fn loss_unknown_preserves_firing_state_without_duplicate_firing_on_recovery() {
+        let directory = tempfile::tempdir().unwrap();
+        let (store, alert, _) = configured_store(directory.path(), "loss", 1).await;
+        let url = Url::parse("https://dock.example/").unwrap();
+        let (global, _) = store.alert_rows_for_worker().await.unwrap();
+        let firing_at = alert.enabled_at + 60_000;
+        store
+            .commit_alert_evaluation(
+                global.revision,
+                alert.clone(),
+                reply(firing_at, Some(firing_at), 2),
+                url.clone(),
+            )
+            .await
+            .unwrap();
+        store
+            .commit_alert_evaluation(
+                global.revision,
+                alert.clone(),
+                reply(firing_at + 60_000, Some(firing_at), 0),
+                url.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .alert_definition(alert.key.clone())
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            "firing"
+        );
+        assert_eq!(outbox_rows(&store).await[0].0, "firing");
+
+        let loss_at = firing_at + NO_DATA_LOSS_MS;
+        store
+            .commit_alert_evaluation(
+                global.revision,
+                alert.clone(),
+                reply(loss_at, Some(firing_at), 0),
+                url.clone(),
+            )
+            .await
+            .unwrap();
+        store
+            .commit_alert_evaluation(
+                global.revision,
+                alert.clone(),
+                reply(loss_at + 60_000, Some(loss_at + 59_000), 2),
+                url,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outbox_rows(&store)
+                .await
+                .iter()
+                .map(|row| row.0.as_str())
+                .collect::<Vec<_>>(),
+            ["firing", "data_loss", "data_recovered"]
+        );
+        assert_eq!(
+            store
+                .alert_definition(alert.key)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            "firing"
+        );
+    }
+
+    #[tokio::test]
     async fn restart_recovers_sending_delivery_and_settings_never_return_token() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().to_owned();
@@ -2878,6 +3194,69 @@ mod tests {
                 .state,
             "firing"
         );
+    }
+
+    #[tokio::test]
+    async fn deleting_recipients_cancels_pending_and_inflight_deliveries_across_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().to_owned();
+        let (store, alert, recipients) = configured_store(&path, "normal", 2).await;
+        let (global, _) = store.alert_rows_for_worker().await.unwrap();
+        store
+            .commit_alert_evaluation(
+                global.revision,
+                alert.clone(),
+                reply(
+                    alert.enabled_at + 60_000,
+                    Some(alert.enabled_at + 59_000),
+                    2,
+                ),
+                Url::parse("https://dock.example/").unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let sending = store.next_alert_delivery().await.unwrap().unwrap();
+        let pending_recipient = recipients
+            .iter()
+            .find(|recipient| recipient.id != sending.recipient_id)
+            .unwrap()
+            .id
+            .clone();
+        store
+            .delete_recipient(sending.recipient_id.clone())
+            .await
+            .unwrap();
+        store.delete_recipient(pending_recipient).await.unwrap();
+
+        store
+            .finish_alert_delivery(sending, Err(TelegramFailure::InvalidToken))
+            .await
+            .unwrap();
+        let statuses: Vec<String> = store
+            .call(|conn| {
+                let mut statement = conn
+                    .prepare("SELECT status FROM metric_alert_deliveries ORDER BY recipient_id")?;
+                statement.query_map([], |row| row.get(0))?.collect()
+            })
+            .await
+            .unwrap();
+        assert_eq!(statuses, ["cancelled", "cancelled"]);
+        assert!(!store.alert_settings().await.unwrap().send_paused);
+        assert!(store.next_alert_delivery().await.unwrap().is_none());
+        drop(store);
+
+        let reopened = Store::open(&path).unwrap();
+        let statuses: Vec<String> = reopened
+            .call(|conn| {
+                let mut statement = conn
+                    .prepare("SELECT status FROM metric_alert_deliveries ORDER BY recipient_id")?;
+                statement.query_map([], |row| row.get(0))?.collect()
+            })
+            .await
+            .unwrap();
+        assert_eq!(statuses, ["cancelled", "cancelled"]);
+        assert!(reopened.next_alert_delivery().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -2958,7 +3337,7 @@ mod tests {
     #[tokio::test]
     async fn core_loss_is_once_per_outage_and_recovery_uses_the_loss_recipient_snapshot() {
         let directory = tempfile::tempdir().unwrap();
-        let (store, _, _) = configured_store(directory.path(), "normal", 1).await;
+        let (store, alert, recipients) = configured_store(directory.path(), "normal", 2).await;
         let url = Url::parse("https://dock.example/").unwrap();
         store
             .record_core_health("busy", Some("overloaded"), None, url.clone())
@@ -2990,7 +3369,30 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(pending, 1);
+        assert_eq!(pending, 2);
+        let added = store
+            .create_recipient(RecipientInput {
+                kind: "personal".into(),
+                name: "later-on-call".into(),
+                chat_id: 2000,
+            })
+            .await
+            .unwrap();
+        store
+            .save_group(
+                Some(alert.group_ids[0].clone()),
+                GroupInput {
+                    kind: "personal".into(),
+                    name: "on-call".into(),
+                    recipient_ids: vec![recipients[1].id.clone(), added.id.clone()],
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .delete_recipient(recipients[0].id.clone())
+            .await
+            .unwrap();
         store
             .record_core_health("available", None, None, url)
             .await
@@ -3000,21 +3402,42 @@ mod tests {
             rows.iter().map(|row| row.0.as_str()).collect::<Vec<_>>(),
             ["core_unavailable", "core_recovered"]
         );
-        let deliveries: i64 = store
+        let loss_deliveries: Vec<(String, String)> = store
             .call(|conn| {
-                conn.query_row("SELECT count(*) FROM metric_alert_deliveries", [], |row| {
-                    row.get(0)
-                })
+                let mut statement = conn.prepare(
+                    "SELECT d.recipient_id,d.status FROM metric_alert_deliveries d
+                     JOIN metric_alert_outbox o ON o.id=d.event_id
+                     WHERE o.event_kind='core_unavailable' ORDER BY d.recipient_id",
+                )?;
+                statement
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect()
             })
             .await
             .unwrap();
-        assert_eq!(deliveries, 2);
+        assert!(loss_deliveries.contains(&(recipients[0].id.clone(), "cancelled".into())));
+        assert!(loss_deliveries.contains(&(recipients[1].id.clone(), "pending".into())));
+        let recovery_recipients: Vec<String> = store
+            .call(|conn| {
+                let mut statement = conn.prepare(
+                    "SELECT d.recipient_id FROM metric_alert_deliveries d
+                     JOIN metric_alert_outbox o ON o.id=d.event_id
+                     WHERE o.event_kind='core_recovered' ORDER BY d.recipient_id",
+                )?;
+                statement.query_map([], |row| row.get(0))?.collect()
+            })
+            .await
+            .unwrap();
+        assert_eq!(recovery_recipients, [recipients[1].id.clone()]);
+        assert!(!recovery_recipients.contains(&recipients[0].id));
+        assert!(!recovery_recipients.contains(&added.id));
     }
 
     #[derive(Clone, Default)]
     struct MockTelegram {
         replies: Arc<Mutex<VecDeque<(StatusCode, Value)>>>,
         requests: Arc<Mutex<Vec<(String, Value)>>>,
+        send_delay: Arc<Mutex<Duration>>,
     }
 
     async fn get_me(
@@ -3035,7 +3458,11 @@ mod tests {
         Path(token): Path<String>,
         Json(body): Json<Value>,
     ) -> (StatusCode, Json<Value>) {
-        mock.requests.lock().unwrap().push((token, body));
+        mock.requests.lock().unwrap().push((token.clone(), body));
+        let delay = *mock.send_delay.lock().unwrap();
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
         mock.replies
             .lock()
             .unwrap()
@@ -3044,11 +3471,302 @@ mod tests {
             .unwrap_or((StatusCode::OK, Json(json!({"ok":true}))))
     }
 
+    async fn install_mock_telegram(
+        app: &mut AppState,
+        mock: MockTelegram,
+    ) -> tokio::task::JoinHandle<()> {
+        let router = Router::new()
+            .route("/{token}/getMe", get(get_me))
+            .route("/{token}/sendMessage", post(send_message))
+            .with_state(mock);
+        let (base, server) = serve(router).await;
+        Arc::get_mut(app).unwrap().telegram = TelegramClient::with_base(Url::parse(&base).unwrap());
+        server
+    }
+
+    #[derive(Clone)]
+    struct MockCore {
+        requests: Arc<AtomicUsize>,
+    }
+
+    async fn unavailable_core(
+        State(mock): State<MockCore>,
+        Json(_request): Json<Value>,
+    ) -> (StatusCode, Json<Value>) {
+        mock.requests.fetch_add(1, Ordering::SeqCst);
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error":"storage unavailable"})),
+        )
+    }
+
+    #[test]
+    fn retry_backoff_uses_seconds_and_caps_at_one_hour() {
+        assert_eq!(retry_delay(1), 30_000);
+        assert_eq!(retry_delay(2), 60_000);
+        assert_eq!(retry_delay(7), 1_920_000);
+        assert_eq!(retry_delay(8), 3_600_000);
+        assert_eq!(retry_delay(u32::MAX), 3_600_000);
+    }
+
+    #[tokio::test]
+    async fn alerts_router_enforces_origin_auth_group_references_and_missing_token() {
+        let directory = tempfile::tempdir().unwrap();
+        let app = test_app(directory.path(), "http://127.0.0.1:1/");
+        let session = app.sessions.create("admin").await.unwrap();
+
+        let (status, _) = api_request(
+            app.clone(),
+            Some(&session),
+            Some("https://attacker.example"),
+            "PUT",
+            "/api/alerts/global",
+            Some(json!({"enabled":true})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        let (status, _) = api_request(
+            app.clone(),
+            None,
+            Some("http://localhost"),
+            "PUT",
+            "/api/alerts/global",
+            Some(json!({"enabled":true})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        let (status, body) = api_request(
+            app.clone(),
+            Some(&session),
+            Some("http://localhost"),
+            "PUT",
+            "/api/alerts/global",
+            Some(json!({"enabled":true})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"], "bot_token_required");
+
+        app.store.set_alert_token(BOT_TOKEN.into()).await.unwrap();
+        assert!(app.store.set_alert_global(true).await.unwrap());
+        let recipient = app
+            .store
+            .create_recipient(RecipientInput {
+                kind: "personal".into(),
+                name: "on-call".into(),
+                chat_id: 1001,
+            })
+            .await
+            .unwrap();
+        let group = app
+            .store
+            .save_group(
+                None,
+                GroupInput {
+                    kind: "personal".into(),
+                    name: "on-call".into(),
+                    recipient_ids: vec![recipient.id],
+                },
+            )
+            .await
+            .unwrap();
+        app.store
+            .save_alert_definition(input(test_key(), "normal", vec![group.id.clone()]))
+            .await
+            .unwrap();
+        let (status, body) = api_request(
+            app.clone(),
+            Some(&session),
+            Some("http://localhost"),
+            "DELETE",
+            &format!("/api/alerts/groups/{}", group.id),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["error"], "group_in_use");
+        assert_eq!(body["alerts"][0]["name"], "requests");
+
+        let (status, body) = api_request(
+            app,
+            Some(&session),
+            Some("http://localhost"),
+            "GET",
+            "/api/alerts",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!body.to_string().contains(BOT_TOKEN));
+    }
+
+    #[tokio::test]
+    async fn successful_global_enable_clears_a_paused_token() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = test_app(directory.path(), "http://127.0.0.1:1/");
+        app.store.set_alert_token(BOT_TOKEN.into()).await.unwrap();
+        assert!(app.store.set_alert_global(true).await.unwrap());
+        app.store
+            .call(|conn| {
+                conn.execute(
+                    "UPDATE metric_alert_global SET send_paused=1,send_pause_reason='invalid_token' WHERE singleton=1",
+                    [],
+                )
+            })
+            .await
+            .unwrap();
+
+        let mock = MockTelegram::default();
+        let server = install_mock_telegram(&mut app, mock).await;
+        let session = app.sessions.create("admin").await.unwrap();
+        let (status, _) = api_request(
+            app.clone(),
+            Some(&session),
+            Some("http://localhost"),
+            "PUT",
+            "/api/alerts/global",
+            Some(json!({"enabled":true})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let settings = app.store.alert_settings().await.unwrap();
+        assert!(!settings.send_paused);
+        assert_eq!(settings.send_pause_reason, None);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn worker_stops_at_first_core_outage_and_sends_pending_outbox() {
+        let core_mock = MockCore {
+            requests: Arc::new(AtomicUsize::new(0)),
+        };
+        let core_router = Router::new()
+            .route("/v1/series/alerts/query", post(unavailable_core))
+            .with_state(core_mock.clone());
+        let (core_url, core_server) = serve(core_router).await;
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = test_app(directory.path(), &core_url);
+        let telegram_mock = MockTelegram::default();
+        let telegram_server = install_mock_telegram(&mut app, telegram_mock.clone()).await;
+        let (alert, _) = configured_alert_store(&app.store, "normal", 1).await;
+        let global = app.store.alert_global().await.unwrap();
+        app.store
+            .commit_alert_evaluation(
+                global.revision,
+                alert,
+                reply(now_ms() + 60_000, Some(now_ms() + 59_000), 2),
+                Url::parse("https://dock.example/").unwrap(),
+            )
+            .await
+            .unwrap();
+        let mut second_key = test_key();
+        second_key.name = "errors".into();
+        app.store
+            .save_alert_definition(input(second_key, "normal", vec![]))
+            .await
+            .unwrap();
+        let (global, alerts) = app.store.alert_rows_for_worker().await.unwrap();
+        assert_eq!(alerts.len(), 2);
+
+        let mut core_unavailable_since = None;
+        run_alert_pass(&app, global, alerts, &mut core_unavailable_since).await;
+
+        assert_eq!(core_mock.requests.load(Ordering::SeqCst), 1);
+        assert!(core_unavailable_since.is_some());
+        assert_eq!(
+            app.store.alert_settings().await.unwrap().core_status,
+            "unavailable"
+        );
+        assert_eq!(telegram_mock.requests.lock().unwrap().len(), 1);
+        let sent: i64 = app
+            .store
+            .call(|conn| {
+                conn.query_row(
+                    "SELECT count(*) FROM metric_alert_deliveries WHERE status='sent'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(sent, 1);
+        core_server.abort();
+        telegram_server.abort();
+    }
+
+    #[tokio::test]
+    async fn delivery_pass_is_limited_by_count_and_deadline() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = test_app(directory.path(), "http://127.0.0.1:1/");
+        let mock = MockTelegram::default();
+        let telegram_server = install_mock_telegram(&mut app, mock.clone()).await;
+        let (alert, _) = configured_alert_store(&app.store, "normal", 3).await;
+        let global = app.store.alert_global().await.unwrap();
+        app.store
+            .commit_alert_evaluation(
+                global.revision,
+                alert,
+                reply(now_ms() + 60_000, Some(now_ms() + 59_000), 2),
+                Url::parse("https://dock.example/").unwrap(),
+            )
+            .await
+            .unwrap();
+
+        send_pending_bounded(&app, 2, Duration::from_secs(5)).await;
+        assert_eq!(mock.requests.lock().unwrap().len(), 2);
+        let pending: i64 = app
+            .store
+            .call(|conn| {
+                conn.query_row(
+                    "SELECT count(*) FROM metric_alert_deliveries WHERE status='pending'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(pending, 1);
+
+        *mock.send_delay.lock().unwrap() = Duration::from_secs(1);
+        let started = Instant::now();
+        send_pending_bounded(&app, 10, Duration::from_millis(50)).await;
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert_eq!(mock.requests.lock().unwrap().len(), 3);
+        let (status, attempts): (String, i64) = app
+            .store
+            .call(|conn| {
+                conn.query_row(
+                    "SELECT status,attempts FROM metric_alert_deliveries WHERE status='pending'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(status, "pending");
+        assert_eq!(attempts, 1);
+        telegram_server.abort();
+    }
+
     #[tokio::test]
     async fn telegram_client_classifies_partial_errors_without_exposing_token_or_response() {
         let mock = MockTelegram::default();
         mock.replies.lock().unwrap().extend([
             (StatusCode::OK, json!({"ok":true})),
+            (
+                StatusCode::UNAUTHORIZED,
+                json!({"ok":false,"error_code":401}),
+            ),
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                json!({"ok":false,"error_code":429,"parameters":{"retry_after":7}}),
+            ),
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({"ok":false,"description":"Telegram is temporarily unavailable"}),
+            ),
             (
                 StatusCode::TOO_MANY_REQUESTS,
                 json!({"ok":false,"error_code":429,"parameters":{"retry_after":7}}),
@@ -3075,6 +3793,16 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let client = TelegramClient::with_base(Url::parse(&format!("http://{address}/")).unwrap());
         assert!(client.verify_token(BOT_TOKEN).await.is_ok());
+        assert!(matches!(
+            client.verify_token(BOT_TOKEN).await,
+            Err(TelegramFailure::InvalidToken)
+        ));
+        assert!(matches!(
+            client.verify_token(BOT_TOKEN).await,
+            Err(TelegramFailure::RateLimited(wait)) if wait == Duration::from_secs(7)
+        ));
+        let verification_error = client.verify_token(BOT_TOKEN).await.unwrap_err();
+        assert!(matches!(verification_error, TelegramFailure::Transient));
         let rate = client
             .send(BOT_TOKEN, 1001, "plain text")
             .await
@@ -3100,9 +3828,50 @@ mod tests {
         assert!(!format!("{invalid:?}").contains(BOT_TOKEN));
         assert!(!format!("{transient:?}").contains("do not log this"));
         let requests = mock.requests.lock().unwrap();
-        assert_eq!(requests.len(), 5);
-        assert_eq!(requests[1].1["text"], "plain text");
-        assert_eq!(requests[1].1["chat_id"], 1001);
+        assert_eq!(requests.len(), 8);
+        assert_eq!(requests[4].1["text"], "plain text");
+        assert_eq!(requests[4].1["chat_id"], 1001);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn token_verification_errors_use_telegram_api_codes() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = test_app(directory.path(), "http://127.0.0.1:1/");
+        let mock = MockTelegram::default();
+        mock.replies.lock().unwrap().extend([
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({"ok":false,"description":"temporary"}),
+            ),
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                json!({"ok":false,"error_code":429,"parameters":{"retry_after":9}}),
+            ),
+            (
+                StatusCode::UNAUTHORIZED,
+                json!({"ok":false,"error_code":401}),
+            ),
+        ]);
+        let server = install_mock_telegram(&mut app, mock).await;
+        let session = app.sessions.create("admin").await.unwrap();
+        for (expected_status, expected_code) in [
+            (StatusCode::BAD_GATEWAY, "telegram_unavailable"),
+            (StatusCode::TOO_MANY_REQUESTS, "telegram_rate_limited"),
+            (StatusCode::BAD_REQUEST, "invalid_bot_token"),
+        ] {
+            let (status, body) = api_request(
+                app.clone(),
+                Some(&session),
+                Some("http://localhost"),
+                "PUT",
+                "/api/alerts/token",
+                Some(json!({"token":BOT_TOKEN})),
+            )
+            .await;
+            assert_eq!(status, expected_status);
+            assert_eq!(body["error"], expected_code);
+        }
         server.abort();
     }
 }

@@ -42,6 +42,12 @@ pub struct AlertQueryRequest {
     #[serde(default)]
     pub environment: Option<String>,
     pub windows_seconds: Vec<u64>,
+    #[serde(default = "alert_query_need_increase")]
+    pub need_increase: bool,
+}
+
+fn alert_query_need_increase() -> bool {
+    true
 }
 
 #[derive(Debug, Serialize)]
@@ -93,81 +99,100 @@ pub async fn alert_query(
                 .gt_eq(timestamp(from))
                 .and(col("timestamp").lt(timestamp(as_of))),
         )?;
-    let (target_identities, last_in_window) =
-        collect_alert_identities(window_frame.clone()).await?;
+    let target_identities = if request.need_increase {
+        collect_alert_identities(window_frame.clone()).await?.0
+    } else {
+        BTreeSet::new()
+    };
 
-    // Latest pre-window point per observed series is the increase baseline. Scan files newest
-    // first and stop once older files cannot replace every baseline or freshness value.
-    let mut baselines = BTreeMap::<Identity, (i64, f64)>::new();
-    let mut last_point = last_in_window;
-    if let Some(active) = &snapshot.active {
-        let active_batches = if active.points.is_empty() {
-            vec![RecordBatch::new_empty(series::schema())]
-        } else {
-            active.points.clone()
-        };
-        let active_frame = SessionContext::new_with_config_rt(
-            SessionConfig::new()
-                .with_target_partitions(2)
-                .with_batch_size(8192),
-            core.query_runtime.clone(),
-        )
-        .read_table(Arc::new(MemTable::try_new(
-            series::schema(),
-            vec![active_batches],
-        )?))?;
-        collect_alert_baselines(
-            active_frame
-                .filter(alert_scope(&request))?
-                .filter(col("timestamp").lt(timestamp(from)))?,
-            &target_identities,
-            &mut baselines,
-            &mut last_point,
-        )
-        .await?;
-    }
-
-    let mut files: Vec<_> = snapshot
-        .series_files
-        .iter()
-        .filter(|file| file.meta.min_timestamp < from && file.meta.min_timestamp < as_of)
-        .cloned()
-        .collect();
-    files.sort_by_key(|file| std::cmp::Reverse(file.meta.max_timestamp));
-    for file in files {
-        let baselines_complete = target_identities
-            .iter()
-            .all(|identity| baselines.contains_key(identity));
-        let baseline_safe = baselines_complete
-            && baselines
-                .values()
-                .all(|(point_at, _)| file.meta.max_timestamp <= *point_at);
-        let freshness_safe = last_point.is_some_and(|point_at| file.meta.max_timestamp <= point_at);
-        if (target_identities.is_empty() && freshness_safe)
-            || (!target_identities.is_empty() && baseline_safe && freshness_safe)
-        {
-            break;
-        }
-        let context = session(&core);
-        let file_frame = context
-            .read_parquet(
-                vec![file.path.to_string_lossy().into_owned()],
-                ParquetReadOptions::default().schema(&series::schema()),
-            )
+    // Freshness is only needed to distinguish data in the last five minutes. Restrict that
+    // lookup to recent files; older points do not improve a stale/no-data decision.
+    let freshness_from = as_of.saturating_sub(300_i64 * 1_000_000_000);
+    let last_point = latest_alert_timestamp(
+        frame(&core, &snapshot, freshness_from, as_of)
             .await?
             .filter(alert_scope(&request))?
-            .filter(col("timestamp").lt(timestamp(from)))?;
-        collect_alert_baselines(
-            file_frame,
-            &target_identities,
-            &mut baselines,
-            &mut last_point,
-        )
-        .await?;
+            .filter(
+                col("timestamp")
+                    .gt_eq(timestamp(freshness_from))
+                    .and(col("timestamp").lt(timestamp(as_of))),
+            )?,
+    )
+    .await?;
+
+    // The exact increase baseline is the latest pre-window point per observed identity. The
+    // catalog only indexes metric scope, so older files still need a targeted scan when a
+    // requested identity may have a baseline.
+    let mut baselines = BTreeMap::<Identity, (i64, f64)>::new();
+    if request.need_increase
+        && !target_identities.is_empty()
+        && metric_scope_has_points_before(&core, &snapshot, &request, from).await?
+    {
+        if let Some(active) = &snapshot.active {
+            let active_batches = if active.points.is_empty() {
+                vec![RecordBatch::new_empty(series::schema())]
+            } else {
+                active.points.clone()
+            };
+            let active_frame = SessionContext::new_with_config_rt(
+                SessionConfig::new()
+                    .with_target_partitions(2)
+                    .with_batch_size(8192),
+                core.query_runtime.clone(),
+            )
+            .read_table(Arc::new(MemTable::try_new(
+                series::schema(),
+                vec![active_batches],
+            )?))?;
+            collect_alert_baselines(
+                active_frame
+                    .filter(alert_scope(&request))?
+                    .filter(col("timestamp").lt(timestamp(from)))?,
+                &target_identities,
+                &mut baselines,
+            )
+            .await?;
+        }
+
+        let mut files: Vec<_> = snapshot
+            .series_files
+            .iter()
+            .filter(|file| file.meta.min_timestamp < from)
+            .cloned()
+            .collect();
+        files.sort_by_key(|file| std::cmp::Reverse(file.meta.max_timestamp));
+        for file in files {
+            let baselines_complete = target_identities
+                .iter()
+                .all(|identity| baselines.contains_key(identity));
+            let baseline_safe = baselines_complete
+                && baselines
+                    .values()
+                    .all(|(point_at, _)| file.meta.max_timestamp < *point_at);
+            if baseline_safe {
+                break;
+            }
+            let context = session(&core);
+            let file_frame = context
+                .read_parquet(
+                    vec![file.path.to_string_lossy().into_owned()],
+                    ParquetReadOptions::default().schema(&series::schema()),
+                )
+                .await?
+                .filter(alert_scope(&request))?
+                .filter(col("timestamp").lt(timestamp(from)))?;
+            collect_alert_baselines(file_frame, &target_identities, &mut baselines).await?;
+        }
     }
 
-    let windows =
-        aggregate_alert_windows(window_frame, &request.windows_seconds, as_of, &baselines).await?;
+    let windows = aggregate_alert_windows(
+        window_frame,
+        &request.windows_seconds,
+        as_of,
+        &baselines,
+        request.need_increase,
+    )
+    .await?;
     Ok(AlertQueryResponse {
         as_of: format_timestamp(as_of),
         last_point_at: last_point.map(format_timestamp),
@@ -239,11 +264,72 @@ async fn collect_alert_identities(
     Ok((identities, last_point))
 }
 
+async fn latest_alert_timestamp(frame: DataFrame) -> Result<Option<i64>, QueryError> {
+    let mut stream = frame
+        .aggregate(vec![], vec![max(col("timestamp")).alias("timestamp")])?
+        .execute_stream()
+        .await?;
+    let Some(batch) = stream.try_next().await? else {
+        return Ok(None);
+    };
+    let timestamps = column::<TimestampNanosecondArray>(&batch, "timestamp")?;
+    Ok((batch.num_rows() > 0 && !timestamps.is_null(0)).then(|| timestamps.value(0)))
+}
+
+async fn metric_scope_has_points_before(
+    core: &Core,
+    snapshot: &Snapshot,
+    request: &AlertQueryRequest,
+    from: i64,
+) -> Result<bool, QueryError> {
+    let active_has_prior = snapshot.active.as_ref().is_some_and(|active| {
+        active.scoped.names.iter().any(
+            |((server, service, name, origin, environment), (first_seen, _))| {
+                server == &request.server
+                    && service == &request.service
+                    && name == &request.name
+                    && origin == request.origin.as_str()
+                    && request
+                        .environment
+                        .as_ref()
+                        .is_none_or(|selected| selected == environment)
+                    && *first_seen < from
+            },
+        )
+    });
+    if active_has_prior {
+        return Ok(true);
+    }
+
+    let journal = core.journal.clone();
+    let server = request.server.clone();
+    let service = request.service.clone();
+    let name = request.name.clone();
+    let origin = request.origin.as_str().to_owned();
+    let environment = request.environment.clone();
+    tokio::task::spawn_blocking(move || {
+        let catalog = journal
+            .catalog
+            .lock()
+            .map_err(|_| anyhow::anyhow!("catalog lock poisoned"))?;
+        let exists = catalog.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM scoped_series
+             WHERE server=?1 AND service=?2 AND name=?3 AND origin=?4
+               AND (?5 IS NULL OR environment=?5) AND first_seen<?6)",
+            rusqlite::params![server, service, name, origin, environment, from],
+            |row| row.get::<_, bool>(0),
+        )?;
+        anyhow::Result::<bool>::Ok(exists)
+    })
+    .await
+    .map_err(|error| QueryError::Storage(error.into()))?
+    .map_err(QueryError::Storage)
+}
+
 async fn collect_alert_baselines(
     frame: DataFrame,
     target_identities: &BTreeSet<Identity>,
     baselines: &mut BTreeMap<Identity, (i64, f64)>,
-    last_point: &mut Option<i64>,
 ) -> Result<(), QueryError> {
     let selected = dedup(frame)?.select([
         col("timestamp"),
@@ -264,7 +350,6 @@ async fn collect_alert_baselines(
         for row in 0..batch.num_rows() {
             let timestamp = timestamps.value(row);
             let identity = identity_at(&columns, row);
-            *last_point = Some(last_point.map_or(timestamp, |old| old.max(timestamp)));
             if target_identities.contains(&identity) {
                 baselines
                     .entry(identity)
@@ -330,6 +415,7 @@ async fn aggregate_alert_windows(
     windows: &[u64],
     end: i64,
     baselines: &BTreeMap<Identity, (i64, f64)>,
+    need_increase: bool,
 ) -> Result<Vec<AlertWindow>, QueryError> {
     let seconds: BTreeSet<_> = windows.iter().copied().collect();
     let starts: BTreeMap<_, _> = seconds
@@ -345,20 +431,20 @@ async fn aggregate_alert_windows(
         .iter()
         .map(|seconds| (*seconds, AlertWindowAccumulator::default()))
         .collect();
-    let selected = dedup(frame)?
-        .select([
-            col("timestamp"),
-            col("environment"),
-            col("server"),
-            col("backend"),
-            col("service_instance"),
-            col("origin"),
-            col("rule_id"),
-            col("labels"),
-            col("event_id"),
-            col("value"),
-        ])?
-        .sort(vec![
+    let mut selected = dedup(frame)?.select([
+        col("timestamp"),
+        col("environment"),
+        col("server"),
+        col("backend"),
+        col("service_instance"),
+        col("origin"),
+        col("rule_id"),
+        col("labels"),
+        col("event_id"),
+        col("value"),
+    ])?;
+    if need_increase {
+        selected = selected.sort(vec![
             col("environment").sort(true, false),
             col("server").sort(true, false),
             col("backend").sort(true, false),
@@ -369,28 +455,36 @@ async fn aggregate_alert_windows(
             col("timestamp").sort(true, false),
             col("event_id").sort(true, false),
         ])?;
+    }
     let mut stream = selected.execute_stream().await?;
     let mut current_identity: Option<Identity> = None;
     let mut previous = BTreeMap::<u64, Option<f64>>::new();
     while let Some(batch) = stream.try_next().await? {
         let timestamps = column::<TimestampNanosecondArray>(&batch, "timestamp")?;
         let values = column::<Float64Array>(&batch, "value")?;
-        let columns = identity_columns(&batch)?;
+        let columns = need_increase
+            .then(|| identity_columns(&batch))
+            .transpose()?;
         for row in 0..batch.num_rows() {
             let timestamp = timestamps.value(row);
             let value = values.value(row);
-            let identity = identity_at(&columns, row);
-            if current_identity.as_ref() != Some(&identity) {
-                previous = seconds
-                    .iter()
-                    .map(|seconds| (*seconds, baselines.get(&identity).map(|(_, value)| *value)))
-                    .collect();
-                current_identity = Some(identity);
+            if let Some(columns) = &columns {
+                let identity = identity_at(columns, row);
+                if current_identity.as_ref() != Some(&identity) {
+                    previous = seconds
+                        .iter()
+                        .map(|seconds| {
+                            (*seconds, baselines.get(&identity).map(|(_, value)| *value))
+                        })
+                        .collect();
+                    current_identity = Some(identity);
+                }
             }
             for seconds in &seconds {
-                let before = previous.get_mut(seconds).expect("all windows initialized");
                 if timestamp < starts[seconds] {
-                    *before = Some(value);
+                    if need_increase {
+                        *previous.get_mut(seconds).expect("all windows initialized") = Some(value);
+                    }
                     continue;
                 }
                 let total = totals.get_mut(seconds).expect("all windows initialized");
@@ -398,9 +492,12 @@ async fn aggregate_alert_windows(
                 total.sum += value;
                 total.min = Some(total.min.map_or(value, |old| old.min(value)));
                 total.max = Some(total.max.map_or(value, |old| old.max(value)));
-                total.increase +=
-                    before.map_or(0.0, |old| if value >= old { value - old } else { value });
-                *before = Some(value);
+                if need_increase {
+                    let before = previous.get_mut(seconds).expect("all windows initialized");
+                    total.increase +=
+                        before.map_or(0.0, |old| if value >= old { value - old } else { value });
+                    *before = Some(value);
+                }
             }
         }
     }
@@ -420,7 +517,7 @@ async fn aggregate_alert_windows(
                 avg: (total.count > 0).then(|| total.sum / total.count as f64),
                 min: total.min,
                 max: total.max,
-                increase: (total.count > 0).then_some(total.increase),
+                increase: (need_increase && total.count > 0).then_some(total.increase),
             })
         })
         .collect()

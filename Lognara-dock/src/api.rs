@@ -100,6 +100,8 @@ pub enum ApiError {
     Internal,
     /// Core недоступен или ответил неожиданно.
     CoreUnavailable,
+    TelegramUnavailable,
+    TelegramRateLimited(Duration),
     CursorExpired,
     QueryUnavailable,
     QueryTimeout,
@@ -198,6 +200,13 @@ impl IntoResponse for ApiError {
             }
             Self::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
             Self::CoreUnavailable => (StatusCode::BAD_GATEWAY, "core_unavailable"),
+            Self::TelegramUnavailable => (StatusCode::BAD_GATEWAY, "telegram_unavailable"),
+            Self::TelegramRateLimited(wait) => {
+                let body = Json(json!({ "error": "telegram_rate_limited" }));
+                let retry = (wait.as_secs() + 1).to_string();
+                return (StatusCode::TOO_MANY_REQUESTS, [(RETRY_AFTER, retry)], body)
+                    .into_response();
+            }
             Self::CursorExpired => (StatusCode::GONE, "cursor_expired"),
             Self::QueryUnavailable => (StatusCode::SERVICE_UNAVAILABLE, "query_unavailable"),
             Self::QueryTimeout => (StatusCode::GATEWAY_TIMEOUT, "query_timeout"),
