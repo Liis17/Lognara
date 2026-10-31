@@ -252,24 +252,27 @@ test('tree distinguishes initial loading, registry failure, empty registry, and 
   const pending = new Promise<void>(resolve => { release = resolve; });
   const partial = { ...response, core: { status: 'unavailable', version: null, visibility_lag_ms: null, wal_bytes: null, wal_limit_bytes: null }, storage: null, registry: false, nodes: [] };
   const empty = { ...response, registry: true, nodes: [] };
+  let snapshot: 'initial-error' | 'partial' | 'empty' = 'initial-error';
   let requests = 0;
   await page.route('**/api/**', async route => {
     const path = new URL(route.request().url()).pathname;
     if (path === '/api/me') return route.fulfill({ json: { username: 'liis', passkeys: 0 } });
     if (path === '/api/infrastructure') {
+      const requestSnapshot = snapshot;
       requests++;
-      if (requests <= 2) { await pending; return route.fulfill({ status: 502, json: { error: 'core_unavailable' } }); }
-      return route.fulfill({ json: requests === 3 ? partial : empty });
+      if (requestSnapshot === 'initial-error') { await pending; return route.fulfill({ status: 502, json: { error: 'core_unavailable' } }); }
+      return route.fulfill({ json: requestSnapshot === 'partial' ? partial : empty });
     }
     return route.fulfill({ status: 404, json: { error: 'not_found' } });
   });
   await page.goto('/infrastructure/tree');
   await expect(page.getByRole('heading', { name: 'Дерево инфраструктуры' })).toBeVisible();
-  await expect.poll(() => requests).toBe(2);
+  await expect.poll(() => requests).toBeGreaterThan(0);
   await expect(page.getByRole('status')).toContainText('Загружаем дерево инфраструктуры');
   release();
   await expect(page.getByRole('alert')).toContainText('Снимок ещё не получен');
   await expect(page.getByText('Данные инфраструктуры пока недоступны.')).toBeVisible();
+  snapshot = 'partial';
   await page.getByRole('button', { name: 'Обновить' }).click();
   await expect(page.getByRole('alert')).toContainText('список узлов из Core');
   await expect(page.getByRole('link', { name: 'Управление подключениями' })).toHaveAttribute('href', '/access');
@@ -277,6 +280,7 @@ test('tree distinguishes initial loading, registry failure, empty registry, and 
   await expect(page.locator('[data-infra-node-key="dock"]')).toContainText('Онлайн');
   await expect(page.locator('[data-infra-node-key^="agent-"]')).toHaveCount(0);
 
+  snapshot = 'empty';
   await page.getByRole('button', { name: /^Обновлено/ }).click();
   await expect(page.getByText('Нет зарегистрированных relay и агентов.')).toBeVisible();
   await expect(page.locator('[data-infra-node-key="core"]')).toContainText('Онлайн');
