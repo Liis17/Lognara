@@ -82,7 +82,7 @@ volumes:
 
 ## Разбор записей в события
 
-Для каждой записи: `id` — новый UUIDv7, `timestamp` и `ingested_at` — `received_at` агента (Unix-время в наносекундах), `level` — `unknown`.
+Для каждой записи: `id` — новый UUIDv7, `timestamp` и `ingested_at` — `received_at` агента (Unix-время в наносекундах). `level` берётся из JSON-поля `level`; для текстовой записи — только из префикса строки nginx error_log (`YYYY/MM/DD HH:MM:SS [lvl] ` или `nginx: [lvl] `): `debug`, `info`/`notice`, `warn`, `error`, `crit`/`alert`/`emerg` (последние три → `fatal`). Иначе `unknown`. Разбор в `normalize::nginx_level`, `[error]` в другом месте строки уровень не задаёт.
 
 | Payload | Результат |
 |---|---|

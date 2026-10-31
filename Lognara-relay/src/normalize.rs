@@ -78,7 +78,10 @@ pub fn event(record: Record) -> Event {
         attributes: HashMap::new(),
     };
     match record.payload {
-        Payload::Text(text) => event.message = text,
+        Payload::Text(text) => {
+            event.level = nginx_level(&text).unwrap_or(LogLevel::Unknown);
+            event.message = text;
+        }
         Payload::Binary(bytes) => {
             event.message = format!("binary payload, {} bytes", bytes.len());
             event
@@ -182,6 +185,39 @@ fn level(text: &str) -> Option<LogLevel> {
         "fatal" | "critical" => LogLevel::Fatal,
         _ => return None,
     })
+}
+
+/// Уровень из префикса строки nginx error_log: `YYYY/MM/DD HH:MM:SS [lvl] ` или `nginx: [lvl] `.
+/// Без regex и аллокаций; `[error]` в другом месте строки уровень не задаёт.
+fn nginx_level(text: &str) -> Option<LogLevel> {
+    let rest = text
+        .strip_prefix("nginx: ")
+        .or_else(|| nginx_timestamp_rest(text))?;
+    let rest = rest.strip_prefix('[')?;
+    let name = rest.get(..rest.bytes().take(7).position(|b| b == b']')?)?;
+    if !rest[name.len()..].starts_with("] ") {
+        return None;
+    }
+    Some(match name {
+        "debug" => LogLevel::Debug,
+        "info" | "notice" => LogLevel::Info,
+        "warn" => LogLevel::Warn,
+        "error" => LogLevel::Error,
+        "crit" | "alert" | "emerg" => LogLevel::Fatal,
+        _ => return None,
+    })
+}
+
+/// Часть строки после метки времени nginx `YYYY/MM/DD HH:MM:SS ` (20 байт, все позиции проверяются).
+fn nginx_timestamp_rest(text: &str) -> Option<&str> {
+    let prefix = text.as_bytes().get(..20)?;
+    let shaped = prefix.iter().enumerate().all(|(i, &b)| match i {
+        4 | 7 => b == b'/',
+        10 | 19 => b == b' ',
+        13 | 16 => b == b':',
+        _ => b.is_ascii_digit(),
+    });
+    shaped.then(|| &text[20..])
 }
 
 /// Ровно `2 * N` hex-символов в `N` байт.
@@ -415,6 +451,52 @@ mod tests {
         assert_eq!(event.timestamp, RECEIVED_AT);
         assert_eq!(event.ingested_at, RECEIVED_AT);
         assert!(event.attributes.is_empty());
+    }
+
+    #[test]
+    fn nginx_error_log_lines_get_level() {
+        for (line, level) in [
+            (
+                "2026/10/31 14:50:00 [emerg] 13#13: host not found in upstream \"mywebpage:5554\" in /etc/nginx/conf.d/default.conf:6",
+                LogLevel::Fatal,
+            ),
+            (
+                "nginx: [emerg] host not found in upstream \"mywebpage:5554\" in /etc/nginx/conf.d/default.conf:6",
+                LogLevel::Fatal,
+            ),
+            (
+                "2026/10/31 14:41:39 [error] 35#35: *74182 connect() failed (113: No route to host) while connecting to upstream",
+                LogLevel::Error,
+            ),
+            ("2026/10/31 14:00:00 [warn] 1#1: something", LogLevel::Warn),
+            (
+                "2026/10/31 14:00:00 [notice] 1#1: nginx/1.31.2",
+                LogLevel::Info,
+            ),
+        ] {
+            let event = event(record(Payload::Text(line.into())));
+            assert_eq!(event.level, level, "{line}");
+            assert_eq!(event.message, line);
+        }
+    }
+
+    #[test]
+    fn nginx_level_needs_the_error_log_prefix() {
+        for line in [
+            r#"91.197.3.120 - - [31/Oct/2026:14:59:25 +0000] "GET /wp-includes/class-wp-html-error.php HTTP/1.1" 301 169 "-" "-""#,
+            r#"172.22.0.1 - - [31/Oct/2026:14:59:40 +0000] "GET /_error/404 HTTP/1.1" 404 64 "-" "-""#,
+            "2026/10/31 14:41:39 [foo] 35#35: unknown level name",
+            "2026-10-31 14:41:39 [error] wrong date shape",
+            "[error] no timestamp",
+            "nginxx: [error] wrong prefix",
+            "plain line",
+        ] {
+            assert_eq!(
+                event(record(Payload::Text(line.into()))).level,
+                LogLevel::Unknown,
+                "{line}"
+            );
+        }
     }
 
     #[test]
