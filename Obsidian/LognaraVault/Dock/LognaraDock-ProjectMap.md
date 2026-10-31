@@ -27,7 +27,7 @@ Lognara-dock/
     access.rs                 /api/relays, /api/agents: сессия и proxy admin core
     account.rs                /api/me, смена пароля, check_current_password
     passkey.rs                Webauthn, Challenges, вход и регистрация, список, удаление
-    infra.rs                  авторизованная сводка core/dock/узлов, свежесть и пороги
+    infra.rs                  авторизованная сводка core/dock/узлов, relay_id, свежесть и пороги
     query.rs                  typed DTO и авторизованные proxy search/trace/histogram/group-by/summary
     core_client.rs            клиент core: история/Trace/аналитика/паттерны/ошибки/status, серии/определения, admin CRUD; таймаут запросов 35 с
     series.rs                 /api/series*: прокси каталога/lookup/графиков и редактирования, API общего избранного
@@ -42,7 +42,7 @@ Lognara-dock/
     query.rs                  query Bearer, DTO/cursor, Origin/сессия, no-store, ошибки, timeout
     patterns.rs               скрытие по пользователю, лимит 1000, exclude_patterns, ошибки паттернов
     issues.rs                 общий статус, история, Origin, проверка ответов core, наблюдатель
-    infra.rs                  session/no-store, частичные ошибки, TTL/idle/spool и relay_silent
+    infra.rs                  session/no-store, частичные ошибки, TTL/idle/spool, relay_id и relay_silent
     series.rs                 proxy метрик, ошибки core, сессия, Origin и таймаут 35 с
     static.rs                 SPA fallback и 404 для /api
   web/
@@ -57,12 +57,16 @@ Lognara-dock/
     src/components/PeriodChips.tsx границы периода, часовой пояс и момент снимка
     src/components/Patterns.tsx  режим паттернов: таблица, sparkline, детали, скрытие, переход к событиям
     src/webauthn.ts           base64url ↔ ArrayBuffer для navigator.credentials
-    src/App.tsx               проверка /api/me, верхняя панель и lazy routes включая `/mcp-access` и OAuth consent
+    src/App.tsx               проверка /api/me, верхняя панель и lazy routes включая дерево инфраструктуры, `/mcp-access` и OAuth consent
     src/pages/Login.tsx       пароль, показ пароля, кнопка passkey и анимированный фон
     src/pages/Logs.tsx        история/cursor/Trace, URL, автодогрузка, отдельный Live, детали, экспорт
     src/pages/Errors.tsx      проблемы: вкладки статусов, stack trace, история, решение и переходы
     src/pages/Analytics.tsx   единая сводка, stacked levels, p95/coverage/actions, сравнение и переход в логи
-    src/pages/Infrastructure.tsx цепочка, узлы и диск, последовательный polling и stale-снимок
+    src/pages/Infrastructure.tsx цепочка, узлы и диск, кнопка перехода к дереву
+    src/pages/InfrastructureTree.tsx lazy-страница дерева, выбор пути, sticky-подсказка и измерение карточек
+    src/infraTree.ts            чистая группировка по ID, геометрия и правила выбора дерева
+    src/infraPresentation.ts    общие подписи статусов, времени, размеров и групп
+    src/useInfrastructure.ts    общий опрос сводки, отмена, 401 и stale-снимок
     src/pages/Access.tsx      профили relay/агентов, создание, одноразовый токен, удаление
     src/pages/McpAccess.tsx   MCP URL, одноразовый PAT, срок/last-use и отзыв PAT/grants
     src/pages/OAuthConsent.tsx OAuth client/scope/resource и подтверждение пользователя
@@ -70,12 +74,13 @@ Lognara-dock/
     src/pages/MetricDetail.tsx отдельная страница метрики с серверной областью
     src/pages/MetricCreate.tsx модалка создания, импорт JSON, конфликты и nginx
     src/metricBundles.ts      переносимые наборы, примеры и шаблоны nginx
+    src/infraTree.test.ts     группировка, orphan, геометрия и связанные пути
     src/pages/MetricEditor.tsx определение метрики, предпросмотр regex, сохранение и удаление
     src/components/Chart.tsx  uPlot с цветами осей из общей тёмной палитры
     src/pages/Settings.tsx    смена пароля, список и добавление passkey
     playwright.config.ts     Chromium, Vite webServer и сценарии tests/dock.spec.ts и tests/errors.spec.ts
     tests/metrics.spec.ts     окружения/разбиение, regex preview/save, навигация и mobile
-    tests/infrastructure.spec.ts состояния/переходы, polling/error recovery, mobile и overflow
+    tests/infrastructure.spec.ts сводка и дерево: навигация, выбор, polling, ошибка, mobile и 500 узлов
     tests/mcp-access.spec.ts выпуск/копирование PAT, отсутствие localStorage, expiry/revoke, OAuth consent и возврат после login
     tests/dock.spec.ts        вход, аккаунт, поиск, cursor, Trace/ссылка, аналитика, Live, mobile
 ```

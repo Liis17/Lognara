@@ -1,47 +1,13 @@
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type ReactNode } from "react";
 import { Link } from "react-router";
-import { api, ApiError, errorText } from "../api";
 import { sourceQuery } from "../logs";
-import type { InfraNode, InfraStorage, InfrastructureResponse, NodeStatus } from "../types";
+import { age, bytes, corePresentation, groupChip, percent, plural, REASON, STATUS } from "../infraPresentation";
+import { useInfrastructure } from "../useInfrastructure";
+import type { InfraNode, InfraStorage } from "../types";
 
-const REFRESH_MS = 10_000;
 const number = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 1 });
 const clock = new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 const day = new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "short" });
-const STATUS: Record<NodeStatus, { label: string; tone: string }> = {
-  offline: { label: "Отключён", tone: "err" }, degraded: { label: "Деградирован", tone: "warn" },
-  unknown: { label: "Нет данных", tone: "mute" }, idle: { label: "Нет новых логов", tone: "mute" },
-  online: { label: "Онлайн", tone: "ok" },
-};
-const REASON: Record<string, string> = {
-  no_heartbeat: "heartbeat ещё не приходил", relay_silent: "relay агента не на связи",
-  spool: "спул заполнен", delivery: "ошибки доставки",
-};
-
-function plural(count: number, forms: [string, string, string]): string {
-  const tens = count % 100, ones = count % 10;
-  return tens >= 11 && tens <= 14 ? forms[2] : ones === 1 ? forms[0] : ones >= 2 && ones <= 4 ? forms[1] : forms[2];
-}
-
-function bytes(value: number): string {
-  const units = ["Б", "КБ", "МБ", "ГБ", "ТБ"];
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit += 1; }
-  return `${number.format(value)} ${units[unit]}`;
-}
-
-/** Возраст отметки по часам core. */
-function age(value: string | null, asOf: string): string {
-  if (!value) return "—";
-  const seconds = Math.max(0, (Date.parse(asOf) - Date.parse(value)) / 1000);
-  if (seconds < 1) return "<1 с";
-  if (seconds < 60) return `${Math.floor(seconds)} с`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)} мин`;
-  if (seconds < 86_400) return `${Math.floor(seconds / 3600)} ч`;
-  return `${Math.floor(seconds / 86_400)} д`;
-}
-
-const percent = (spool: InfraNode["spool"]) => spool && spool.limit_bytes > 0 ? Math.min(100, Math.round(spool.used_bytes * 100 / spool.limit_bytes)) : null;
 
 function Meter({ value, hot }: { value: number; hot: boolean }) {
   return <span className="meter" aria-hidden="true"><i className={hot ? "hot" : undefined} style={{ width: `${value}%` }} /></span>;
@@ -60,15 +26,6 @@ function SpoolLine({ nodes, warn }: { nodes: InfraNode[]; warn: number }) {
     <div className="stage-sub">спул макс. {fullest.value}% · {fullest.node.name}</div>
     <Meter value={fullest.value} hot={fullest.value >= warn} />
   </>;
-}
-
-function groupChip(nodes: InfraNode[]): { tone: string; text: string } {
-  const count = (status: NodeStatus) => nodes.filter((node) => node.status === status).length;
-  if (!nodes.length) return { tone: "mute", text: "Нет узлов" };
-  if (count("offline")) return { tone: "err", text: `${count("offline")} отключено` };
-  if (count("degraded")) return { tone: "warn", text: `${count("degraded")} деградировано` };
-  if (count("unknown")) return { tone: "mute", text: `${count("unknown")} без данных` };
-  return { tone: "ok", text: "Онлайн" };
 }
 
 function Storage({ storage, wal }: { storage: InfraStorage; wal: number }) {
@@ -95,31 +52,7 @@ function Storage({ storage, wal }: { storage: InfraStorage; wal: number }) {
 }
 
 export default function Infrastructure({ onUnauthorized }: { onUnauthorized: () => void }) {
-  const [data, setData] = useState<InfrastructureResponse | null>(null);
-  const [loadedAt, setLoadedAt] = useState<Date | null>(null);
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(true);
-  const [reload, setReload] = useState(0);
-  const unauthorized = useRef(onUnauthorized); unauthorized.current = onUnauthorized;
-
-  useEffect(() => {
-    const controller = new AbortController();
-    setLoading(true);
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    api<InfrastructureResponse>("GET", "/api/infrastructure", undefined, { signal: controller.signal })
-      .then((response) => { if (!controller.signal.aborted) { setData(response); setLoadedAt(new Date()); setError(""); } })
-      .catch((cause) => {
-        if (controller.signal.aborted) return;
-        if (cause instanceof ApiError && cause.status === 401) unauthorized.current(); else setError(errorText(cause));
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) {
-          setLoading(false);
-          timer = setTimeout(() => setReload((value) => value + 1), REFRESH_MS);
-        }
-      });
-    return () => { controller.abort(); clearTimeout(timer); };
-  }, [reload]);
+  const { data, loadedAt, error, loading, refresh } = useInfrastructure(onUnauthorized);
 
   const nodes = data?.nodes ?? [];
   const agents = nodes.filter((node) => node.kind === "agent");
@@ -128,7 +61,7 @@ export default function Infrastructure({ onUnauthorized }: { onUnauthorized: () 
   const fresh = (list: InfraNode[]) => list.filter((node) => node.status !== "offline" && node.status !== "unknown");
   const warn = data?.thresholds.spool_warn_percent ?? 80;
   const core = data?.core;
-  const coreChip = core?.status === "online" ? { tone: "ok", text: "Онлайн" } : core?.status === "not_ready" ? { tone: "warn", text: "Не готов" } : { tone: "err", text: "Недоступен" };
+  const coreChip = corePresentation(core?.status);
   const walShare = core?.wal_bytes != null && core.wal_limit_bytes ? Math.min(100, Math.round(core.wal_bytes * 100 / core.wal_limit_bytes)) : null;
   const rates = fresh(relays).flatMap((node) => node.events_per_second === null ? [] : [node.events_per_second]);
   const rate = rates.length ? rates.reduce((sum, value) => sum + value, 0) : null;
@@ -149,8 +82,9 @@ export default function Infrastructure({ onUnauthorized }: { onUnauthorized: () 
         <p className="muted">Agent → Relay → Core → Dock{core?.visibility_lag_ms != null ? ` · lag публикации в Core ${number.format(core.visibility_lag_ms / 1000)} с` : ""}</p>
       </div>
       <div className="infra-actions">
+        <Link className="button" to="/infrastructure/tree">Дерево инфраструктуры</Link>
         <Link className="button" to="/access">Управление подключениями</Link>
-        <button type="button" className="button" disabled={loading} onClick={() => setReload((value) => value + 1)}>
+        <button type="button" className="button" disabled={loading} onClick={refresh}>
           {loadedAt ? `Обновлено ${clock.format(loadedAt)}` : "Обновить"}</button>
       </div>
     </div>
