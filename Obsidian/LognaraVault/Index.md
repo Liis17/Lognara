@@ -25,14 +25,14 @@ Lognara — система сбора логов: агент в контейне
 ### Core
 | Файл | Компонент | Описание |
 |------|-----------|----------|
-| [[Core/LognaraCore]] | lognara-core | Реестр relay/агентов, admin API, хранилище, поиск, аналитика, источники логов, версии сборки, паттерны, проблемы, heartbeat и API метрик. |
+| [[Core/LognaraCore]] | lognara-core | Реестр relay/агентов, admin API, хранилище, поиск, аналитика, источники логов, версии сборки, паттерны, проблемы, heartbeat, графики метрик и raw endpoint алертов. |
 | [[Core/LognaraCore-ProjectMap]] | lognara-core | Модули, конвейер и тесты. |
 
 ### Dock
 
 | Файл | Компонент | Описание |
 |------|-----------|----------|
-| [[Dock/LognaraDock]] | lognara-dock | Веб-интерфейс за nginx и read-only remote MCP: вход/passkey, PAT и OAuth grants, история/cursor/Trace, аналитика и метрики; MCP по умолчанию выключен и не использует cookie браузера. |
+| [[Dock/LognaraDock]] | lognara-dock | Веб-интерфейс за nginx и read-only remote MCP: вход/passkey, PAT/OAuth, история, аналитика, метрики и Telegram-алерты; MCP по умолчанию выключен и не использует cookie браузера. |
 | [[Dock/LognaraDock-ProjectMap]] | lognara-dock | Дерево файлов Rust и React, связи модулей и тесты. |
 | [[Dock/DesignIntegration]] | развитие dock | Полный план шести HTML-дизайнов; этапы 0–6 реализованы, дальнейшие backend-этапы и решения пользователя. |
 
@@ -47,7 +47,7 @@ Lognara — система сбора логов: агент в контейне
 | Файл | Компонент | Описание |
 |------|-----------|----------|
 | [[Design/LongTermStorage]] | lognara-core | Принятое, но не реализованное решение: хранение логов без удаления, compaction, сводки сегментов, горячее и холодное хранилище. |
-| [[Design/Metrics]] | lognara-core, lognara-dock | Реализовано 2026-10-14: встроенный формат `ServiceMetrics`, правила с регулярным выражением из dock, хранилище точек, суточные агрегаты (rollups), графики с фильтром окружения; без пересчёта истории. Отличия от проекта перечислены в заметке. |
+| [[Design/Metrics]] | lognara-core, lognara-dock | Встроенный формат `ServiceMetrics`, regex-правила, raw points, rollups, графики и Telegram-алерты; без пересчёта истории. Отличия и rollout описаны в заметке. |
 
 ### Repository
 
