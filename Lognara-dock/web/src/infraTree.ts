@@ -213,6 +213,18 @@ function agentCount(count: number): string {
   return `${count} ${noun}`;
 }
 
+function relayGroupCount(count: number): string {
+  const tens = count % 100, ones = count % 10;
+  const noun = tens >= 11 && tens <= 14 ? "relay-групп" : ones === 1 ? "relay-группа" : ones >= 2 && ones <= 4 ? "relay-группы" : "relay-групп";
+  return `${count} ${noun}`;
+}
+
+function connectedGroupSummary(groups: InfraTreeGroup[]): string {
+  const connected = groups.filter((group) => !group.orphan && group.relay !== null);
+  const connectedAgents = connected.reduce((count, group) => count + group.agents.length, 0);
+  return `${relayGroupCount(connected.length)}, ${agentCount(connectedAgents)} в них`;
+}
+
 export function infrastructureTreeSelectionText(selection: string | null, groups: InfraTreeGroup[]): string {
   if (!selection) return "Выберите карточку, чтобы увидеть её группу и путь.";
   for (const group of groups) {
@@ -228,7 +240,7 @@ export function infrastructureTreeSelectionText(selection: string | null, groups
       return `Агент ${agent.name} (#${agent.id}) → Relay ${group.relay.name} (#${group.relay.id}) → Core → Dock`;
     }
   }
-  if (selection === "core") return "Core → Dock; выше показаны только зарегистрированные связи relay и агентов.";
-  if (selection === "dock") return "Все зарегистрированные relay и их агенты → Core → Dock.";
+  if (selection === "core") return `Core → Dock; выше показаны только зарегистрированные связи: ${connectedGroupSummary(groups)}.`;
+  if (selection === "dock") return `Все зарегистрированные relay и их агенты: ${connectedGroupSummary(groups)} → Core → Dock.`;
   return "Выберите карточку, чтобы увидеть её группу и путь.";
 }

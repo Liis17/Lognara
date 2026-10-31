@@ -149,6 +149,16 @@ test('tree navigation keeps infrastructure active, supports direct route, back, 
   await expect.poll(() => requests).toBe(beforeRefresh + 1);
 });
 
+test('tree relay cards show failures since start and keep null as no data', async ({ page }) => {
+  await fixture(page, { ...response, nodes: [
+    node('relay', 1, 'relay-with-failures', 'online', { delivery_failures: 17 }),
+    node('relay', 2, 'relay-without-count', 'online', { delivery_failures: null }),
+  ] });
+  await page.goto('/infrastructure/tree');
+  await expect(page.locator('[data-infra-node-key="relay-1"]')).toContainText('сбоев доставки с запуска 17');
+  await expect(page.locator('[data-infra-node-key="relay-2"]')).toContainText('сбоев доставки с запуска нет данных');
+});
+
 test('tree cards select paths with pointer and keyboard; Escape remains available to logout dialog', async ({ page }) => {
   await fixture(page, response);
   await page.goto('/infrastructure/tree');

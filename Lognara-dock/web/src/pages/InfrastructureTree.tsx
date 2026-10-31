@@ -53,6 +53,7 @@ const RelayButton = memo(function RelayButton({
     <span className="infra-tree-node-head"><strong>{node.name}</strong><Chip tone={status.tone}>{status.label}</Chip></span>
     <span className="infra-tree-node-sub">relay #{node.id} · {agents.length} {plural(agents.length, ["агент", "агента", "агентов"])}</span>
     <span className="infra-tree-node-sub">{node.events_per_second == null ? "скорость: нет данных" : `${number.format(node.events_per_second)} событий/с`}</span>
+    <span className="infra-tree-node-sub">сбоев доставки с запуска {node.delivery_failures == null ? "нет данных" : number.format(node.delivery_failures)}</span>
   </button>;
 });
 

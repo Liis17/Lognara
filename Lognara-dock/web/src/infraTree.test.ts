@@ -77,6 +77,8 @@ test("selection follows IDs through agents, relay descendants, core, and dock", 
   assert.deepEqual([...selectedInfrastructureTreeKeys("core", groups)].sort(), ["agent-2", "agent-7", "core", "dock", "relay-7", "relay-8"]);
   assert.deepEqual([...selectedInfrastructureTreeKeys("dock", groups)], [...selectedInfrastructureTreeKeys("core", groups)]);
   assert.match(infrastructureTreeSelectionText("relay-7", groups), /Relay duplicate \(#7\), 1 агент/);
+  assert.equal(infrastructureTreeSelectionText("core", groups), "Core → Dock; выше показаны только зарегистрированные связи: 2 relay-группы, 2 агента в них.");
+  assert.equal(infrastructureTreeSelectionText("dock", groups), "Все зарегистрированные relay и их агенты: 2 relay-группы, 2 агента в них → Core → Dock.");
 });
 
 test("edge endpoints align with measured card edges and centers", () => {
