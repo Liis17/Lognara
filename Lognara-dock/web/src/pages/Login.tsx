@@ -85,7 +85,7 @@ export default function Login({ onLogin }: { onLogin: () => Promise<void> }) {
           <img src="/favicon.png" alt="" width="44" height="44" />
           <div>
             <h1>Lognara</h1>
-            <p>Система сборки логов</p>
+            <p>Система сбора логов</p>
           </div>
         </header>
 
