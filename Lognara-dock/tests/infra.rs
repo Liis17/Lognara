@@ -106,6 +106,7 @@ async fn nodes_get_distinct_states_from_heartbeat_age_spool_and_delivery() {
             agent(6, "offline", 1, Some((90, 95, 4, (95, None)))),
             agent(7, "silent", 1, None),
             agent(8, "behind-offline-relay", 2, Some((130, 130, 4, (130, None)))),
+            agent(9, "missing-relay", 99, Some((3, 2, 4, (2, None)))),
         ]}),
     );
     let get = || {
@@ -170,9 +171,33 @@ async fn nodes_get_distinct_states_from_heartbeat_age_spool_and_delivery() {
         .iter()
         .find(|node| node["name"] == "online")
         .unwrap();
+    assert_eq!(online["relay_id"], 1);
     assert_eq!(online["relay"], "relay-eu-1");
     assert_eq!(online["source"]["server"], "online");
     assert_eq!(online["heartbeat_at"], ago(3));
+    let silent = body["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["name"] == "silent")
+        .unwrap();
+    assert_eq!(silent["relay_id"], 1);
+    assert_eq!(silent["relay"], "relay-eu-1");
+    let missing_relay = body["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["name"] == "missing-relay")
+        .unwrap();
+    assert_eq!(missing_relay["relay_id"], 99);
+    assert!(missing_relay["relay"].is_null());
+    let relay = body["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["kind"] == "relay")
+        .unwrap();
+    assert!(relay["relay_id"].is_null());
     assert_eq!(body["as_of"], NOW);
     assert_eq!(body["registry"], true);
     assert_eq!(

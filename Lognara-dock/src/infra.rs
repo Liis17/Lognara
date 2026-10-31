@@ -127,6 +127,8 @@ pub struct Node {
     pub kind: &'static str,
     pub id: i64,
     pub name: String,
+    /// ID relay из реестра Core для агента; у relay всегда `None`.
+    pub relay_id: Option<i64>,
     /// Relay агента.
     pub relay: Option<String>,
     pub status: NodeStatus,
@@ -245,7 +247,7 @@ fn nodes(now: OffsetDateTime, relays: Vec<Relay>, agents: Vec<Agent>) -> Vec<Nod
         .into_iter()
         .map(|relay| {
             let Some(beat) = relay.heartbeat else {
-                return silent("relay", relay.id, relay.name, None);
+                return silent("relay", relay.id, relay.name, None, None);
             };
             let (status, reason) = assess(
                 now,
@@ -261,6 +263,7 @@ fn nodes(now: OffsetDateTime, relays: Vec<Relay>, agents: Vec<Agent>) -> Vec<Nod
                 kind: "relay",
                 id: relay.id,
                 name: relay.name,
+                relay_id: None,
                 relay: None,
                 status,
                 reason,
@@ -281,7 +284,13 @@ fn nodes(now: OffsetDateTime, relays: Vec<Relay>, agents: Vec<Agent>) -> Vec<Nod
             .map(|node| (node.name.clone(), node.status));
         let relay_name = relay.as_ref().map(|(name, _)| name.clone());
         let Some(beat) = agent.heartbeat else {
-            nodes.push(silent("agent", agent.id, agent.name, relay_name));
+            nodes.push(silent(
+                "agent",
+                agent.id,
+                agent.name,
+                Some(agent.relay_id),
+                relay_name,
+            ));
             continue;
         };
         let (mut status, mut reason) = assess(
@@ -306,6 +315,7 @@ fn nodes(now: OffsetDateTime, relays: Vec<Relay>, agents: Vec<Agent>) -> Vec<Nod
             kind: "agent",
             id: agent.id,
             name: agent.name,
+            relay_id: Some(agent.relay_id),
             relay: relay_name,
             status,
             reason,
@@ -322,11 +332,18 @@ fn nodes(now: OffsetDateTime, relays: Vec<Relay>, agents: Vec<Agent>) -> Vec<Nod
     nodes
 }
 
-fn silent(kind: &'static str, id: i64, name: String, relay: Option<String>) -> Node {
+fn silent(
+    kind: &'static str,
+    id: i64,
+    name: String,
+    relay_id: Option<i64>,
+    relay: Option<String>,
+) -> Node {
     Node {
         kind,
         id,
         name,
+        relay_id,
         relay,
         status: NodeStatus::Unknown,
         reason: Some("no_heartbeat"),
