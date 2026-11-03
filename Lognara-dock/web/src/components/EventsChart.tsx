@@ -10,6 +10,8 @@ const clock = new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-dig
 const stamp = new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
 
 interface Props {
+  hidden: ReadonlySet<LogLevel>;
+  onToggleLevel: (level: LogLevel) => void;
   buckets: HistogramBucket[];
   intervalSeconds: number;
   loading: boolean;
@@ -24,10 +26,9 @@ interface Props {
 
 interface Drag { x0: number; y0: number; x1: number; y1: number; width: number; height: number; start: number; visible: number }
 
-/** Гистограмма событий: выделение интервалов мышью или пальцем, масштаб колесом, фильтр уровней только для графика. */
-export default function EventsChart({ buckets, intervalSeconds, loading, aside, caption, selection, onSelect, onReset }: Props) {
+/** Гистограмма событий: выделение интервалов мышью или пальцем, масштаб колесом, общий фильтр уровней графика и ленты. */
+export default function EventsChart({ hidden, onToggleLevel, buckets, intervalSeconds, loading, aside, caption, selection, onSelect, onReset }: Props) {
   const plot = useRef<HTMLDivElement>(null);
-  const [hidden, setHidden] = useState<ReadonlySet<LogLevel>>(new Set());
   const [zoom, setZoom] = useState(1);
   const [start, setStart] = useState(0);
   const [drag, setDrag] = useState<Drag | null>(null);
@@ -99,11 +100,6 @@ export default function EventsChart({ buckets, intervalSeconds, loading, aside, 
     setDrag(null);
     select(dragRange[0], Math.abs(drag.x1 - drag.x0) < 4 ? dragRange[0] : dragRange[1]);
   };
-  const toggle = (level: LogLevel) => setHidden((current) => {
-    const next = new Set(current);
-    if (!next.delete(level)) next.add(level);
-    return next;
-  });
   const bucketText = (bucket: HistogramBucket) => {
     const time = Date.parse(bucket.timestamp);
     return `${stamp.format(new Date(time))} – ${stamp.format(new Date(time + intervalMillis))}: ${number.format(bucket.count)} событий` +
@@ -113,8 +109,8 @@ export default function EventsChart({ buckets, intervalSeconds, loading, aside, 
   return <section className="panel events-chart histogram" aria-labelledby="events-chart-title" aria-busy={loading}>
     <div className="events-chart-head">
       <h2 id="events-chart-title">События по времени</h2>
-      {stacked ? <div className="level-toggles" role="group" aria-label="Уровни на графике">{LOG_LEVELS.map((level) =>
-        <button key={level} type="button" className={`level-${level}`} aria-pressed={!hidden.has(level)} onClick={() => toggle(level)}>
+      {stacked ? <div className="level-toggles" role="group" aria-label="Уровни графика и ленты">{LOG_LEVELS.map((level) =>
+        <button key={level} type="button" className={`level-${level}`} aria-pressed={!hidden.has(level)} onClick={() => onToggleLevel(level)}>
           <i aria-hidden="true" />{level.toUpperCase()}
         </button>)}</div> : aside}
     </div>

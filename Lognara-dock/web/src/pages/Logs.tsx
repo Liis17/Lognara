@@ -7,7 +7,7 @@ import PeriodChips from "../components/PeriodChips";
 import { appendHistory, contextBounds, eventBounds, eventsToCsv, LOG_LEVELS, matchesQuery, MAX_LIVE_ROWS,
   parseQuery, prependLive, sourceQuery } from "../logs";
 import type { ParsedQuery } from "../logs";
-import type { HistogramResponse, LogEvent, SearchRequest, SearchResponse, SummaryResponse } from "../types";
+import type { HistogramResponse, LogEvent, LogLevel, SearchRequest, SearchResponse, SummaryResponse } from "../types";
 
 const RANGES = { "1h": 3_600_000, "24h": 86_400_000, "7d": 604_800_000 };
 type Range = keyof typeof RANGES;
@@ -116,7 +116,14 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
   const upperMillis = Date.parse(location.to) + (/[1-9]/.test(toFraction.slice(3)) ? 1 : 0);
   const bucketCount = Math.ceil(upperMillis / intervalMillis) - Math.floor(Date.parse(location.from) / intervalMillis);
   const summaryUnavailable = location.view === "events" && bucketCount > 10000;
+  const [hiddenLevels, setHiddenLevels] = useState<ReadonlySet<LogLevel>>(new Set());
+  const toggleLevel = (level: LogLevel) => setHiddenLevels((current) => {
+    const next = new Set(current);
+    if (!next.delete(level)) next.add(level);
+    return next;
+  });
   const rows = liveEnabled ? liveRows : page.events;
+  const visibleCount = rows.filter((event) => !hiddenLevels.has(event.level)).length;
   const selectedIndex = rows.reduce<number[]>((indices, event, index) => {
     if (event.id === location.selected && (!location.selectedTimestamp || event.timestamp === location.selectedTimestamp)) indices.push(index);
     return indices;
@@ -431,6 +438,7 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
       Сводка недоступна для такого длинного диапазона, сузьте период. Показаны только загруженные строки.
     </p>}
     {!liveEnabled && !parsed.error && !summaryUnavailable && <EventsChart buckets={chart?.buckets ?? []}
+      hidden={hiddenLevels} onToggleLevel={toggleLevel}
       loading={location.view === "events" ? loading : histogramLoading} intervalSeconds={intervalSeconds}
       aside={<span className="muted">Шаг {Math.round(intervalSeconds / 60 * 10) / 10} мин</span>}
       caption={chart ? location.view === "events"
@@ -456,7 +464,7 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
       <div className="table-scroll"><table className="logs-table"><thead><tr>
         <th scope="col" className="time">Время</th><th scope="col" className="level-cell">Уровень</th>
         <th scope="col" className="source">Источник</th><th scope="col">Сообщение</th>
-      </tr></thead><tbody>{rows.map((event, index) => <Fragment key={`${event.id}:${index}`}>
+      </tr></thead><tbody>{rows.map((event, index) => hiddenLevels.has(event.level) ? null : <Fragment key={`${event.id}:${index}`}>
         <tr className={`event-row ${selectedIndex === index ? "open" : ""}`}>
           <td className="time" title={event.timestamp}>
             {Date.parse(location.to) - Date.parse(location.from) >= 86_400_000 && <span className="date">{calendar.format(new Date(event.timestamp))}</span>}
@@ -476,13 +484,14 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
         </tr>
         {selectedIndex === index && <tr className="event-details"><td colSpan={4}>{details(event)}</td></tr>}
       </Fragment>)}</tbody></table></div>
-      {!rows.length && <p className="empty-state" role="status">{!liveEnabled && loading ? "Загружаем события…" :
+      {!visibleCount && <p className="empty-state" role="status">{!liveEnabled && loading ? "Загружаем события…" :
+        rows.length ? "Все загруженные события скрыты фильтром уровней." :
         liveEnabled ? "Ожидаем события Live, соответствующие запросу." : parsed.error || searchError ? "Поиск не выполнен." : "В выбранном диапазоне событий нет."}</p>}
       <div ref={moreSentinel} aria-hidden="true" />
       {paging && <div className="loading-more" role="status">
         <svg className="spinner" viewBox="0 0 28 28" aria-hidden="true"><circle cx="14" cy="14" r="11" /></svg>Загружаем ещё строки…
       </div>}
-      <div className="table-footer"><span>Показано {rows.length} загруженных строк{!liveEnabled && page.next_cursor ? " · есть следующая страница" : ""}.</span>
+      <div className="table-footer"><span>Показано {visibleCount} из {rows.length} загруженных строк{!liveEnabled && page.next_cursor ? " · есть следующая страница" : ""}.</span>
         {!liveEnabled && <div className="footer-actions">
           {page.next_cursor && <button type="button" className="button" disabled={paging || expired} onClick={loadMore}>{paging ? "Загрузка…" : "Загрузить ещё 50"}</button>}
           <button type="button" className="button" disabled={loading || paging || !!parsed.error} onClick={restart}>Обновить поиск</button>
