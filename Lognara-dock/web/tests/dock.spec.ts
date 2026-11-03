@@ -474,3 +474,21 @@ test('history beyond the UTC bucket cap keeps cursor search without inventing to
   await expect(page.getByText('В диапазоне 70', { exact: true })).toBeVisible();
   expect(calls.filter(call => call.path === '/api/stats/summary').at(-1)?.body.interval_seconds).toBe(86400);
 });
+
+
+test('chart level toggles filter log rows and restore them', async ({ page }) => {
+  await fixture(page, true, events.slice(0, 4));
+  await page.goto('/logs');
+  const warn = page.getByRole('group', { name: 'Уровни графика и ленты', exact: true }).getByRole('button', { name: 'WARN', exact: true });
+  await expect(page.locator('.event-row')).toHaveCount(4);
+  await warn.click();
+  await expect(warn).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.locator('.event-row')).toHaveCount(1);
+  await expect(page.locator('.event-row .level-warn')).toHaveCount(0);
+  await warn.click();
+  await expect(page.locator('.event-row')).toHaveCount(4);
+  await warn.click();
+  await page.getByRole('button', { name: 'ERROR', exact: true }).click();
+  await expect(page.locator('.event-row')).toHaveCount(0);
+  await expect(page.getByText('Все загруженные события скрыты фильтром уровней.', { exact: true })).toBeVisible();
+});
