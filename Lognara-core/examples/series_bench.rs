@@ -57,6 +57,8 @@ fn write_days(data: &Path) -> Result<Vec<SeriesFileMeta>> {
                             labels: String::new(),
                             value: (sample % 5 + 1) as f64,
                             event_id: None,
+                            relay_id: None,
+                            agent_id: None,
                         });
                     }
                 }
@@ -251,6 +253,8 @@ async fn main() -> Result<()> {
                 split,
                 origin: None,
                 environment: None,
+                relay_id: None,
+                agent_id: None,
             };
             let started = Instant::now();
             let reply = series_query::query(core.clone(), request).await?;

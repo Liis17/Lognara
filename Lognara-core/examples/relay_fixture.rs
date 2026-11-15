@@ -28,6 +28,7 @@ fn main() -> anyhow::Result<()> {
                         "nested": [true, null, {"x": 0.5}], "exception.type": "S3TimeoutException"}
                 }).to_string()),
             })],
+            agent: None,
         }],
     };
     std::fs::write(path, core_wire::encode(&batch))?;

@@ -118,6 +118,12 @@ export interface SeriesReply {
 
 export type AlertAggregate = "avg" | "min" | "max" | "sum" | "count" | "increase";
 export type AlertState = "unknown" | "ok" | "firing";
+/** Узел, которому ограничено право или правило: все узлы, relay с его агентами или один агент. */
+export type NodeScope = { kind: "all" } | { kind: "relay"; id: number } | { kind: "agent"; id: number };
+export function nodeScopeLabel(scope: NodeScope): string {
+  if (scope.kind === "all") return "все узлы";
+  return `${scope.kind === "relay" ? "relay" : "агент"} ${scope.id}`;
+}
 export interface MetricAlertKey {
   server: string;
   service: string;
@@ -133,6 +139,7 @@ export interface MetricAlertTrigger {
 export interface MetricAlertDefinition {
   id: string;
   key: MetricAlertKey;
+  node_scope: NodeScope;
   enabled: boolean;
   environment: string | null;
   no_data: "normal" | "loss";
@@ -150,7 +157,7 @@ export interface MetricAlertDefinition {
 }
 export interface MetricAlertSummary {
   enabled: boolean;
-  alerts: Pick<MetricAlertDefinition, "key" | "enabled" | "state" | "no_recipients">[];
+  alerts: Pick<MetricAlertDefinition, "key" | "node_scope" | "enabled" | "state" | "no_recipients">[];
 }
 export interface MetricAlertRecipient {
   id: string;
@@ -228,6 +235,7 @@ const messages: Record<string, string> = {
   name_taken: "Такое имя уже занято",
   relay_has_agents: "У relay есть агенты, сначала удалите их",
   relay_not_found: "Relay не найден, обновите страницу",
+  invalid_scope: "Выбранный relay или агент не найден, обновите список",
   not_found: "Запись не найдена, обновите страницу",
   core_unavailable: "Core недоступен или ответил ошибкой",
   invalid_query: "Проверьте запрос и диапазон времени",

@@ -292,6 +292,7 @@ pub fn router(app: AppState) -> Router {
                 .put(alerts::save_definition)
                 .delete(alerts::delete_definition),
         )
+        .route("/alerts/rules/{id}", delete(alerts::delete_rule))
         .route("/alerts/global", put(alerts::set_global))
         .route("/alerts/token", put(alerts::set_token))
         .route("/alerts/recipients", post(alerts::create_recipient))

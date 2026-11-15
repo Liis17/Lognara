@@ -28,7 +28,15 @@ pub struct Group {
     /// Сколько записей этого источника агенты вытеснили из своих буферов.
     pub dropped: u64,
     pub events: Vec<Event>,
+    /// Агент, приславший группу; отсутствует в пачках, записанных до этого поля.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentHash>,
 }
+
+/// SHA-256 персонального токена агента; core сопоставляет его с узлом этого relay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AgentHash(#[serde(with = "serde_bytes")] pub [u8; 32]);
 
 /// Откуда пришли события: место в иерархии инфраструктуры.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -179,6 +187,9 @@ struct GroupView<'a> {
     source: &'a Source,
     dropped: u64,
     events: &'a [Event],
+    // Агент сохраняется в каждой части группы, как и источник.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent: Option<&'a AgentHash>,
 }
 
 impl Serialize for GroupsView<'_> {
@@ -191,6 +202,7 @@ impl Serialize for GroupsView<'_> {
                 source: &group.source,
                 dropped: if start == 0 { group.dropped } else { 0 },
                 events: &group.events[start..end],
+                agent: group.agent.as_ref(),
             })?;
         }
         sequence.end()
@@ -357,11 +369,13 @@ mod tests {
                     source: source.clone(),
                     dropped: 3,
                     events: events[..6].to_vec(),
+                    agent: None,
                 },
                 Group {
                     source,
                     dropped: 5,
                     events: events[6..].to_vec(),
+                    agent: None,
                 },
             ],
         };
@@ -430,6 +444,7 @@ mod tests {
                         ("tags".into(), json!(["a", {"b": null}])),
                     ]),
                 }],
+                agent: Some(AgentHash([0x5a; 32])),
             }],
         };
 
@@ -438,5 +453,146 @@ mod tests {
         let decoded: CoreBatch = rmp_serde::from_slice(&packed).unwrap();
 
         assert_eq!(decoded, batch);
+    }
+
+    fn text_event(message: &str) -> Event {
+        crate::normalize::event(crate::agent_wire::Record {
+            received_at: 123,
+            origin: None,
+            payload: crate::agent_wire::Payload::Text(message.into()),
+        })
+    }
+
+    fn api_source() -> Source {
+        Source {
+            environment: None,
+            server: "srv".into(),
+            backend: "backend".into(),
+            service: "api".into(),
+            service_instance: None,
+        }
+    }
+
+    #[test]
+    fn agent_is_named_bin_field_and_absent_without_agent() {
+        let group = |agent| Group {
+            source: api_source(),
+            dropped: 0,
+            events: vec![text_event("m")],
+            agent,
+        };
+        let with_agent = CoreBatch {
+            dropped: 0,
+            groups: vec![group(Some(AgentHash([0x5a; 32])))],
+        };
+        // fixstr "agent" и bin8 длиной 32 байта.
+        let field = [
+            &[0xa5u8][..],
+            b"agent".as_slice(),
+            &[0xc4, 0x20][..],
+            &[0x5a; 32][..],
+        ]
+        .concat();
+        let packed = rmp_serde::to_vec_named(&with_agent).unwrap();
+        assert!(packed.windows(field.len()).any(|window| window == field));
+        let decoded: CoreBatch =
+            rmp_serde::from_slice(&zstd::decode_all(&encode(&with_agent)[..]).unwrap()).unwrap();
+        assert_eq!(decoded, with_agent);
+
+        let without_agent = CoreBatch {
+            dropped: 0,
+            groups: vec![group(None)],
+        };
+        let packed = rmp_serde::to_vec_named(&without_agent).unwrap();
+        assert!(!packed.windows(5).any(|window| window == b"agent"));
+    }
+
+    #[derive(Serialize)]
+    struct LegacyGroup<'a> {
+        source: &'a Source,
+        dropped: u64,
+        events: &'a [Event],
+    }
+
+    #[derive(Serialize)]
+    struct LegacyBatch<'a> {
+        dropped: u64,
+        groups: Vec<LegacyGroup<'a>>,
+    }
+
+    #[test]
+    fn group_without_agent_matches_legacy_bytes_on_both_encode_paths() {
+        let batch = CoreBatch {
+            dropped: 1,
+            groups: vec![Group {
+                source: api_source(),
+                dropped: 2,
+                events: vec![text_event("legacy")],
+                agent: None,
+            }],
+        };
+        let legacy = LegacyBatch {
+            dropped: batch.dropped,
+            groups: batch
+                .groups
+                .iter()
+                .map(|group| LegacyGroup {
+                    source: &group.source,
+                    dropped: group.dropped,
+                    events: &group.events,
+                })
+                .collect(),
+        };
+        let legacy_bytes = rmp_serde::to_vec_named(&legacy).unwrap();
+        assert_eq!(rmp_serde::to_vec_named(&batch).unwrap(), legacy_bytes);
+        let decoded: CoreBatch = rmp_serde::from_slice(&legacy_bytes).unwrap();
+        assert_eq!(decoded, batch);
+
+        // Путь BatchEncoder: записи spool, созданные до поля, отправляются теми же байтами.
+        let (parts, dropped) = encode_split(batch, 1 << 20, 1 << 20, usize::MAX);
+        assert_eq!(dropped, 0);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(zstd::decode_all(&parts[0].body[..]).unwrap(), legacy_bytes);
+    }
+
+    #[test]
+    fn split_parts_keep_agent_of_every_group_part() {
+        let (first, second) = (AgentHash([1; 32]), AgentHash([2; 32]));
+        let group = |agent, prefix: &str| Group {
+            source: api_source(),
+            dropped: 0,
+            events: (0..6)
+                .map(|index| text_event(&format!("{prefix}{index}{}", "m".repeat(200))))
+                .collect(),
+            agent: Some(agent),
+        };
+        let batch = CoreBatch {
+            dropped: 0,
+            groups: vec![group(first, "a"), group(second, "b")],
+        };
+        let expected: Vec<_> = batch
+            .groups
+            .iter()
+            .flat_map(|group| {
+                group
+                    .events
+                    .iter()
+                    .map(|event| (group.agent, event.clone()))
+            })
+            .collect();
+
+        let (parts, dropped) = encode_split(batch, 1 << 20, 1000, usize::MAX);
+        assert_eq!(dropped, 0);
+        assert!(parts.len() > 2);
+        let mut restored = Vec::new();
+        for part in parts {
+            let decoded: CoreBatch =
+                rmp_serde::from_slice(&zstd::decode_all(&part.body[..]).unwrap()).unwrap();
+            for group in decoded.groups {
+                let agent = group.agent.expect("split part lost agent");
+                restored.extend(group.events.into_iter().map(|event| (Some(agent), event)));
+            }
+        }
+        assert_eq!(restored, expected);
     }
 }

@@ -24,6 +24,7 @@ use crate::{
     core_client::{AlertSeriesQuery, AlertSeriesReply, AlertSeriesStatus, AlertSeriesWindow},
     series::MetricKey,
     store::{Store, StoreError, now_ms},
+    token_access::{Scope, TokenAccess},
 };
 
 const MAX_ENABLED: i64 = 100;
@@ -48,6 +49,9 @@ pub struct TriggerInput {
 #[serde(deny_unknown_fields)]
 pub struct DefinitionInput {
     pub key: MetricKey,
+    /// Узел задаёт только сервер (токен MCP); браузерный ввод всегда получает `all`.
+    #[serde(skip)]
+    pub node_scope: Scope,
     pub enabled: bool,
     pub environment: Option<String>,
     pub no_data: String,
@@ -60,6 +64,8 @@ pub struct DefinitionInput {
 pub struct AlertDefinition {
     pub id: String,
     pub key: MetricKey,
+    /// Узел правила; `all` для правил, созданных в UI.
+    pub node_scope: Scope,
     pub enabled: bool,
     pub environment: Option<String>,
     pub no_data: String,
@@ -119,6 +125,7 @@ pub struct Summary {
 #[derive(Debug, Serialize)]
 pub struct SummaryAlert {
     pub key: MetricKey,
+    pub node_scope: Scope,
     pub enabled: bool,
     pub state: String,
     pub no_recipients: bool,
@@ -188,6 +195,10 @@ fn validate_key(key: &MetricKey) -> Result<(), AlertStoreError> {
         || key.name.is_empty()
         || key.name.len() > 128
         || !matches!(key.origin.as_str(), "counter" | "gauge" | "rule")
+        // Управляющие символы подделали бы строки текста уведомления.
+        || [&key.server, &key.service, &key.name]
+            .iter()
+            .any(|value| value.chars().any(char::is_control))
     {
         return Err(AlertStoreError::Invalid("invalid metric identity"));
     }
@@ -199,9 +210,9 @@ fn validate_definition(input: &DefinitionInput) -> Result<(), AlertStoreError> {
     if input
         .environment
         .as_ref()
-        .is_some_and(|value| value.len() > 128)
+        .is_some_and(|value| value.len() > 128 || value.chars().any(char::is_control))
     {
-        return Err(AlertStoreError::Invalid("environment is too long"));
+        return Err(AlertStoreError::Invalid("invalid environment"));
     }
     if !matches!(input.no_data.as_str(), "normal" | "loss") {
         return Err(AlertStoreError::Invalid("no_data must be normal or loss"));
@@ -290,9 +301,9 @@ fn read_alerts(conn: &Connection) -> rusqlite::Result<Vec<AlertDefinition>> {
         let mut statement = conn.prepare(
             "SELECT a.id,a.server,a.service,a.name,a.origin,a.enabled,a.environment,
                     a.no_data,a.combine_mode,a.revision,s.condition_state,s.loss_registered,
-                    a.enabled_at,s.loss_at,s.last_point_at,s.last_as_of
+                    a.enabled_at,s.loss_at,s.last_point_at,s.last_as_of,a.scope_kind,a.scope_id
              FROM metric_alerts a LEFT JOIN metric_alert_states s ON s.alert_id=a.id
-             ORDER BY a.server,a.service,a.name,a.origin",
+             ORDER BY a.server,a.service,a.name,a.origin,a.scope_kind,a.scope_id",
         )?;
         for row in statement.query_map([], |row| {
             let id: String = row.get(0)?;
@@ -302,11 +313,14 @@ fn read_alerts(conn: &Connection) -> rusqlite::Result<Vec<AlertDefinition>> {
                 name: row.get(3)?,
                 origin: row.get(4)?,
             };
+            let node_scope = Scope::from_columns(&row.get::<_, String>(16)?, row.get(17)?)
+                .ok_or(rusqlite::Error::InvalidQuery)?;
             Ok((
                 id.clone(),
                 AlertDefinition {
                     id,
                     key,
+                    node_scope,
                     enabled: row.get::<_, i64>(5)? != 0,
                     environment: row.get(6)?,
                     no_data: row.get(7)?,
@@ -555,6 +569,7 @@ impl Store {
                 .into_iter()
                 .map(|alert| SummaryAlert {
                     key: alert.key,
+                    node_scope: alert.node_scope,
                     enabled: alert.enabled,
                     state: alert.state,
                     no_recipients: alert.no_recipients,
@@ -569,6 +584,7 @@ impl Store {
         .map_err(Into::into)
     }
 
+    /// Правило браузера по ключу: только глобальное (`all`), скоупленные правила MCP отдельно.
     async fn alert_definition(
         &self,
         key: MetricKey,
@@ -577,7 +593,31 @@ impl Store {
         self.call(move |conn| {
             Ok(read_alerts(conn)?
                 .into_iter()
-                .find(|alert| alert.key == key))
+                .find(|alert| alert.key == key && alert.node_scope == Scope::All))
+        })
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn alert_list(&self) -> Result<Vec<AlertDefinition>, AlertStoreError> {
+        self.call(|conn| read_alerts(conn))
+            .await
+            .map_err(Into::into)
+    }
+
+    async fn alert_group_list(&self) -> Result<Vec<AlertGroupInfo>, AlertStoreError> {
+        self.call(|conn| {
+            let mut statement =
+                conn.prepare("SELECT id,kind,name FROM metric_alert_groups ORDER BY name,id")?;
+            statement
+                .query_map([], |row| {
+                    Ok(AlertGroupInfo {
+                        id: row.get(0)?,
+                        kind: row.get(1)?,
+                        name: row.get(2)?,
+                    })
+                })?
+                .collect()
         })
         .await
         .map_err(Into::into)
@@ -591,11 +631,39 @@ impl Store {
             .map_err(Into::into)
     }
 
+    /// Создаёт правило или меняет существующее по ключу и скоупу (для браузера это `all`).
     async fn save_alert_definition(
         &self,
         input: DefinitionInput,
     ) -> Result<String, AlertStoreError> {
+        self.write_alert_definition(input, AlertWrite::Upsert).await
+    }
+
+    /// Создаёт правило, но не перезаписывает существующее с тем же ключом и скоупом.
+    async fn create_alert_definition(
+        &self,
+        input: DefinitionInput,
+    ) -> Result<String, AlertStoreError> {
+        self.write_alert_definition(input, AlertWrite::Create).await
+    }
+
+    /// Меняет правило `id`: ключ можно сменить, скоуп и состояние сохраняются.
+    async fn update_alert_definition(
+        &self,
+        id: String,
+        input: DefinitionInput,
+    ) -> Result<String, AlertStoreError> {
+        self.write_alert_definition(input, AlertWrite::Update(id))
+            .await
+    }
+
+    async fn write_alert_definition(
+        &self,
+        input: DefinitionInput,
+        mode: AlertWrite,
+    ) -> Result<String, AlertStoreError> {
         validate_definition(&input)?;
+        let (scope_kind, scope_id) = input.node_scope.columns();
         self.call(move |conn| {
             let tx = conn.transaction()?;
             let global = read_global(&tx)?;
@@ -606,23 +674,40 @@ impl Store {
                     |row| row.get(0),
                 )?;
                 if !exists {
-                    return Err(rusqlite::Error::QueryReturnedNoRows);
+                    return Ok(Err(AlertStoreError::Conflict("group_not_found")));
                 }
             }
-            let old: Option<(String, i64, i64)> = tx
-                .query_row(
-                    "SELECT id,revision,enabled FROM metric_alerts
-                     WHERE server=?1 AND service=?2 AND name=?3 AND origin=?4",
-                    params![input.key.server,input.key.service,input.key.name,input.key.origin],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-                .optional()?;
+            let old: Option<(String, i64, i64)> = match &mode {
+                AlertWrite::Update(id) => tx
+                    .query_row(
+                        "SELECT id,revision,enabled FROM metric_alerts WHERE id=?1",
+                        [id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .optional()?,
+                _ => tx
+                    .query_row(
+                        "SELECT id,revision,enabled FROM metric_alerts
+                         WHERE server=?1 AND service=?2 AND name=?3 AND origin=?4
+                           AND scope_kind=?5 AND scope_id=?6",
+                        params![input.key.server,input.key.service,input.key.name,input.key.origin,scope_kind,scope_id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .optional()?,
+            };
+            match (&mode, &old) {
+                (AlertWrite::Update(_), None) => return Ok(Err(AlertStoreError::NotFound)),
+                (AlertWrite::Create, Some(_)) => {
+                    return Ok(Err(AlertStoreError::Conflict("alert_exists")));
+                }
+                _ => {}
+            }
             let reset_state = old.is_none() || input.enabled;
             if input.enabled
                 && !global.enabled
                 && old.as_ref().is_none_or(|(_, _, was_enabled)| *was_enabled == 0)
             {
-                return Err(rusqlite::Error::InvalidQuery);
+                return Ok(Err(AlertStoreError::Conflict("global_disabled_or_alert_limit")));
             }
             let current_enabled: i64 = tx.query_row(
                 "SELECT count(*) FROM metric_alerts WHERE enabled=1",
@@ -633,17 +718,17 @@ impl Store {
                 - old.as_ref().filter(|(_, _, enabled)| *enabled != 0).map_or(0, |_| 1)
                 + if input.enabled { 1 } else { 0 };
             if next_enabled > MAX_ENABLED {
-                tx.commit()?;
-                return Err(rusqlite::Error::InvalidQuery);
+                return Ok(Err(AlertStoreError::Conflict("global_disabled_or_alert_limit")));
             }
             let now = now_ms();
             let id = match old {
                 Some((id, revision, _)) => {
                     cancel_alert_pending(&tx, &id, now)?;
                     tx.execute(
-                        "UPDATE metric_alerts SET enabled=?2,environment=?3,no_data=?4,
-                         combine_mode=?5,revision=?6,enabled_at=?7 WHERE id=?1",
-                        params![id,if input.enabled { 1 } else { 0 },input.environment,input.no_data,input.combine,revision+1,now],
+                        "UPDATE metric_alerts SET server=?2,service=?3,name=?4,origin=?5,enabled=?6,environment=?7,
+                         no_data=?8,combine_mode=?9,revision=?10,enabled_at=?11 WHERE id=?1",
+                        params![id,input.key.server,input.key.service,input.key.name,input.key.origin,
+                            if input.enabled { 1 } else { 0 },input.environment,input.no_data,input.combine,revision+1,now],
                     )?;
                     id
                 }
@@ -651,10 +736,10 @@ impl Store {
                     let id = Uuid::new_v4().to_string();
                     tx.execute(
                         "INSERT INTO metric_alerts(id,server,service,name,origin,enabled,environment,
-                         no_data,combine_mode,revision,enabled_at)
-                         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,1,?10)",
+                         no_data,combine_mode,revision,enabled_at,scope_kind,scope_id)
+                         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,1,?10,?11,?12)",
                         params![id,input.key.server,input.key.service,input.key.name,input.key.origin,
-                            if input.enabled { 1 } else { 0 },input.environment,input.no_data,input.combine,now],
+                            if input.enabled { 1 } else { 0 },input.environment,input.no_data,input.combine,now,scope_kind,scope_id],
                     )?;
                     id
                 }
@@ -688,30 +773,41 @@ impl Store {
                 [],
             )?;
             tx.commit()?;
-            Ok(id)
+            Ok(Ok(id))
         })
         .await
-        .map_err(|error| match error {
-            StoreError::Sqlite(rusqlite::Error::InvalidQuery) => {
-                AlertStoreError::Conflict("global_disabled_or_alert_limit")
-            }
-            StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => {
-                AlertStoreError::Conflict("group_not_found")
-            }
-            error => AlertStoreError::Store(error),
-        })
+        .map_err(map_alert_save_error)?
     }
 
+    /// Удаляет глобальное правило браузера по ключу; скоупленные правила MCP не затрагивает.
     async fn delete_alert_definition(&self, key: MetricKey) -> Result<bool, AlertStoreError> {
         validate_key(&key)?;
         self.call(move |conn| {
             let tx = conn.transaction()?;
             let changed = tx.execute(
-                "DELETE FROM metric_alerts WHERE server=?1 AND service=?2 AND name=?3 AND origin=?4",
+                "DELETE FROM metric_alerts WHERE server=?1 AND service=?2 AND name=?3 AND origin=?4 AND scope_kind='all'",
                 params![key.server,key.service,key.name,key.origin],
             )?;
             if changed > 0 {
                 tx.execute("UPDATE metric_alert_global SET revision=revision+1 WHERE singleton=1", [])?;
+            }
+            tx.commit()?;
+            Ok(changed > 0)
+        })
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Удаляет правило по `id`; видимость проверяет вызывающий MCP-сервис.
+    async fn delete_alert_by_id(&self, id: String) -> Result<bool, AlertStoreError> {
+        self.call(move |conn| {
+            let tx = conn.transaction()?;
+            let changed = tx.execute("DELETE FROM metric_alerts WHERE id=?1", [&id])?;
+            if changed > 0 {
+                tx.execute(
+                    "UPDATE metric_alert_global SET revision=revision+1 WHERE singleton=1",
+                    [],
+                )?;
             }
             tx.commit()?;
             Ok(changed > 0)
@@ -992,6 +1088,166 @@ fn finish_outbox(conn: &Connection, now: i64) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Режим записи правила: браузер ищет по ключу и скоупу, MCP создаёт или меняет по `id`.
+enum AlertWrite {
+    Upsert,
+    Create,
+    Update(String),
+}
+
+fn map_alert_save_error(error: StoreError) -> AlertStoreError {
+    match error {
+        StoreError::Sqlite(rusqlite::Error::SqliteFailure(failure, _))
+            if failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE =>
+        {
+            AlertStoreError::Conflict("alert_exists")
+        }
+        error => AlertStoreError::Store(error),
+    }
+}
+
+/// Группа получателей для MCP: только id, тип и имя, без токена и chat ID.
+#[derive(Debug, Clone, Serialize)]
+pub struct AlertGroupInfo {
+    pub id: String,
+    pub kind: String,
+    pub name: String,
+}
+
+/// Ошибка MCP-операций над алертами; транспорт переводит её в безопасный код.
+#[derive(Debug)]
+pub enum AlertToolError {
+    Invalid(&'static str),
+    Conflict(&'static str),
+    NotFound,
+    Unavailable,
+}
+
+impl From<AlertStoreError> for AlertToolError {
+    fn from(error: AlertStoreError) -> Self {
+        match error {
+            AlertStoreError::Invalid(message) => Self::Invalid(message),
+            AlertStoreError::Conflict(code) => Self::Conflict(code),
+            AlertStoreError::NotFound => Self::NotFound,
+            AlertStoreError::Store(error) => {
+                tracing::error!(%error, "metric alert storage failed");
+                Self::Unavailable
+            }
+            AlertStoreError::GroupInUse(_)
+            | AlertStoreError::GroupKindMismatch
+            | AlertStoreError::RecipientKindInUse => Self::Conflict("alert_conflict"),
+        }
+    }
+}
+
+/// Relay каждого агента из core. Ошибка или неполный ответ не раскрывает данные: запрос отказывает.
+async fn agent_relays(app: &AppState) -> Result<BTreeMap<i64, i64>, AlertToolError> {
+    let reply = app
+        .core
+        .list_agents()
+        .await
+        .map_err(|_| AlertToolError::Unavailable)?;
+    reply["agents"]
+        .as_array()
+        .and_then(|agents| {
+            agents
+                .iter()
+                .map(|agent| Some((agent["id"].as_i64()?, agent["relay_id"].as_i64()?)))
+                .collect::<Option<BTreeMap<_, _>>>()
+        })
+        .ok_or(AlertToolError::Unavailable)
+}
+
+/// Правила, видимые токену: `all` видит всё, `relay` — свой узел и агентов его relay, `agent` — только себя.
+async fn visible_alerts(
+    app: &AppState,
+    access: &TokenAccess,
+    alerts: Vec<AlertDefinition>,
+) -> Result<Vec<AlertDefinition>, AlertToolError> {
+    Ok(match access.node_scope {
+        Scope::All => alerts,
+        Scope::Agent { id } => alerts
+            .into_iter()
+            .filter(|alert| alert.node_scope == Scope::Agent { id })
+            .collect(),
+        Scope::Relay { id } => {
+            let relays = agent_relays(app).await?;
+            alerts
+                .into_iter()
+                .filter(|alert| match alert.node_scope {
+                    Scope::Relay { id: relay } => relay == id,
+                    Scope::Agent { id: agent } => relays.get(&agent) == Some(&id),
+                    Scope::All => false,
+                })
+                .collect()
+        }
+    })
+}
+
+/// Группы получателей для выбора в правиле; создаются только в UI.
+pub async fn mcp_alert_groups(app: &AppState) -> Result<Vec<AlertGroupInfo>, AlertToolError> {
+    Ok(app.store.alert_group_list().await?)
+}
+
+/// Правила, видимые токену.
+pub async fn mcp_alerts(
+    app: &AppState,
+    access: &TokenAccess,
+) -> Result<Vec<AlertDefinition>, AlertToolError> {
+    let alerts = app.store.alert_list().await?;
+    visible_alerts(app, access, alerts).await
+}
+
+/// Создаёт правило с узлом токена (`id` нет) или меняет видимое правило `id`; скоуп правила не меняется.
+pub async fn mcp_save_alert(
+    app: &AppState,
+    access: &TokenAccess,
+    id: Option<String>,
+    mut input: DefinitionInput,
+) -> Result<AlertDefinition, AlertToolError> {
+    let saved = match id {
+        Some(id) => {
+            let current = mcp_alerts(app, access)
+                .await?
+                .into_iter()
+                .find(|alert| alert.id == id)
+                .ok_or(AlertToolError::NotFound)?;
+            input.node_scope = current.node_scope;
+            app.store.update_alert_definition(id, input).await?
+        }
+        None => {
+            input.node_scope = access.node_scope;
+            app.store.create_alert_definition(input).await?
+        }
+    };
+    app.store
+        .alert_list()
+        .await?
+        .into_iter()
+        .find(|alert| alert.id == saved)
+        .ok_or(AlertToolError::NotFound)
+}
+
+/// Удаляет видимое токену правило.
+pub async fn mcp_delete_alert(
+    app: &AppState,
+    access: &TokenAccess,
+    id: String,
+) -> Result<(), AlertToolError> {
+    if !mcp_alerts(app, access)
+        .await?
+        .iter()
+        .any(|alert| alert.id == id)
+    {
+        return Err(AlertToolError::NotFound);
+    }
+    if app.store.delete_alert_by_id(id).await? {
+        Ok(())
+    } else {
+        Err(AlertToolError::NotFound)
+    }
+}
+
 impl From<AlertStoreError> for ApiError {
     fn from(error: AlertStoreError) -> Self {
         match error {
@@ -1122,6 +1378,20 @@ pub async fn update_recipient(
     Ok(Json(app.store.update_recipient(id, input).await?))
 }
 
+/// Удаление правила по id из UI: человек снимает и скоупленные правила, созданные через MCP.
+pub async fn delete_rule(
+    State(app): State<AppState>,
+    _user: crate::session::AuthUser,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<StatusCode, ApiError> {
+    Uuid::parse_str(&id).map_err(|_| ApiError::BadRequest("invalid_request"))?;
+    if app.store.delete_alert_by_id(id).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::NotFound)
+    }
+}
+
 pub async fn delete_recipient(
     State(app): State<AppState>,
     _user: crate::session::AuthUser,
@@ -1235,6 +1505,37 @@ pub async fn watch(app: AppState) {
     }
 }
 
+/// Запрос core для правила. Скоуп узла передаётся, поэтому значения вне узла не оцениваются и не уходят в Telegram.
+fn series_query_for(alert: &AlertDefinition) -> AlertSeriesQuery {
+    let windows: Vec<u64> = alert
+        .triggers
+        .iter()
+        .map(|trigger| trigger.window_seconds)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    AlertSeriesQuery {
+        server: alert.key.server.clone(),
+        service: alert.key.service.clone(),
+        name: alert.key.name.clone(),
+        origin: alert.key.origin.clone(),
+        environment: alert.environment.clone(),
+        windows_seconds: windows,
+        need_increase: alert
+            .triggers
+            .iter()
+            .any(|trigger| trigger.aggregate == "increase"),
+        relay_id: match alert.node_scope {
+            Scope::Relay { id } => Some(id),
+            _ => None,
+        },
+        agent_id: match alert.node_scope {
+            Scope::Agent { id } => Some(id),
+            _ => None,
+        },
+    }
+}
+
 async fn run_alert_pass(
     app: &AppState,
     global: GlobalConfig,
@@ -1252,25 +1553,7 @@ async fn run_alert_pass(
         if !current.enabled || current.revision != global.revision {
             break;
         }
-        let windows: Vec<u64> = alert
-            .triggers
-            .iter()
-            .map(|trigger| trigger.window_seconds)
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        let query = AlertSeriesQuery {
-            server: alert.key.server.clone(),
-            service: alert.key.service.clone(),
-            name: alert.key.name.clone(),
-            origin: alert.key.origin.clone(),
-            environment: alert.environment.clone(),
-            windows_seconds: windows,
-            need_increase: alert
-                .triggers
-                .iter()
-                .any(|trigger| trigger.aggregate == "increase"),
-        };
+        let query = series_query_for(&alert);
         match app.core.alert_series_query(&query).await {
             Ok(reply) => {
                 outcomes.push(Ok(()));
@@ -1350,6 +1633,8 @@ async fn run_alert_pass(
             environment: None,
             windows_seconds: vec![60],
             need_increase: false,
+            relay_id: None,
+            agent_id: None,
         };
         let result = app.core.alert_series_query(&probe).await;
         match classify_health(&[result.map(|_| ())]) {
@@ -2034,8 +2319,14 @@ fn alert_message(
         "data_recovered" => "Точки метрики снова поступают",
         _ => "Состояние алерта метрики изменилось",
     };
+    // Скоупленное правило отличается от глобального с тем же ключом только строкой узла.
+    let node = match alert.node_scope {
+        Scope::All => String::new(),
+        Scope::Relay { id } => format!("Узел: relay {id}\n"),
+        Scope::Agent { id } => format!("Узел: agent {id}\n"),
+    };
     let mut body = format!(
-        "{title}\nМетрика: {} / {} / {} ({})\nОкружение: {}\nВремя Core: {}\nПоследняя точка: {}\nУсловие: {}\n",
+        "{title}\nМетрика: {} / {} / {} ({})\n{node}Окружение: {}\nВремя Core: {}\nПоследняя точка: {}\nУсловие: {}\n",
         alert.key.server,
         alert.key.service,
         alert.key.name,
@@ -2266,9 +2557,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn control_characters_cannot_forge_notification_lines() {
+        assert!(validate_key(&test_key()).is_ok());
+        for forged in [
+            MetricKey {
+                name: "requests\nУсловие: подделка".into(),
+                ..test_key()
+            },
+            MetricKey {
+                service: "api\r".into(),
+                ..test_key()
+            },
+            MetricKey {
+                server: "server\u{7}".into(),
+                ..test_key()
+            },
+        ] {
+            assert!(matches!(
+                validate_key(&forged),
+                Err(AlertStoreError::Invalid(_))
+            ));
+        }
+        let mut definition = input(test_key(), "normal", vec![]);
+        definition.environment = Some("prod\nПоследняя точка: 0".into());
+        assert!(matches!(
+            validate_definition(&definition),
+            Err(AlertStoreError::Invalid("invalid environment"))
+        ));
+    }
+
     fn input(key: MetricKey, no_data: &str, group_ids: Vec<String>) -> DefinitionInput {
         DefinitionInput {
             key,
+            node_scope: Scope::All,
             enabled: true,
             environment: None,
             no_data: no_data.into(),
@@ -2281,6 +2603,20 @@ mod tests {
                 threshold: 1.0,
             }],
         }
+    }
+
+    #[test]
+    fn watch_query_carries_the_alert_node_scope() {
+        let mut alert = condition_alert("and", "normal", vec![trigger(60, "sum")]);
+        alert.node_scope = Scope::Relay { id: 4 };
+        let query = series_query_for(&alert);
+        assert_eq!((query.relay_id, query.agent_id), (Some(4), None));
+        alert.node_scope = Scope::Agent { id: 9 };
+        let query = series_query_for(&alert);
+        assert_eq!((query.relay_id, query.agent_id), (None, Some(9)));
+        alert.node_scope = Scope::All;
+        let query = series_query_for(&alert);
+        assert_eq!((query.relay_id, query.agent_id), (None, None));
     }
 
     fn timestamp(ms: i64) -> String {
@@ -2314,6 +2650,7 @@ mod tests {
         AlertDefinition {
             id: "test-alert".into(),
             key: test_key(),
+            node_scope: Scope::All,
             enabled: true,
             environment: None,
             no_data: no_data.into(),

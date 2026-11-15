@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use crate::api::{ApiError, AppState};
 use crate::session::AuthUser;
+use crate::token_access::Scope;
 
 pub async fn list(
     State(app): State<AppState>,
@@ -22,6 +23,7 @@ pub async fn list(
                 .scoped_series(
                     query.get("server").map(String::as_str),
                     query.get("service").map(String::as_str),
+                    Scope::All,
                 )
                 .await?
         }

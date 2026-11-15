@@ -26,9 +26,9 @@ use crate::{
     mcp_access,
     session::{self, SESSION_COOKIE},
     store::{self, PendingAuthorization, RefreshOutcome},
+    token_access::{READ_SCOPE, WRITE_SCOPE},
 };
 
-const SCOPE: &str = "lognara.read";
 const CHATGPT_HOST: &str = "chatgpt.com";
 const CIMD_LIMIT: usize = 256 * 1024;
 
@@ -87,7 +87,7 @@ async fn protected_resource_metadata(State(app): State<AppState>) -> Json<Value>
     Json(json!({
         "resource": resource_uri(&app),
         "authorization_servers": [app.config.public_origin],
-        "scopes_supported": [SCOPE],
+        "scopes_supported": [READ_SCOPE, WRITE_SCOPE],
         "bearer_methods_supported": ["header"],
     }))
 }
@@ -101,7 +101,7 @@ async fn authorization_server_metadata(State(app): State<AppState>) -> Json<Valu
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code", "refresh_token"],
         "token_endpoint_auth_methods_supported": ["none"],
-        "scopes_supported": [SCOPE],
+        "scopes_supported": [READ_SCOPE, WRITE_SCOPE],
         "code_challenge_methods_supported": ["S256"],
         "client_id_metadata_document_supported": true,
         "authorization_response_iss_parameter_supported": true,
@@ -164,7 +164,10 @@ async fn authorize(
         || request.state.chars().any(char::is_control)
         || request.code_challenge_method != "S256"
         || !valid_challenge(&request.code_challenge)
-        || request.scope.as_deref().is_some_and(|scope| scope != SCOPE)
+        || request
+            .scope
+            .as_deref()
+            .is_some_and(|scope| !valid_requested_scope(scope))
         || request.resource.as_deref() != Some(resource.as_str())
     {
         return Ok(authorization_error(
@@ -181,7 +184,7 @@ async fn authorize(
         client_name: metadata.client_name,
         redirect_uri: request.redirect_uri,
         state: request.state,
-        scope: SCOPE.into(),
+        scope: request.scope.clone().unwrap_or_else(|| READ_SCOPE.into()),
         resource,
         code_challenge: request.code_challenge,
         expires_at: store::now_ms() + 300_000,
@@ -326,6 +329,15 @@ fn valid_chatgpt_redirect(value: &str) -> bool {
     matches!(segments.as_slice(), ["connector_platform_oauth_redirect"])
         || matches!(segments.as_slice(), ["connector", "oauth", callback]
             if !callback.is_empty() && callback.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte,b'-'|b'_')))
+}
+
+/// Клиент просит чтение и при необходимости запись; пустой или чужой scope отклоняется.
+fn valid_requested_scope(scope: &str) -> bool {
+    let parts: Vec<&str> = scope.split_whitespace().collect();
+    !parts.is_empty()
+        && parts
+            .iter()
+            .all(|part| *part == READ_SCOPE || *part == WRITE_SCOPE)
 }
 
 fn valid_challenge(challenge: &str) -> bool {
@@ -567,6 +579,16 @@ mod tests {
         ))
         .unwrap();
         assert!(validate_client_metadata(unsupported, client_id).is_err());
+    }
+
+    #[test]
+    fn requested_scopes_accept_read_and_write_only() {
+        assert!(valid_requested_scope("lognara.read"));
+        assert!(valid_requested_scope("lognara.read lognara.write"));
+        assert!(valid_requested_scope("lognara.write"));
+        for value in ["", "   ", "openid", "lognara.read openid"] {
+            assert!(!valid_requested_scope(value), "{value}");
+        }
     }
 
     #[test]

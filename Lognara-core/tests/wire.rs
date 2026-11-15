@@ -25,11 +25,13 @@ fn decodes_real_relay_encoder_and_preserves_nanoseconds_and_attributes() {
             },
             dropped: 3,
             events: vec![event],
+            agent: Some(core_wire::AgentHash([9; 32])),
         }],
     });
     let batch = wire::decode(&body, 4096).unwrap();
     assert_eq!(batch.dropped, 2);
     assert_eq!(batch.groups[0].dropped, 3);
+    assert_eq!(batch.groups[0].agent, Some(wire::AgentHash([9; 32])));
     let json =
         serde_json::to_value(LogEvent::from(batch.into_events(1, 7).next().unwrap())).unwrap();
     assert_eq!(json["timestamp"], "2026-09-29T10:41:51.871000001Z");
@@ -56,6 +58,46 @@ fn rejects_invalid_data_and_trailing_messagepack() {
     trailing.push(0);
     assert!(wire::decode(&zstd::encode_all(&trailing[..], 3).unwrap(), 1024).is_err());
     assert!(wire::decode(&zstd::encode_all(&packed[..], 3).unwrap(), 1024).is_ok());
+}
+
+#[test]
+fn legacy_wire_fixture_omits_agent_and_agent_hash_is_budgeted() {
+    let batch = wire::decode(include_bytes!("fixtures/relay-batch.bin"), 1 << 20).unwrap();
+    assert_eq!(batch.groups[0].agent, None);
+
+    #[derive(serde::Serialize)]
+    struct LegacyGroup<'a> {
+        source: &'a wire::Source,
+        dropped: u64,
+        events: &'a [wire::Event],
+    }
+    #[derive(serde::Serialize)]
+    struct LegacyBatch<'a> {
+        dropped: u64,
+        groups: Vec<LegacyGroup<'a>>,
+    }
+    let legacy = LegacyBatch {
+        dropped: batch.dropped,
+        groups: batch
+            .groups
+            .iter()
+            .map(|group| LegacyGroup {
+                source: &group.source,
+                dropped: group.dropped,
+                events: &group.events,
+            })
+            .collect(),
+    };
+    assert_eq!(
+        rmp_serde::to_vec_named(&batch).unwrap(),
+        rmp_serde::to_vec_named(&legacy).unwrap()
+    );
+
+    let mut batch = batch;
+    batch.groups[0].agent = Some(wire::AgentHash([0x5a; 32]));
+    let body = zstd::encode_all(&rmp_serde::to_vec_named(&batch).unwrap()[..], 3).unwrap();
+    let decoded = wire::decode_with_budget(&body, 1 << 20, 1 << 20).unwrap();
+    assert_eq!(decoded.groups[0].agent, batch.groups[0].agent);
 }
 
 #[test]

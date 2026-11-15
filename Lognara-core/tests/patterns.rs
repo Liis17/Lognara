@@ -105,6 +105,68 @@ async fn structured_logs_fit_capacity_and_rebuild_old_catalog_and_indexes() {
     core.shutdown().unwrap();
 }
 
+#[tokio::test]
+async fn pattern_search_and_details_apply_node_filters() {
+    use sha2::{Digest, Sha256};
+
+    let dir = tempfile::tempdir().unwrap();
+    let core = Core::open(config(dir.path())).unwrap();
+    let relay_a = core.journal.access.create_relay("relay-a").unwrap();
+    let relay_b = core.journal.access.create_relay("relay-b").unwrap();
+    let agent_a = core
+        .journal
+        .access
+        .create_agent("agent", relay_a.relay.id)
+        .unwrap();
+    let agent_b = core
+        .journal
+        .access
+        .create_agent("agent", relay_b.relay.id)
+        .unwrap();
+    let mut batch = wire::decode(include_bytes!("fixtures/relay-batch.bin"), 1 << 20).unwrap();
+    let mut group_a = batch.groups[0].clone();
+    let mut group_b = group_a.clone();
+    group_a.agent = Some(wire::AgentHash(
+        Sha256::digest(agent_a.token.as_bytes()).into(),
+    ));
+    group_a.events[0].timestamp = TS + SECOND;
+    group_a.events[0].message = "payment id=11 failed after 5ms".into();
+    group_b.agent = Some(wire::AgentHash(
+        Sha256::digest(agent_b.token.as_bytes()).into(),
+    ));
+    group_b.events[0].timestamp = TS + 2 * SECOND;
+    group_b.events[0].message = "payment id=12 failed after 7ms".into();
+    batch.groups = vec![group_a, group_b];
+    let body = zstd::encode_all(&rmp_serde::to_vec_named(&batch).unwrap()[..], 3).unwrap();
+    core.journal.accept(&body).unwrap();
+    processed(&core, 2).await;
+
+    let mut request = request(10, Sort::Count, &[]);
+    request
+        .filters
+        .insert("agent_id".into(), vec![agent_a.agent.id.to_string()]);
+    let response = patterns::search(&core, request).await.unwrap();
+    assert_eq!(response.total_events, 1);
+    assert_eq!(response.total_patterns, 1);
+    let pattern = &response.patterns[0];
+    assert_eq!(pattern.count, 1);
+
+    let details = patterns::details(
+        &core,
+        &pattern.pattern_id,
+        details(BTreeMap::from([(
+            "relay_id".into(),
+            vec![relay_b.relay.id.to_string()],
+        )])),
+    )
+    .await
+    .unwrap();
+    assert_eq!(details.pattern.count, 1);
+    assert_eq!(details.examples[0].relay_id, Some(relay_b.relay.id));
+    assert_eq!(details.examples[0].agent_id, Some(agent_b.agent.id));
+    core.shutdown().unwrap();
+}
+
 fn config(path: &std::path::Path) -> Config {
     let mut cfg = Config::from_lookup(|key| match key {
         "LOGNARA_ADMIN_TOKEN" => Some("admin".into()),

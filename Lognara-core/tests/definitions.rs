@@ -115,6 +115,7 @@ fn batch(groups: Vec<(Source, Vec<Event>)>) -> Vec<u8> {
             source,
             dropped: 0,
             events,
+            agent: None,
         })
         .collect();
     zstd::encode_all(&rmp_serde::to_vec_named(&batch).unwrap()[..], 3).unwrap()
@@ -727,7 +728,7 @@ async fn server_scopes_isolate_rules_preview_listing_and_queries() {
     drop(core);
     let core = Core::open(config(dir.path(), 100)).unwrap();
     assert_eq!(
-        lognara_core::scoped_metrics::sources(core.clone())
+        lognara_core::scoped_metrics::sources(core.clone(), Default::default())
             .await
             .unwrap()
             .len(),
@@ -1012,6 +1013,8 @@ async fn imports_hundreds_of_rules_per_source_and_reopens_catalog() {
     let row = lognara_core::model::StoredEvent {
         sequence: 0,
         core_received_at: now_nanos(),
+        relay_id: None,
+        agent_id: None,
         source,
         event: event(1, now_nanos(), "done"),
     };

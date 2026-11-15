@@ -89,6 +89,12 @@ async function settingsFixture(page: Page) {
       Object.assign(group, body);
       return route.fulfill({ json: group });
     }
+    if (/^\/api\/alerts\/rules\/[^/]+$/.test(path) && method === "DELETE") {
+      writes.push({ method, path, body });
+      const id = decodeURIComponent(path.split("/").at(-1)!);
+      state.alerts = state.alerts.filter((alert) => alert.id !== id);
+      return route.fulfill({ status: 204 });
+    }
     if (/^\/api\/alerts\/groups\/group-\d+$/.test(path) && method === "DELETE") {
       writes.push({ method, path, body });
       return route.fulfill({
@@ -234,6 +240,54 @@ test("missing metrics still allow alert editing and show global pause and no rec
   await page.goto("/metrics/detail?server=server-a&service=billing&name=custom&origin=rule");
   const ruleEditor = page.getByRole("region", { name: "Алерт метрики" });
   await expect(ruleEditor.getByLabel("Обработка отсутствия данных")).toHaveValue("normal");
+});
+
+test("MCP-scoped rule is shown beside the global rule and can only be deleted from UI", async ({ page }) => {
+  const { state, writes } = await settingsFixture(page);
+  const base = {
+    key,
+    enabled: true,
+    environment: null,
+    no_data: "loss" as const,
+    combine: "and" as const,
+    group_ids: [],
+    triggers: [{ window_seconds: 300, aggregate: "avg" as const, comparator: ">" as const, threshold: 1 }],
+    revision: 1,
+    enabled_at: 1,
+    state: "ok" as const,
+    loss_registered: false,
+    loss_at: null,
+    last_point_at: null,
+    last_as_of: null,
+    no_recipients: false,
+  };
+  state.alerts = [
+    { ...base, id: "alert-global", node_scope: { kind: "all" } },
+    { ...base, id: "alert-mcp", enabled: false, node_scope: { kind: "relay", id: 4 } },
+  ];
+  await page.goto("/settings");
+  const rules = page.getByRole("region", { name: "Все правила" });
+  await expect(rules.getByRole("listitem")).toHaveCount(2);
+  await expect(rules.getByText("Создано через MCP · relay 4 · изменяется через MCP", { exact: true })).toBeVisible();
+  await expect(rules.getByRole("link", { name: "Настроить", exact: true })).toHaveCount(1);
+  await expect(rules.getByRole("button", { name: "Удалить", exact: true })).toHaveCount(1);
+
+  page.once("dialog", (dialog) => dialog.dismiss());
+  await rules.getByRole("button", { name: "Удалить", exact: true }).click();
+  await expect(rules.getByRole("listitem")).toHaveCount(2);
+  page.once("dialog", (dialog) => dialog.accept());
+  await rules.getByRole("button", { name: "Удалить", exact: true }).click();
+  await expect(rules.getByRole("listitem")).toHaveCount(1);
+  expect(writes).toContainEqual({ method: "DELETE", path: "/api/alerts/rules/alert-mcp", body: null });
+  state.alerts = [
+    { ...base, id: "alert-global", node_scope: { kind: "all" } },
+    { ...base, id: "alert-mcp", enabled: false, node_scope: { kind: "relay", id: 4 } },
+  ];
+
+  await page.route("**/api/alerts/definition**", (route) => route.fulfill({ json: { alert: null } }));
+  await page.goto("/metrics/detail?server=server-a&service=billing&name=requests&origin=counter");
+  const editor = page.getByRole("region", { name: "Алерт метрики" });
+  await expect(editor.getByText("Создано через MCP · relay 4", { exact: true })).toBeVisible();
 });
 
 test("token validation error is visible and does not enable global alerts", async ({ page }) => {

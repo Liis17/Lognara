@@ -377,6 +377,7 @@ pub(crate) async fn frame(
                     "span_id" | "parent_span_id" => {
                         lit(ScalarValue::FixedSizeBinary(8, Some(hex::decode(value)?)))
                     }
+                    "relay_id" | "agent_id" => lit(ScalarValue::Int64(Some(value.parse()?))),
                     "level" => lit(ScalarValue::UInt8(Some(
                         level(value).context("validated level")?.code(),
                     ))),

@@ -9,7 +9,11 @@ Parent: [[Index]]
 
 ## Контракт
 
-MessagePack с именованными полями + ZSTD; `CoreBatch = dropped + groups`, группа = источник + dropped + события.
+MessagePack с именованными полями + ZSTD; `CoreBatch = dropped + groups`, группа = источник + dropped + события + необязательный `agent` (SHA-256 токена агента, см. [[Relay/LognaraRelay]]).
+
+### Идентичность узла
+
+Source-поля не доказывают принадлежность событий агенту, поэтому каждое событие и точка метрики хранят `relay_id`/`agent_id` (nullable). Relay не доверяется: тело в WAL хранится как есть, формат WAL не менялся. `Journal::accept_for_relay` получает relay_id из Bearer relay и отклоняет пачку (400) до дедупликации, если хеш группы принадлежит агенту другого relay; неизвестный хеш (удалённый агент) принимается, чтобы relay не повторял «ядовитую» пачку вечно. Хеш чужого relay возможен только при переносе spool или токена между relay; relay повторяет любой отказ, поэтому такая пачка блокирует его очередь до ручного вмешательства. Отклонение выбрано сознательно: relay_id не хранится в WAL, и принятая пачка была бы приписана чужому агенту. Декодирование и проверка идут после дедупликации и квот. При материализации `CoreBatch::into_events_with` переводит хеш в узел по in-memory карте `Access::agent_node`, без SQLite на пачку. Неизвестный хеш, группа без `agent` (старый relay) и данные до раскатки дают null и видны только запросам без фильтра узла. Ротация токена сохраняет старый хеш в `retired_agent_tokens`, поэтому события из spool relay со старым хешем остаются за тем же агентом. В JSON событий поля `relay_id`/`agent_id` выводятся только при наличии.
 Время — Unix наносекунды; `ingested_at` принадлежит агенту. Идентификаторы сохраняются без изменения.
 Внешний JSON — RFC3339, UUID/hex строки. Дедупликация реализована по байтам пачки, а не отдельным LogId. Relay делит новые исходящие пачки по согласованным лимитам 64/256 MiB и сохраняет байты при повторе.
 
@@ -24,6 +28,7 @@ MessagePack с именованными полями + ZSTD; `CoreBatch = droppe
 | `wire_budget::validate(bytes: &[u8], budget: usize): Result<()>` | Без аллокаций проверяет MessagePack и резервирует 128 байт/узел плюс длины string/bin. |
 | `Config::ingest_request_bytes(): usize` | Резерв body + две decoded capacity + модель для admission. |
 | `CoreBatch::into_events(first_sequence: u64, received_at: i64): Iterator<StoredEvent>` | Объединяет источник и события, назначает внутренние номера. |
+| `CoreBatch::into_events_with(first_sequence, received_at, resolve_agent): Iterator<StoredEvent>` | То же с переводом хеша агента группы в `relay_id`/`agent_id`. |
 | `LogEvent::from(row: StoredEvent): LogEvent` | Преобразует бинарные поля в JSON API. |
 
 ## Зависимости
@@ -44,6 +49,7 @@ WAL хранит одну версионированную запись на ф�
 | `Wal::pending_batches(): usize` | Число пачек для ограничения памяти метаданных очереди. |
 | `Journal::open(config: Config): Result<Arc<Journal>>` | Захватывает core.lock, открывает Access и восстанавливает журнал. |
 | `Journal::accept(body: &[u8]): Result<Receipt>` | Дедуплицирует, проверяет лимиты, подтверждает после fsync. |
+| `Journal::accept_for_relay(body: &[u8], relay_id: i64): Result<Receipt>` | То же для `/v1/batches`: дополнительно отклоняет хеш агента чужого relay. |
 | `~~api::router(journal: Arc<Journal>)~~ (удалён: 2026-09-29)` | Приём, health, авторизованные метрики. |
 
 ## Сегменты
@@ -80,7 +86,7 @@ WAL хранит одну версионированную запись на ф�
 
 ## Поиск
 
-`POST /v1/logs/search`: from/to RFC3339, filters с массивами значений, text (all/phrase), limit, cursor. `GET /v1/traces/{trace_id}`: те же границы, ASC. Сортировка timestamp + sequence. Tantivy выдаёт ограниченный top-k каждого сегмента, глобальный буфер тоже ограничен limit+1. Полные события читаются из Arrow или выбранных строк Parquet. HMAC-курсор фиксирует watermark, параметры и поколение retention; TTL 10 минут, после рестарта 410.
+`POST /v1/logs/search`: from/to RFC3339, filters с массивами значений, text (all/phrase), limit, cursor. `GET /v1/traces/{trace_id}`: те же границы, ASC, необязательные query `relay_id`/`agent_id`. Фильтры `relay_id`/`agent_id` (положительный i64, нормализуется в десятичную строку, `query::normalize_node_id`) — точные поля Tantivy и колонки Parquet; работают в search, trace, sources, histogram, group-by, summary, patterns и issues (в DataFusion — сравнение Int64-колонки). Старые сегменты без колонок читаются как null, их индекс пересобирается из Parquet при первом чтении, а фильтр узла их не возвращает. Пересборка синхронная, на пути запроса и под общим `opening` mutex: первый широкий поиск по старому периоду после обновления может упереться в query timeout, а параллельные поиски по неоткрытым сегментам ждут. Фоновой пересборки нет. Сортировка timestamp + sequence. Tantivy выдаёт ограниченный top-k каждого сегмента, глобальный буфер тоже ограничен limit+1. Полные события читаются из Arrow или выбранных строк Parquet. HMAC-курсор фиксирует watermark, параметры и поколение retention; TTL 10 минут, после рестарта 410.
 
 Модель и JSON-ответ страницы ограничены `LOGNARA_SEARCH_MEMORY_BYTES` (128 MiB на поиск): проверка перед десериализацией каждой строки, общий бюджет всех сегментов, 503 при превышении без частичного ответа. Search permit удерживается до завершения сериализации ответа, а при HTTP-таймауте остаётся у выполняющегося blocking task.
 
@@ -152,7 +158,7 @@ Relay с персональным токеном отправляет `POST /v1/
 
 `status::status(core: &Core): io::Result<Status>` обслуживает query-защищённый `GET /v1/status`: package version, необязательные `release_version`/`git_commit`, ready, visible sequence/lag, WAL и лимит, число закрытых сегментов, Parquet, индексы включая активный сегмент, oldest event и настроенный retention, total/available filesystem data_dir. Release metadata приходит только из Docker build args; package version не является image tag, локальная сборка без args сериализует `null`. Lag публикации не является p95 доставки; размеры не означают квоту процесса. Размеры закрытого сегмента считаются один раз (`DiskSegment::sizes`), повторно обходится только индекс активного сегмента. Snapshot удерживает сегменты от retention во время подсчёта. Полный [контракт инфраструктуры](../../../docs/DockInfrastructureContract.md).
 
-`POST /v1/logs/sources` принимает `field` service/server/environment, необязательные точные фильтры по всем трём полям, limit 1..1000 и cursor. Он читает имена из Parquet закрытых и Arrow активного сегмента одного snapshot; курсор фиксирует watermark первой страницы и исключает более новые строки, поэтому ingest не нарушает пагинацию. После изменения generation или рестарта следующий cursor получает 410. Обработка занимает общий analytics slot, работает через `spawn_blocking`, уважает query timeout/cancellation и не заводит отдельный каталог. Ответ включает `values`, `next_cursor`, `as_of`.
+`POST /v1/logs/sources` принимает `field` service/server/environment, необязательные точные фильтры по всем трём полям и по `relay_id`/`agent_id` (строки; фильтр узла проверяется по колонкам каждого события, поэтому источники вне скоупа не возвращаются), limit 1..1000 и cursor. Он читает имена из Parquet закрытых и Arrow активного сегмента одного snapshot; курсор фиксирует watermark первой страницы и исключает более новые строки, поэтому ingest не нарушает пагинацию. После изменения generation или рестарта следующий cursor получает 410. Обработка занимает общий analytics slot, работает через `spawn_blocking`, уважает query timeout/cancellation и не заводит отдельный каталог. Ответ включает `values`, `next_cursor`, `as_of`.
 
 ## Метрики
 
@@ -160,7 +166,7 @@ Relay с персональным токеном отправляет `POST /v1/
 
 Запрос видит те же данные, что и поиск: Parquet-файлы из `Snapshot.series_files` и открытые точки сегмента. Без определения ряд считается показателем (среднее), если все его точки gauge, иначе приращениями (сумма). Определение задаёт `kind` (`delta`, `cumulative`, `gauge`) и `aggregation`; у `cumulative` всегда сумма приращений.
 
-Необязательные `server` и `environment` сужают запрос сервером и окружением; `GET /v1/series` отдаёт окружения (`environments`) из `series_environments` и открытого сегмента. Для полных суток окна запрос берёт суточный агрегат вместо точек, если он актуален (раздел «Суточные агрегаты»).
+Необязательные `relay_id`/`agent_id` (query у GET, поля тела у POST) ограничивают `/v1/series`, `/v1/series/sources`, `/v1/series/query`, `/v1/series/lookup` и `/v1/series/alerts/query` точками этого узла, включая baseline `increase`; со фильтром список метрик и источников строится только по таблице `series_nodes` каталога и открытому сегменту, определения без точек узла не выдаются. Подробности хранения узла и инвалидации агрегатов: [[Design/Metrics]]. Необязательные `server` и `environment` сужают запрос сервером и окружением; `GET /v1/series` отдаёт окружения (`environments`) из `series_environments` и открытого сегмента. Для полных суток окна запрос берёт суточный агрегат вместо точек, если он актуален (раздел «Суточные агрегаты»).
 
 Определения уникальны по `(server, service, name)`. `scoped_metrics.rs` хранит индекс источников и серий по серверу; `GET /v1/series?group_by=server` и `GET /v1/series/sources` читают его вместе с открытым снимком. При отсутствии сервера несовместимые эффективные настройки дают `server_required`. Серверный каталог поддерживает фильтры `server`, `service`; `POST /v1/series/lookup` возвращает метаданные выбранных составных ключей. Список источников включает определения без точек; контракт выборки и избранного Dock описан в [MetricsBundle](../../../docs/MetricsBundle.md#выборочные-метаданные-и-избранное).
 
@@ -176,7 +182,8 @@ Endpoint использует отдельный одновременный сл
 
 | Метод | Назначение |
 |---|---|
-| `series::schema(): SchemaRef` | Схема Parquet точек: время UTC, источник, `name`, `origin`, `rule_id`, `labels`, `value`, `event_id`. |
+| `series::schema(): SchemaRef` | Схема Parquet точек: время UTC, источник, `name`, `origin`, `rule_id`, `labels`, `value`, `event_id`, nullable `relay_id`/`agent_id`. |
+| `series::conform(batch: &RecordBatch): Result<RecordBatch>` | Дополняет батч старого файла точек null-колонками текущей схемы при слиянии. |
 | `series::encode(points: &[Point]): Result<RecordBatch>` | Строит RecordBatch точек по схеме серий. |
 | `SeriesFileMeta::overlaps(&self, from: i64, to: i64): bool` | Есть ли у файла точки во времени `[from, to)`. |
 | `extract::native(row: &StoredEvent): (Vec<Point>, bool)` | Точки из `attributes.Metrics` (SchemaVersion 2); флаг - была ошибка разбора. |
@@ -269,7 +276,7 @@ Endpoint использует отдельный одновременный сл
 
 ## Реестр подключений
 
-`access.sqlite3` в `data_dir` хранит relay и агентов отдельно от `catalog.sqlite`. SQLite использует WAL, FULL, foreign keys и отдельный `user_version=1`. Реестр открывается после захвата `core.lock`. Идентификаторы i64 не переиспользуются, `created_at` — RFC3339 UTC.
+`access.sqlite3` в `data_dir` хранит relay и агентов отдельно от `catalog.sqlite`. SQLite использует WAL, FULL, foreign keys и отдельный `user_version=2`; версия 1 мигрирует созданием `retired_agent_tokens(token_hash, agent_id ON DELETE CASCADE)`. Карты relay-токенов и хешей агентов (текущих и retired) перезагружаются при создании, ротации и удалении. Реестр открывается после захвата `core.lock`. Идентификаторы i64 не переиспользуются, `created_at` — RFC3339 UTC.
 
 Токен: 32 системных случайных байта в hex с префиксом `lnr_` для relay или `lna_` для агента. Plaintext выдаётся только при создании или перевыпуске; БД хранит SHA-256. Имя после trim: 1..64 символа, без управляющих. Relay-имена уникальны глобально, имена агентов внутри relay. Relay с агентами удалить нельзя.
 
@@ -277,7 +284,7 @@ POST `/v1/admin/agents/{id}/rotate-token` с admin Bearer, без тела, во
 
 `LOGNARA_ADMIN_TOKEN` обязателен и отличается от `LOGNARA_QUERY_TOKEN`; `LOGNARA_INGEST_TOKEN` удалён. Admin API: GET/POST `/v1/admin/relays`, `/v1/admin/agents`, DELETE по `/{id}`. SQLite вызывается через `spawn_blocking`. Ошибки JSON `{"error":"code"}`: invalid_name/invalid_request (400), relay_not_found/not_found (404), name_taken/relay_has_agents (409).
 
-POST `/v1/batches` и GET `/v1/agents` проверяют SHA-256 персонального relay-токена по RwLock-карте до чтения тела. Один Bearer-заголовок, схема без учёта регистра. Relay получает только хеши своих агентов в `{"agents":["sha256 hex"]}`. После удаления relay карта обновляется и токен даёт 401. Поля источника не сверяются.
+POST `/v1/batches` и GET `/v1/agents` проверяют SHA-256 персонального relay-токена по RwLock-карте до чтения тела. Один Bearer-заголовок, схема без учёта регистра. Relay получает только хеши своих агентов в `{"agents":["sha256 hex"]}`. После удаления relay карта обновляется и токен даёт 401. Поля источника не сверяются; принадлежность событий задаёт хеш агента группы (раздел «Идентичность узла»).
 
 | Метод | Назначение |
 |---|---|

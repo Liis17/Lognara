@@ -170,12 +170,35 @@ async fn group_by(
     }
 }
 
+/// Фильтр узла из строки запроса: relay_id и agent_id - положительные i64, иначе 400.
+fn node_query(
+    query: &std::collections::HashMap<String, String>,
+) -> Result<crate::scoped_metrics::NodeFilter, QueryError> {
+    let mut ids: [Option<i64>; 2] = [None, None];
+    for (slot, field) in ids.iter_mut().zip(["relay_id", "agent_id"]) {
+        if let Some(value) = query.get(field) {
+            let mut value = value.clone();
+            query::normalize_node_id(&mut value, field)?;
+            *slot = Some(
+                value
+                    .parse::<i64>()
+                    .map_err(|_| QueryError::Invalid(format!("{field} must be a positive i64")))?,
+            );
+        }
+    }
+    crate::scoped_metrics::NodeFilter::new(ids[0], ids[1])
+}
+
 async fn list_series(
     State(core): State<Arc<Core>>,
     Query(query): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
+    let node = match node_query(&query) {
+        Ok(node) => node,
+        Err(error) => return error.into_response(),
+    };
     match query.get("group_by").map(String::as_str) {
-        None => run_analytics(&core, series_query::list(core.clone())).await,
+        None => run_analytics(&core, series_query::list(core.clone(), node)).await,
         Some("server") => {
             run_analytics(
                 &core,
@@ -185,6 +208,7 @@ async fn list_series(
                         server: query.get("server").cloned(),
                         service: query.get("service").cloned(),
                         keys: None,
+                        node,
                     },
                 ),
             )
@@ -202,12 +226,18 @@ async fn lookup_series(
 ) -> Response {
     match request {
         Ok(Json(request)) => {
+            let node =
+                match crate::scoped_metrics::NodeFilter::new(request.relay_id, request.agent_id) {
+                    Ok(node) => node,
+                    Err(error) => return error.into_response(),
+                };
             run_analytics(
                 &core,
                 crate::scoped_metrics::selected(
                     core.clone(),
                     crate::scoped_metrics::Selection {
                         keys: Some(request.keys),
+                        node,
                         ..Default::default()
                     },
                 ),
@@ -217,9 +247,16 @@ async fn lookup_series(
         Err(error) => QueryError::Invalid(error.body_text()).into_response(),
     }
 }
-async fn series_sources(State(core): State<Arc<Core>>) -> Response {
+async fn series_sources(
+    State(core): State<Arc<Core>>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let node = match node_query(&query) {
+        Ok(node) => node,
+        Err(error) => return error.into_response(),
+    };
     run_analytics(&core, async {
-        crate::scoped_metrics::sources(core.clone())
+        crate::scoped_metrics::sources(core.clone(), node)
             .await
             .map(|sources| serde_json::json!({"sources":sources}))
     })
@@ -438,6 +475,8 @@ async fn log_sources(
 struct TraceParams {
     from: String,
     to: String,
+    relay_id: Option<i64>,
+    agent_id: Option<i64>,
     #[serde(default = "query::default_limit")]
     limit: usize,
     cursor: Option<String>,
@@ -448,12 +487,18 @@ async fn trace(
     Path(trace_id): Path<String>,
     Query(params): Query<TraceParams>,
 ) -> Response {
+    let mut filters = std::collections::BTreeMap::from([("trace_id".into(), vec![trace_id])]);
+    for (field, id) in [("relay_id", params.relay_id), ("agent_id", params.agent_id)] {
+        if let Some(id) = id {
+            filters.insert(field.into(), vec![id.to_string()]);
+        }
+    }
     run_search(
         core,
         SearchRequest {
             from: params.from,
             to: params.to,
-            filters: std::collections::BTreeMap::from([("trace_id".into(), vec![trace_id])]),
+            filters,
             text: None,
             limit: params.limit,
             cursor: params.cursor,
@@ -529,7 +574,11 @@ async fn authorize(State(expected): State<[u8; 32]>, request: Request, next: Nex
     next.run(request).await
 }
 
-async fn ingest(State(journal): State<Arc<Journal>>, request: Request) -> Response {
+async fn ingest(
+    State(journal): State<Arc<Journal>>,
+    Extension(relay_id): Extension<i64>,
+    request: Request,
+) -> Response {
     if !header_is(request.headers(), "content-type", "application/msgpack")
         || !header_is(request.headers(), "content-encoding", "zstd")
     {
@@ -578,7 +627,7 @@ async fn ingest(State(journal): State<Arc<Journal>>, request: Request) -> Respon
     let worker = journal.clone();
     let result = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        worker.accept(&body)
+        worker.accept_for_relay(&body, relay_id)
     })
     .await;
     match result {

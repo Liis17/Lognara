@@ -513,8 +513,11 @@ impl Materializer {
         };
         let mut chunk = Vec::new();
         let mut chunk_bytes = 0usize;
+        let access = self.core.journal.access.clone();
         for row in batch
-            .into_events(receipt.first_sequence, receipt.received_at)
+            .into_events_with(receipt.first_sequence, receipt.received_at, move |hash| {
+                access.agent_node(hash)
+            })
             .skip(skip)
         {
             chunk_bytes = chunk_bytes.saturating_add(estimated_bytes(&row));
@@ -1165,7 +1168,8 @@ pub(crate) fn write_series(
                 if stop() {
                     return Ok(false);
                 }
-                writer.write(&batch?)?;
+                // Старые файлы без колонок узла приводятся к текущей схеме.
+                writer.write(&series::conform(&batch?)?)?;
                 failpoint("series_compact_during_parquet");
             }
         }
@@ -1248,6 +1252,99 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(names, ["broken.parquet"]);
+        core.shutdown().unwrap();
+    }
+
+    #[test]
+    fn merge_keeps_legacy_series_rows_with_null_node_columns() {
+        use datafusion::arrow::array::{Array, Int64Array};
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = crate::config::Config::from_lookup(|key| match key {
+            "LOGNARA_ADMIN_TOKEN" => Some("ingest".into()),
+            "LOGNARA_QUERY_TOKEN" => Some("query".into()),
+            _ => None,
+        })
+        .unwrap();
+        config.data_dir = dir.path().into();
+        config.disk_reserve_bytes = 1;
+        let core = Core::open(config).unwrap();
+        let directory = dir.path().join("metrics/2026/01");
+        fs::create_dir_all(&directory).unwrap();
+        let point = |relay_id: Option<i64>| series::Point {
+            timestamp: 1,
+            source: crate::wire::Source {
+                environment: None,
+                server: "srv".into(),
+                backend: "be".into(),
+                service: "api".into(),
+                service_instance: None,
+            },
+            name: "runs".into(),
+            origin: series::Origin::Counter,
+            rule_id: None,
+            labels: String::new(),
+            value: 1.0,
+            event_id: None,
+            relay_id,
+            agent_id: relay_id.map(|_| 7),
+        };
+        // Старый файл без колонок узла и новый с узлом; слияние обязано записать обе группы.
+        let current = series::encode(&[point(None)]).unwrap();
+        let legacy = current
+            .project(&(0..current.num_columns() - 2).collect::<Vec<_>>())
+            .unwrap();
+        let legacy_path = directory.join("legacy.parquet");
+        columns::write_parquet_with(&legacy_path, legacy.schema(), &[legacy], "unused").unwrap();
+        let fresh_path = directory.join("fresh.parquet");
+        columns::write_parquet_with(
+            &fresh_path,
+            series::schema(),
+            &[series::encode(&[point(Some(5))]).unwrap()],
+            "unused",
+        )
+        .unwrap();
+        let source = |path: &std::path::Path, id: &str| {
+            Arc::new(SeriesFile {
+                meta: SeriesFileMeta {
+                    version: 1,
+                    id: id.into(),
+                    path: format!("metrics/2026/01/{id}.parquet"),
+                    rows: 1,
+                    min_timestamp: 1,
+                    max_timestamp: 1,
+                    closed_at: 0,
+                },
+                path: path.into(),
+            })
+        };
+        let merged = write_series(
+            &core,
+            "metrics/2026/01",
+            &[source(&legacy_path, "legacy"), source(&fresh_path, "fresh")],
+            &|| false,
+        )
+        .unwrap()
+        .unwrap();
+
+        let relay: Vec<Option<i64>> = columns::stream_batches(&merged.path)
+            .unwrap()
+            .flat_map(|batch| {
+                let batch = batch.unwrap();
+                let column = batch
+                    .column_by_name("relay_id")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap()
+                    .clone();
+                (0..column.len())
+                    .map(|row| (!column.is_null(row)).then(|| column.value(row)))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(relay.len(), 2);
+        assert_eq!(relay.iter().filter(|relay| relay.is_none()).count(), 1);
+        assert!(relay.contains(&Some(5)));
         core.shutdown().unwrap();
     }
 

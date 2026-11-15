@@ -15,7 +15,8 @@ Lognara-dock/
     lib.rs                    run(): axum::serve, наблюдатель проблем, отмена App::shutdown
     config.rs                 LOGNARA_DOCK_* и проверки
     api.rs                    App/AppState, ApiError, router, health, SPA
-    mcp.rs                    stateless Streamable HTTP `/mcp`, read-only tools, Bearer auth, cursors и limits
+    mcp.rs                    stateless Streamable HTTP `/mcp`, tools по правам токена, скоуп узла, алерты, Bearer auth, cursors и limits
+    token_access.rs           права (логи, метрики, запись алертов) и скоуп узла MCP-токена
     oauth.rs                  OAuth metadata, restricted ChatGPT CIMD, PKCE, token/refresh endpoints
     mcp_access.rs             API страницы MCP-доступа, PAT и OAuth grants/consent
     htpasswd.rs               разбор, кэш по stamp, verify, атомарная перезапись
@@ -44,6 +45,7 @@ Lognara-dock/
     issues.rs                 общий статус, история, Origin, проверка ответов core, наблюдатель
     infra.rs                  session/no-store, частичные ошибки, TTL/idle/spool, relay_id и relay_silent
     series.rs                 proxy метрик, ошибки core, сессия, Origin и таймаут 35 с
+    mcp_scope.rs              права и скоуп MCP: tools/list, forbidden, скоуп в запросах core, курсоры, алерты, OAuth consent
     static.rs                 SPA fallback и 404 для /api
   web/
     public/fonts/             локальные Commissioner / IBM Plex Mono, OFL, provenance
@@ -68,7 +70,8 @@ Lognara-dock/
     src/infraPresentation.ts    общие подписи статусов, времени, размеров и групп
     src/useInfrastructure.ts    общий опрос сводки, отмена, 401 и stale-снимок
     src/pages/Access.tsx      профили relay/агентов, создание, одноразовый токен, удаление
-    src/pages/McpAccess.tsx   MCP URL, одноразовый PAT, срок/last-use и отзыв PAT/grants
+    src/pages/McpAccess.tsx   MCP URL, одноразовый PAT с правами и скоупом, срок/last-use и отзыв PAT/grants
+    src/components/AccessFields.tsx выбор прав и скоупа узла для PAT и OAuth consent
     src/pages/OAuthConsent.tsx OAuth client/scope/resource и подтверждение пользователя
     src/pages/Metrics.tsx     плитки по серверам/сервисам и очередь миниграфиков
     src/pages/MetricDetail.tsx отдельная страница метрики с серверной областью
@@ -81,7 +84,7 @@ Lognara-dock/
     playwright.config.ts     Chromium, Vite webServer и сценарии tests/dock.spec.ts и tests/errors.spec.ts
     tests/metrics.spec.ts     окружения/разбиение, regex preview/save, навигация и mobile
     tests/infrastructure.spec.ts сводка и дерево: навигация, выбор, polling, ошибка, mobile и 500 узлов
-    tests/mcp-access.spec.ts выпуск/копирование PAT, отсутствие localStorage, expiry/revoke, OAuth consent и возврат после login
+    tests/mcp-access.spec.ts выпуск/копирование PAT с правами и скоупом, отсутствие localStorage, expiry/revoke, OAuth consent и возврат после login
     tests/dock.spec.ts        вход, аккаунт, поиск, cursor, Trace/ссылка, аналитика, Live, mobile
 ```
 

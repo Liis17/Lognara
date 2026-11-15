@@ -97,6 +97,7 @@ async fn agent_heartbeat(
 
 async fn ingest(
     State(state): State<IngestState>,
+    Extension(AgentHash(agent)): Extension<AgentHash>,
     request: Request,
 ) -> Result<StatusCode, IngestError> {
     if !header_is(request.headers(), CONTENT_TYPE, "application/msgpack")
@@ -122,7 +123,7 @@ async fn ingest(
         .map_err(|_| IngestError::Timeout)??;
     let telemetry = state.telemetry.clone();
     let events = crate::memory::run_blocking(permit, move || {
-        accept(&state.spool, &body, &state.resources)
+        accept(&state.spool, &body, &state.resources, agent)
     })
     .await
     .map_err(|error| {
@@ -149,8 +150,13 @@ async fn read_body(mut body: Body) -> Result<Vec<u8>, IngestError> {
     Ok(bytes)
 }
 
-/// Возвращает число сохранённых событий.
-fn accept(spool: &Spool, body: &[u8], resources: &Resources) -> Result<u64, IngestError> {
+/// Возвращает число сохранённых событий. `agent` — хеш токена, прошедшего авторизацию.
+fn accept(
+    spool: &Spool,
+    body: &[u8],
+    resources: &Resources,
+    agent: Hash,
+) -> Result<u64, IngestError> {
     let mut budget = crate::model_budget::ModelBudget::new(resources.model_limit);
     let batch = agent_wire::decode_with_budget(body, MAX_DECODED, &mut budget)?;
     if batch.records.is_empty() {
@@ -202,6 +208,7 @@ fn accept(spool: &Spool, body: &[u8], resources: &Resources) -> Result<u64, Inge
             source,
             dropped: batch.dropped,
             events,
+            agent: Some(crate::core_wire::AgentHash(agent)),
         }],
     };
     let mut encoder = BatchEncoder::new(
@@ -355,6 +362,7 @@ mod tests {
         .unwrap();
         (dir, spool, Resources::new(&config))
     }
+    const AGENT: Hash = [7; 32];
     fn encoded(batch: &agent_wire::Batch) -> Vec<u8> {
         zstd::encode_all(&rmp_serde::to_vec_named(batch).unwrap()[..], 3).unwrap()
     }
@@ -435,11 +443,11 @@ mod tests {
         batch.records.clear();
         batch.dropped = 7;
         assert!(matches!(
-            accept(&spool, &encoded(&batch), &resources),
+            accept(&spool, &encoded(&batch), &resources, AGENT),
             Err(IngestError::EmptyBatch)
         ));
         assert!(matches!(
-            accept(&spool, b"invalid", &resources),
+            accept(&spool, b"invalid", &resources, AGENT),
             Err(IngestError::InvalidBody)
         ));
         assert!(spool.is_empty());
@@ -464,7 +472,7 @@ mod tests {
             },
         ];
         assert!(matches!(
-            accept(&spool, &encoded(&batch), &resources),
+            accept(&spool, &encoded(&batch), &resources, AGENT),
             Err(IngestError::TooLarge)
         ));
         assert!(spool.is_empty());
@@ -480,14 +488,14 @@ mod tests {
             payload: agent_wire::Payload::Text("x".repeat((2 << 20) + 1)),
         }];
         assert!(matches!(
-            accept(&spool, &encoded(&batch), &resources),
+            accept(&spool, &encoded(&batch), &resources, AGENT),
             Err(IngestError::TooLarge)
         ));
         assert!(spool.is_empty());
         drop(spool);
         let spool = Spool::open(dir.path(), 1).await.unwrap();
         assert!(matches!(
-            accept(&spool, &encoded(&fixture()), &resources),
+            accept(&spool, &encoded(&fixture()), &resources, AGENT),
             Err(IngestError::BufferFull)
         ));
         assert!(spool.is_empty());

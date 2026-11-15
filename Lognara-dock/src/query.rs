@@ -12,6 +12,7 @@ use serde_json::Value;
 use crate::api::{ApiError, AppState};
 use crate::core_client::CoreQueryError;
 use crate::session::AuthUser;
+use crate::token_access::Scope;
 
 pub type Filters = BTreeMap<String, Vec<String>>;
 
@@ -300,7 +301,7 @@ pub async fn trace(
 ) -> Result<Response, ApiError> {
     let Path(trace_id) = path.map_err(|_| ApiError::BadRequest("invalid_request"))?;
     let Query(params) = params.map_err(|_| ApiError::BadRequest("invalid_request"))?;
-    Ok(Json(app.core.trace(&trace_id, &params).await?).into_response())
+    Ok(Json(app.core.trace(&trace_id, &params, Scope::All).await?).into_response())
 }
 
 pub async fn histogram(

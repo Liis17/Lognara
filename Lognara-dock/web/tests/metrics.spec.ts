@@ -28,6 +28,7 @@ async function fixture(
     enabled: boolean;
     alerts: {
       key: Pick<typeof metric, "server" | "service" | "name" | "origin">;
+      node_scope: { kind: "all" } | { kind: "relay" | "agent"; id: number };
       enabled: boolean;
       state: "unknown" | "ok" | "firing";
       no_recipients: boolean;
@@ -218,6 +219,7 @@ test("enabled alert eye appears for any metric and is muted while global alerts 
               name: "requests",
               origin: "counter",
             },
+            node_scope: { kind: "all" },
             enabled: true,
             state: "firing",
             no_recipients: true,
@@ -237,6 +239,26 @@ test("enabled alert eye appears for any metric and is muted while global alerts 
   );
   await expect(page.locator(".metric-alert-indicator.paused")).toHaveCount(1);
   expect(summaryRequests).toBe(1);
+});
+test("tile eye follows the global rule when an MCP-scoped rule shares its key", async ({
+  page,
+}) => {
+  await fixture(page);
+  const key = { server: "server-a", service: "billing", name: "requests", origin: "counter" };
+  await page.route("**/api/alerts/summary", async (route) => {
+    await route.fulfill({
+      json: {
+        enabled: true,
+        alerts: [
+          { key, node_scope: { kind: "all" }, enabled: true, state: "ok", no_recipients: false },
+          { key, node_scope: { kind: "relay", id: 4 }, enabled: false, state: "unknown", no_recipients: false },
+        ],
+      },
+    });
+  });
+  await page.goto("/metrics");
+  await expect(page.getByRole("link", { name: "Настроить алерт метрики" })).toBeVisible();
+  await expect(page.locator(".metric-alert-indicator.paused")).toHaveCount(0);
 });
 test("manual creation uses dependent selects and scoped editor on mobile", async ({
   page,

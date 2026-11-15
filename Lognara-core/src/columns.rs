@@ -8,8 +8,8 @@ use std::{
 use anyhow::{Result, anyhow, ensure};
 use datafusion::arrow::{
     array::{
-        Array, ArrayRef, FixedSizeBinaryArray, FixedSizeBinaryBuilder, RecordBatch, StringArray,
-        TimestampNanosecondArray, UInt8Array, UInt64Array,
+        Array, ArrayRef, FixedSizeBinaryArray, FixedSizeBinaryBuilder, Int64Array, RecordBatch,
+        StringArray, TimestampNanosecondArray, UInt8Array, UInt64Array,
     },
     datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit},
 };
@@ -64,6 +64,8 @@ pub fn schema() -> SchemaRef {
                     DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
                     false,
                 ),
+                Field::new("relay_id", DataType::Int64, true),
+                Field::new("agent_id", DataType::Int64, true),
             ]))
         })
         .clone()
@@ -139,6 +141,8 @@ pub fn encode(rows: &[StoredEvent]) -> Result<RecordBatch> {
             TimestampNanosecondArray::from_iter_values(rows.iter().map(|r| r.core_received_at))
                 .with_timezone("UTC"),
         ),
+        Arc::new(Int64Array::from_iter(rows.iter().map(|row| row.relay_id))),
+        Arc::new(Int64Array::from_iter(rows.iter().map(|row| row.agent_id))),
     ];
     Ok(RecordBatch::try_new(schema(), arrays)?)
 }
@@ -151,7 +155,12 @@ fn column<'a, T: 'static>(batch: &'a RecordBatch, name: &str) -> Result<&'a T> {
 }
 
 pub fn decode(batch: &RecordBatch) -> Result<Vec<StoredEvent>> {
-    ensure!(batch.schema() == schema(), "unsupported log schema");
+    let current = schema();
+    let legacy = legacy_schema();
+    ensure!(
+        batch.schema().as_ref() == current.as_ref() || batch.schema().as_ref() == &legacy,
+        "unsupported log schema"
+    );
     for (field, array) in batch.schema().fields().iter().zip(batch.columns()) {
         ensure!(
             field.is_nullable() || array.null_count() == 0,
@@ -177,6 +186,8 @@ pub fn decode(batch: &RecordBatch) -> Result<Vec<StoredEvent>> {
     let attrs = column::<StringArray>(batch, "attributes")?;
     let sequence = column::<UInt64Array>(batch, "sequence")?;
     let received = column::<TimestampNanosecondArray>(batch, "core_received_at")?;
+    let relay_id = optional_i64_column(batch, "relay_id")?;
+    let agent_id = optional_i64_column(batch, "agent_id")?;
     let optional =
         |array: &StringArray, row| (!array.is_null(row)).then(|| array.value(row).to_owned());
     (0..batch.num_rows())
@@ -184,6 +195,8 @@ pub fn decode(batch: &RecordBatch) -> Result<Vec<StoredEvent>> {
             Ok(StoredEvent {
                 sequence: sequence.value(i),
                 core_received_at: received.value(i),
+                relay_id: relay_id.and_then(|array| (!array.is_null(i)).then(|| array.value(i))),
+                agent_id: agent_id.and_then(|array| (!array.is_null(i)).then(|| array.value(i))),
                 source: Source {
                     environment: optional(environment, i),
                     server: server.value(i).into(),
@@ -219,6 +232,43 @@ pub fn decode(batch: &RecordBatch) -> Result<Vec<StoredEvent>> {
             })
         })
         .collect()
+}
+
+fn legacy_schema() -> Schema {
+    Schema::new(
+        schema()
+            .fields()
+            .iter()
+            .filter(|field| field.name() != "relay_id" && field.name() != "agent_id")
+            .map(|field| field.as_ref().clone())
+            .collect::<Vec<_>>(),
+    )
+}
+
+pub(crate) fn with_node_columns(batch: &RecordBatch) -> Result<RecordBatch> {
+    if batch.schema().as_ref() == schema().as_ref() {
+        return Ok(batch.clone());
+    }
+    ensure!(
+        batch.schema().as_ref() == &legacy_schema(),
+        "unsupported log schema"
+    );
+    let mut arrays = batch.columns().to_vec();
+    arrays.push(Arc::new(Int64Array::from(vec![None; batch.num_rows()])));
+    arrays.push(Arc::new(Int64Array::from(vec![None; batch.num_rows()])));
+    Ok(RecordBatch::try_new(schema(), arrays)?)
+}
+
+fn optional_i64_column<'a>(batch: &'a RecordBatch, name: &str) -> Result<Option<&'a Int64Array>> {
+    batch
+        .column_by_name(name)
+        .map(|array| {
+            array
+                .as_any()
+                .downcast_ref()
+                .ok_or_else(|| anyhow!("invalid column {name}"))
+        })
+        .transpose()
 }
 
 pub fn write_parquet(path: &Path, batches: &[RecordBatch]) -> Result<()> {
@@ -364,4 +414,40 @@ pub fn read_rows_with_budget(
     }
     ensure!(rows.len() == row_ids.len(), "Parquet row count mismatch");
     Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compaction_upgrades_legacy_batches_with_null_node_columns() {
+        let row = crate::wire::decode(include_bytes!("../tests/fixtures/relay-batch.bin"), 1 << 20)
+            .unwrap()
+            .into_events(1, 123)
+            .next()
+            .unwrap();
+        let current = encode(&[row]).unwrap();
+        let fields = current
+            .schema()
+            .fields()
+            .iter()
+            .filter(|field| field.name() != "relay_id" && field.name() != "agent_id")
+            .map(|field| field.as_ref().clone())
+            .collect::<Vec<_>>();
+        let arrays = current
+            .schema()
+            .fields()
+            .iter()
+            .zip(current.columns())
+            .filter(|(field, _)| field.name() != "relay_id" && field.name() != "agent_id")
+            .map(|(_, array)| array.clone())
+            .collect::<Vec<_>>();
+        let legacy = RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).unwrap();
+
+        let batch = with_node_columns(&legacy).unwrap();
+        assert_eq!(batch.schema().as_ref(), schema().as_ref());
+        assert_eq!(batch.column_by_name("relay_id").unwrap().null_count(), 1);
+        assert_eq!(batch.column_by_name("agent_id").unwrap().null_count(), 1);
+    }
 }

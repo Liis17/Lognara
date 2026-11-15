@@ -3,6 +3,7 @@ import {
   api,
   ApiError,
   errorText,
+  nodeScopeLabel,
   type AlertAggregate,
   type MetricAlertDefinition,
   type MetricAlertDefinitionInput,
@@ -167,6 +168,15 @@ export default function MetricAlertEditor({
   };
 
   const groups: MetricAlertGroup[] = settings?.groups ?? [];
+  // Скоупленные правила этого ключа созданы через MCP: здесь их только показываем.
+  const scopedRules = (settings?.alerts ?? []).filter(
+    (rule) =>
+      rule.node_scope.kind !== "all" &&
+      rule.key.server === keyValue.server &&
+      rule.key.service === keyValue.service &&
+      rule.key.name === keyValue.name &&
+      rule.key.origin === keyValue.origin,
+  );
   const globallyEnabled = settings?.enabled ?? false;
   const canEnable = globallyEnabled || draft.enabled;
   const environments = metric?.environments ?? [];
@@ -191,6 +201,21 @@ export default function MetricAlertEditor({
           )}
           {alert?.no_recipients && (
             <p className="muted">У этого алерта нет групп с получателями. Уведомления не будут отправляться.</p>
+          )}
+          {scopedRules.length > 0 && (
+            <div>
+              <p className="muted">Для этого ключа есть правила, созданные через MCP. Здесь их можно только просмотреть.</p>
+              <ul className="alert-settings-list">
+                {scopedRules.map((rule) => (
+                  <li key={rule.id}>
+                    <div>
+                      <strong>Создано через MCP · {nodeScopeLabel(rule.node_scope)}</strong>
+                      <span className="muted">{rule.enabled ? "Включено" : "Отключено"} · {rule.environment ?? "все окружения"}</span>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
           <label className="alert-enabled-control">
             <input

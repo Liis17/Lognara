@@ -163,6 +163,7 @@ impl PreparedFilter {
                     }
                     "trace_id" => normalize_hex(value, 16)?,
                     "span_id" | "parent_span_id" => normalize_hex(value, 8)?,
+                    "relay_id" | "agent_id" => normalize_node_id(value, field)?,
                     "pattern_id" => {
                         value.make_ascii_lowercase();
                         if !crate::pattern_identity::valid_id(value) {
@@ -190,6 +191,41 @@ impl PreparedFilter {
     pub fn overlaps(&self, min: i64, max: i64) -> bool {
         max >= self.from && min < self.to
     }
+}
+
+pub fn normalize_node_id(value: &mut String, field: &str) -> Result<(), QueryError> {
+    if value.len() > 4096 {
+        return Err(QueryError::Invalid(format!("{field} exceeds 4096 bytes")));
+    }
+    let id = value
+        .parse::<i64>()
+        .ok()
+        .filter(|id| *id > 0)
+        .ok_or_else(|| QueryError::Invalid(format!("{field} must be a positive i64")))?;
+    *value = id.to_string();
+    Ok(())
+}
+
+pub fn normalize_node_filters(filters: &Filters) -> Result<Filters, QueryError> {
+    let mut filters = filters.clone();
+    for (field, values) in &mut filters {
+        if field != "relay_id" && field != "agent_id" {
+            return Err(QueryError::Invalid(
+                "recurrence filters accept relay_id and agent_id".into(),
+            ));
+        }
+        if values.is_empty() || values.len() > 64 {
+            return Err(QueryError::Invalid(
+                "each filter requires 1..64 values".into(),
+            ));
+        }
+        for value in values.iter_mut() {
+            normalize_node_id(value, field)?;
+        }
+        values.sort();
+        values.dedup();
+    }
+    Ok(filters)
 }
 
 fn normalize_hex(value: &mut String, length: usize) -> Result<(), QueryError> {
@@ -617,3 +653,28 @@ fn decode_cursor(core: &Core, text: &str) -> Result<Cursor, QueryError> {
 }
 
 use anyhow::Context;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn node_filters_require_positive_i64_and_normalize_decimal_values() {
+        let filters = Filters::from([
+            ("relay_id".into(), vec!["0008".into()]),
+            ("agent_id".into(), vec!["+12".into()]),
+        ]);
+        let prepared =
+            PreparedFilter::new("1970-01-01T00:00:00Z", "1970-01-01T00:00:01Z", &filters).unwrap();
+        assert_eq!(prepared.filters["relay_id"], ["8"]);
+        assert_eq!(prepared.filters["agent_id"], ["12"]);
+
+        for value in ["0", "-1", "9223372036854775808", "agent"] {
+            let filters = Filters::from([("agent_id".into(), vec![value.into()])]);
+            assert!(matches!(
+                PreparedFilter::new("1970-01-01T00:00:00Z", "1970-01-01T00:00:01Z", &filters,),
+                Err(QueryError::Invalid(_))
+            ));
+        }
+    }
+}

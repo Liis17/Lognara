@@ -23,11 +23,15 @@ use axum::{
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use hmac::{Hmac, Mac};
 use rmcp::{
-    ServerHandler,
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig},
+    ErrorData, RoleServer, ServerHandler,
+    handler::server::{router::tool::ToolRouter, tool::ToolCallContext, wrapper::Parameters},
+    model::{
+        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
+        ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
+    },
     schemars::{self, JsonSchema},
-    tool, tool_handler, tool_router,
+    service::RequestContext,
+    tool, tool_router,
     transport::streamable_http_server::{
         StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
     },
@@ -39,20 +43,41 @@ use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::{
+    alerts::{AlertToolError, DefinitionInput, TriggerInput},
     api::AppState,
     core_client::{CoreError, CoreQueryError, LogSourceFilters, LogSourcesRequest},
     query::{
         Filters, GroupRequest, HistogramRequest, SearchRequest, SummaryRequest, TextMode,
         TextQuery, TraceParams,
     },
+    series::MetricKey,
     store,
+    token_access::{READ_SCOPE, Rights, Scope, TokenAccess, WRITE_SCOPE},
 };
 
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const MAX_RESULT_BYTES: usize = 2 * 1024 * 1024;
 const RESULT_HEADROOM: usize = 4096;
 const PAGE_TTL_MS: i64 = 10 * 60 * 1000;
-const READ_SCOPE: &str = "lognara.read";
+/// Версия 2 добавляет скоуп токена; курсоры версии 1 больше не принимаются.
+const CURSOR_VERSION: u8 = 2;
+const LOG_TOOLS: &[&str] = &[
+    "list_applications",
+    "list_servers",
+    "list_environments",
+    "search_logs",
+    "get_trace",
+    "summarize_logs",
+];
+const METRIC_TOOLS: &[&str] = &["list_metrics", "query_metrics"];
+const ALERT_TOOLS: &[&str] = &[
+    "list_alert_groups",
+    "list_alerts",
+    "create_alert",
+    "update_alert",
+    "delete_alert",
+];
+const ALERT_WRITE_TOOLS: &[&str] = &["create_alert", "update_alert", "delete_alert"];
 type HmacSha256 = Hmac<Sha256>;
 
 pub struct McpLimiter {
@@ -193,7 +218,7 @@ async fn authenticate(State(app): State<AppState>, request: Request<Body>, next:
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     }
     let auth = bearer_token(request.headers());
-    let (parts, body) = request.into_parts();
+    let (mut parts, body) = request.into_parts();
     let bytes = match to_bytes(body, MAX_REQUEST_BYTES).await {
         Ok(bytes) => bytes,
         Err(_) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
@@ -205,18 +230,19 @@ async fn authenticate(State(app): State<AppState>, request: Request<Body>, next:
         return authentication_required(&app, &request_value, "");
     };
     let hash: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-    let username = match app
+    let access = match app
         .store
         .authenticate_mcp_token(hash, resource_uri(&app))
         .await
     {
-        Ok(Some(username)) => username,
+        Ok(Some(access)) => access,
         Ok(None) => return authentication_required(&app, &request_value, "invalid_token"),
         Err(error) => {
             tracing::error!(%error, "MCP credential lookup failed");
             return service_error("unavailable", "MCP credential storage is unavailable");
         }
     };
+    let username = access.username.clone();
     if !app.htpasswd.contains(&username) {
         if let Err(error) = app.store.revoke_user_mcp_credentials(username).await {
             tracing::error!(%error, "failed to revoke credentials for a removed user");
@@ -229,6 +255,8 @@ async fn authenticate(State(app): State<AppState>, request: Request<Body>, next:
         Err(LimitError::Busy) => return limited("busy", 1),
         Err(LimitError::RateLimited) => return limited("rate_limited", 60),
     };
+    // Права и скоуп передаются инструментам через extensions HTTP-запроса, которые rmcp сохраняет.
+    parts.extensions.insert(access);
     let request = Request::from_parts(parts, Body::from(bytes));
     let response = next.run(request).await;
     let response = if is_tools_list {
@@ -362,9 +390,17 @@ async fn add_oauth_security_schemes(mut response: Response) -> Response {
     };
     if let Some(tools) = value["result"]["tools"].as_array_mut() {
         for tool in tools {
+            let scope = if tool["name"]
+                .as_str()
+                .is_some_and(|name| ALERT_WRITE_TOOLS.contains(&name))
+            {
+                WRITE_SCOPE
+            } else {
+                READ_SCOPE
+            };
             tool["securitySchemes"] = json!([{
                 "type": "oauth2",
-                "scopes": [READ_SCOPE],
+                "scopes": [scope],
             }]);
         }
     }
@@ -387,6 +423,8 @@ async fn add_oauth_security_schemes(mut response: Response) -> Response {
 struct McpServer {
     app: AppState,
     tool_router: ToolRouter<Self>,
+    /// Заполняется в `call_tool` на копии сервера, когда токен прошёл проверку.
+    access: Option<TokenAccess>,
 }
 
 impl McpServer {
@@ -394,8 +432,77 @@ impl McpServer {
         Self {
             app,
             tool_router: Self::tool_router(),
+            access: None,
         }
     }
+
+    /// Права текущего вызова; без проверенного токена инструменты не отвечают данными.
+    fn access(&self) -> Result<TokenAccess, ToolFailure> {
+        self.access.clone().ok_or(ToolFailure::new(
+            "forbidden",
+            "Token access is not available",
+        ))
+    }
+}
+
+/// Инструмент виден и доступен, если права токена разрешают его; `get_versions` доступен всем.
+fn tool_allowed(name: &str, access: &TokenAccess) -> bool {
+    let rights: Rights = access.rights;
+    name == "get_versions"
+        || (rights.logs && LOG_TOOLS.contains(&name))
+        || (rights.metrics && METRIC_TOOLS.contains(&name))
+        || (rights.alerts_write && ALERT_TOOLS.contains(&name))
+}
+
+fn access_from(context: &RequestContext<RoleServer>) -> Option<TokenAccess> {
+    context
+        .extensions
+        .get::<axum::http::request::Parts>()?
+        .extensions
+        .get::<TokenAccess>()
+        .cloned()
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct AlertTriggerInput {
+    window_seconds: u64,
+    aggregate: String,
+    comparator: String,
+    threshold: f64,
+}
+
+/// Правило метрики в том же виде, что в UI: окно, условия и получатели по ID групп.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct AlertInput {
+    server: String,
+    service: String,
+    name: String,
+    origin: String,
+    /// Окружение; `null` означает все окружения.
+    environment: Option<String>,
+    enabled: bool,
+    /// `normal` или `loss` для отсутствующих данных.
+    no_data: String,
+    /// `and` или `or`.
+    combine: String,
+    /// ID существующих групп получателей; создать группу через MCP нельзя.
+    group_ids: Vec<String>,
+    triggers: Vec<AlertTriggerInput>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct UpdateAlertInput {
+    id: String,
+    alert: AlertInput,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct DeleteAlertInput {
+    id: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
@@ -529,6 +636,8 @@ struct PageCursor {
     from: String,
     to: String,
     limit: usize,
+    /// Скоуп токена, который создал курсор: курсор не переходит к другому скоупу.
+    scope: Scope,
     query: CursorQuery,
     core_cursor: String,
     expires_at_ms: i64,
@@ -586,12 +695,16 @@ impl McpServer {
             Ok(limit) => limit,
             Err(error) => return failure_result(error),
         };
+        let scope = match self.access() {
+            Ok(access) => access.node_scope,
+            Err(error) => return failure_result(error),
+        };
         let request = LogSourcesRequest {
             field: "service".into(),
             filters: LogSourceFilters {
                 server: input.server,
                 environment: input.environment,
-                ..Default::default()
+                ..source_scope(scope)
             },
             limit,
             cursor: input.cursor,
@@ -622,12 +735,16 @@ impl McpServer {
             Ok(limit) => limit,
             Err(error) => return failure_result(error),
         };
+        let scope = match self.access() {
+            Ok(access) => access.node_scope,
+            Err(error) => return failure_result(error),
+        };
         let request = LogSourcesRequest {
             field: "server".into(),
             filters: LogSourceFilters {
                 service: input.app,
                 environment: input.environment,
-                ..Default::default()
+                ..source_scope(scope)
             },
             limit,
             cursor: input.cursor,
@@ -656,12 +773,16 @@ impl McpServer {
             Ok(limit) => limit,
             Err(error) => return failure_result(error),
         };
+        let scope = match self.access() {
+            Ok(access) => access.node_scope,
+            Err(error) => return failure_result(error),
+        };
         let request = LogSourcesRequest {
             field: "environment".into(),
             filters: LogSourceFilters {
                 service: input.app,
                 server: input.server,
-                ..Default::default()
+                ..source_scope(scope)
             },
             limit,
             cursor: input.cursor,
@@ -683,7 +804,11 @@ impl McpServer {
         )
     )]
     async fn search_logs(&self, Parameters(input): Parameters<SearchLogsInput>) -> CallToolResult {
-        match search_page(&self.app, input).await {
+        let access = match self.access() {
+            Ok(access) => access,
+            Err(error) => return failure_result(error),
+        };
+        match search_page(&self.app, &access, input).await {
             Ok(value) => success_result(value),
             Err(error) => failure_result(error),
         }
@@ -698,7 +823,11 @@ impl McpServer {
         )
     )]
     async fn get_trace(&self, Parameters(input): Parameters<GetTraceInput>) -> CallToolResult {
-        match trace_page(&self.app, input).await {
+        let access = match self.access() {
+            Ok(access) => access,
+            Err(error) => return failure_result(error),
+        };
+        match trace_page(&self.app, &access, input).await {
             Ok(value) => success_result(value),
             Err(error) => failure_result(error),
         }
@@ -716,7 +845,11 @@ impl McpServer {
         &self,
         Parameters(input): Parameters<SummarizeLogsInput>,
     ) -> CallToolResult {
-        match summarize(&self.app, input).await {
+        let access = match self.access() {
+            Ok(access) => access,
+            Err(error) => return failure_result(error),
+        };
+        match summarize(&self.app, &access, input).await {
             Ok(value) => success_result(value),
             Err(error) => failure_result(error),
         }
@@ -731,7 +864,16 @@ impl McpServer {
         )
     )]
     async fn list_metrics(&self) -> CallToolResult {
-        match self.app.core.scoped_series(None, None).await {
+        let access = match self.access() {
+            Ok(access) => access,
+            Err(error) => return failure_result(error),
+        };
+        match self
+            .app
+            .core
+            .scoped_series(None, None, access.node_scope)
+            .await
+        {
             Ok((status, body)) if status.is_success() => success_result(body),
             Ok(_) => failure_result(ToolFailure::new(
                 "unavailable",
@@ -770,7 +912,11 @@ impl McpServer {
                 "origin must be counter, gauge, or rule",
             ));
         }
-        let body = json!({
+        let access = match self.access() {
+            Ok(access) => access,
+            Err(error) => return failure_result(error),
+        };
+        let mut body = json!({
             "server": input.server,
             "service": input.service,
             "name": input.name,
@@ -781,6 +927,9 @@ impl McpServer {
             "origin": input.origin,
             "environment": input.environment,
         });
+        if let Some((key, id)) = access.node_scope.core_param() {
+            body[key] = json!(id);
+        }
         match self.app.core.series_query(&body).await {
             Ok((status, body)) if status.is_success() => success_result(body),
             Ok(_) => failure_result(ToolFailure::new(
@@ -788,6 +937,111 @@ impl McpServer {
                 "Core returned an unexpected metric-query status",
             )),
             Err(error) => failure_result(core_failure(error)),
+        }
+    }
+
+    #[tool(
+        description = "List metric alert recipient groups. Groups are created only in the Dock UI; only id, kind and name are returned, never chat IDs or bot tokens.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn list_alert_groups(&self) -> CallToolResult {
+        match crate::alerts::mcp_alert_groups(&self.app).await {
+            Ok(groups) => success_result(json!({ "groups": groups })),
+            Err(error) => failure_result(alert_failure(error)),
+        }
+    }
+
+    #[tool(
+        description = "List metric alerts visible to this token. An unrestricted token sees every alert; a relay or agent token sees only alerts on its node. Each alert includes its id, node scope and state.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn list_alerts(&self) -> CallToolResult {
+        let access = match self.access() {
+            Ok(access) => access,
+            Err(error) => return failure_result(error),
+        };
+        match crate::alerts::mcp_alerts(&self.app, &access).await {
+            Ok(alerts) => success_result(json!({ "alerts": alerts })),
+            Err(error) => failure_result(alert_failure(error)),
+        }
+    }
+
+    #[tool(
+        description = "Create a metric alert. The alert takes the node scope of this token; recipients must be existing group IDs from list_alert_groups. Returns the saved alert.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn create_alert(&self, Parameters(input): Parameters<AlertInput>) -> CallToolResult {
+        let access = match self.access() {
+            Ok(access) => access,
+            Err(error) => return failure_result(error),
+        };
+        match crate::alerts::mcp_save_alert(&self.app, &access, None, alert_definition(input)).await
+        {
+            Ok(alert) => success_result(json!({ "alert": alert })),
+            Err(error) => failure_result(alert_failure(error)),
+        }
+    }
+
+    #[tool(
+        description = "Replace the settings of a metric alert visible to this token. The alert keeps its node scope; recipients must be existing group IDs. Returns the saved alert.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn update_alert(
+        &self,
+        Parameters(input): Parameters<UpdateAlertInput>,
+    ) -> CallToolResult {
+        let access = match self.access() {
+            Ok(access) => access,
+            Err(error) => return failure_result(error),
+        };
+        match crate::alerts::mcp_save_alert(
+            &self.app,
+            &access,
+            Some(input.id),
+            alert_definition(input.alert),
+        )
+        .await
+        {
+            Ok(alert) => success_result(json!({ "alert": alert })),
+            Err(error) => failure_result(alert_failure(error)),
+        }
+    }
+
+    #[tool(
+        description = "Delete a metric alert visible to this token. Pending notifications for the alert are cancelled.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn delete_alert(
+        &self,
+        Parameters(input): Parameters<DeleteAlertInput>,
+    ) -> CallToolResult {
+        let access = match self.access() {
+            Ok(access) => access,
+            Err(error) => return failure_result(error),
+        };
+        match crate::alerts::mcp_delete_alert(&self.app, &access, input.id).await {
+            Ok(()) => success_result(json!({ "deleted": true })),
+            Err(error) => failure_result(alert_failure(error)),
         }
     }
 
@@ -818,20 +1072,82 @@ impl McpServer {
     }
 }
 
-#[tool_handler(router = self.tool_router)]
 impl ServerHandler for McpServer {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_server_info(
             Implementation::new("lognara-dock", env!("CARGO_PKG_VERSION")),
         )
     }
+
+    /// Показывает только инструменты, которые разрешают права токена.
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, ErrorData> {
+        let access = access_from(&context);
+        let tools = self
+            .tool_router
+            .list_all()
+            .into_iter()
+            .filter(|tool| {
+                access
+                    .as_ref()
+                    .is_some_and(|access| tool_allowed(&tool.name, access))
+            })
+            .collect();
+        Ok(ListToolsResult {
+            tools,
+            ..Default::default()
+        })
+    }
+
+    /// Запрещённый инструмент отвечает ошибкой инструмента и не выполняет запрос к core.
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        let Some(access) =
+            access_from(&context).filter(|access| tool_allowed(&request.name, access))
+        else {
+            return Ok(failure_result(ToolFailure::new(
+                "forbidden",
+                "This token does not allow this tool",
+            ))
+            .into());
+        };
+        let server = Self {
+            app: self.app.clone(),
+            tool_router: self.tool_router.clone(),
+            access: Some(access),
+        };
+        server
+            .tool_router
+            .call(ToolCallContext::new(&server, request, context))
+            .await
+    }
+
+    fn get_tool(&self, name: &str) -> Option<Tool> {
+        self.tool_router.get(name).cloned()
+    }
 }
 
-async fn search_page(app: &AppState, input: SearchLogsInput) -> Result<Value, ToolFailure> {
+async fn search_page(
+    app: &AppState,
+    access: &TokenAccess,
+    input: SearchLogsInput,
+) -> Result<Value, ToolFailure> {
     let (from, to, filters, text, limit, core_cursor, mut page_cursor) = if let Some(encoded) =
         input.cursor.as_deref()
     {
         let cursor = decode_cursor(app, encoded)?;
+        if cursor.scope != access.node_scope {
+            return Err(ToolFailure::new(
+                "invalid_cursor",
+                "Cursor belongs to a different token scope",
+            ));
+        }
         let CursorQuery::Search { filters, text } = &cursor.query else {
             return Err(ToolFailure::new(
                 "invalid_cursor",
@@ -887,10 +1203,11 @@ async fn search_page(app: &AppState, input: SearchLogsInput) -> Result<Value, To
             ));
         }
         let cursor = PageCursor {
-            version: 1,
+            version: CURSOR_VERSION,
             from: from.clone(),
             to: to.clone(),
             limit,
+            scope: access.node_scope,
             query: CursorQuery::Search {
                 filters: filters.clone(),
                 text: text.clone(),
@@ -909,7 +1226,7 @@ async fn search_page(app: &AppState, input: SearchLogsInput) -> Result<Value, To
         .search_page(&SearchRequest {
             from: from.clone(),
             to: to.clone(),
-            filters,
+            filters: scoped_filters(filters, access.node_scope)?,
             text,
             limit,
             cursor: core_cursor,
@@ -932,11 +1249,21 @@ async fn search_page(app: &AppState, input: SearchLogsInput) -> Result<Value, To
     }))
 }
 
-async fn trace_page(app: &AppState, input: GetTraceInput) -> Result<Value, ToolFailure> {
+async fn trace_page(
+    app: &AppState,
+    access: &TokenAccess,
+    input: GetTraceInput,
+) -> Result<Value, ToolFailure> {
     let (from, to, limit, core_cursor, mut page_cursor) = if let Some(encoded) =
         input.cursor.as_deref()
     {
         let cursor = decode_cursor(app, encoded)?;
+        if cursor.scope != access.node_scope {
+            return Err(ToolFailure::new(
+                "invalid_cursor",
+                "Cursor belongs to a different token scope",
+            ));
+        }
         let CursorQuery::Trace { trace_id } = &cursor.query else {
             return Err(ToolFailure::new(
                 "invalid_cursor",
@@ -982,10 +1309,11 @@ async fn trace_page(app: &AppState, input: GetTraceInput) -> Result<Value, ToolF
             ));
         }
         let cursor = PageCursor {
-            version: 1,
+            version: CURSOR_VERSION,
             from: from.clone(),
             to: to.clone(),
             limit,
+            scope: access.node_scope,
             query: CursorQuery::Trace {
                 trace_id: input.trace_id.clone(),
             },
@@ -1004,6 +1332,7 @@ async fn trace_page(app: &AppState, input: GetTraceInput) -> Result<Value, ToolF
                 limit,
                 cursor: core_cursor,
             },
+            access.node_scope,
         )
         .await
         .map_err(query_failure)?;
@@ -1025,9 +1354,13 @@ async fn trace_page(app: &AppState, input: GetTraceInput) -> Result<Value, ToolF
     }))
 }
 
-async fn summarize(app: &AppState, input: SummarizeLogsInput) -> Result<Value, ToolFailure> {
+async fn summarize(
+    app: &AppState,
+    access: &TokenAccess,
+    input: SummarizeLogsInput,
+) -> Result<Value, ToolFailure> {
     let (from, to) = resolve_period(input.from, input.to, input.duration_seconds, false)?;
-    let filters = input.filters.unwrap_or_default();
+    let filters = scoped_filters(input.filters.unwrap_or_default(), access.node_scope)?;
     let interval_seconds = input.interval_seconds.unwrap_or(60);
     match input.operation.as_str() {
         "summary" => {
@@ -1079,6 +1412,85 @@ async fn summarize(app: &AppState, input: SummarizeLogsInput) -> Result<Value, T
             "invalid_argument",
             "operation must be summary, group, or histogram",
         )),
+    }
+}
+
+/// Фильтры поиска с узлом токена. Фильтр того же узла от пользователя отклоняется, а не переопределяется.
+fn scoped_filters(mut filters: Filters, scope: Scope) -> Result<Filters, ToolFailure> {
+    if let Some((key, id)) = scope.core_param() {
+        if filters.contains_key(key) {
+            return Err(ToolFailure::new(
+                "invalid_argument",
+                "filters cannot set the node of this token",
+            ));
+        }
+        filters.insert(key.to_owned(), vec![id.to_string()]);
+    }
+    Ok(filters)
+}
+
+/// Фильтры источников: узел токена задаёт строковый `relay_id` или `agent_id`.
+fn source_scope(scope: Scope) -> LogSourceFilters {
+    let mut filters = LogSourceFilters::default();
+    match scope {
+        Scope::All => {}
+        Scope::Relay { id } => filters.relay_id = Some(id.to_string()),
+        Scope::Agent { id } => filters.agent_id = Some(id.to_string()),
+    }
+    filters
+}
+
+fn alert_definition(input: AlertInput) -> DefinitionInput {
+    DefinitionInput {
+        key: MetricKey {
+            server: input.server,
+            service: input.service,
+            name: input.name,
+            origin: input.origin,
+        },
+        // Узел задаёт сервис по токену, поэтому здесь значение не важно.
+        node_scope: Scope::All,
+        enabled: input.enabled,
+        environment: input.environment,
+        no_data: input.no_data,
+        combine: input.combine,
+        group_ids: input.group_ids,
+        triggers: input
+            .triggers
+            .into_iter()
+            .map(|trigger| TriggerInput {
+                window_seconds: trigger.window_seconds,
+                aggregate: trigger.aggregate,
+                comparator: trigger.comparator,
+                threshold: trigger.threshold,
+            })
+            .collect(),
+    }
+}
+
+fn alert_failure(error: AlertToolError) -> ToolFailure {
+    match error {
+        AlertToolError::Invalid(message) => ToolFailure::new("invalid_argument", message),
+        AlertToolError::Conflict("alert_exists") => ToolFailure::new(
+            "conflict",
+            "A metric alert with this key already exists in this scope",
+        ),
+        AlertToolError::Conflict("group_not_found") => ToolFailure::new(
+            "group_not_found",
+            "Recipient group does not exist; choose an existing group from list_alert_groups",
+        ),
+        AlertToolError::Conflict("global_disabled_or_alert_limit") => ToolFailure::new(
+            "alerts_unavailable",
+            "Metric alerts are disabled globally or the enabled alert limit is reached",
+        ),
+        AlertToolError::Conflict(_) => ToolFailure::new(
+            "conflict",
+            "The alert change conflicts with current settings",
+        ),
+        AlertToolError::NotFound => ToolFailure::new("not_found", "Metric alert was not found"),
+        AlertToolError::Unavailable => {
+            ToolFailure::new("unavailable", "Alert storage or Core is unavailable")
+        }
     }
 }
 
@@ -1197,7 +1609,7 @@ fn decode_page_cursor(key: &[u8; 32], encoded: &str) -> Result<PageCursor, ToolF
         .map_err(|_| ToolFailure::new("invalid_cursor", "Cursor signature is invalid"))?;
     let cursor: PageCursor = serde_json::from_slice(payload)
         .map_err(|_| ToolFailure::new("invalid_cursor", "Cursor is not valid"))?;
-    if cursor.version != 1 {
+    if cursor.version != CURSOR_VERSION {
         return Err(ToolFailure::new(
             "invalid_cursor",
             "Cursor version is not supported",
@@ -1297,15 +1709,88 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_registered_tool_is_read_only_and_the_allowlist_has_nine_tools() {
-        let tools = McpServer::tool_router().list_all();
-        assert_eq!(tools.len(), 9);
-        for tool in tools {
+    fn registered_tools_match_the_fixed_allowlist_and_their_hints() {
+        let mut names: Vec<String> = McpServer::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        names.sort();
+        let mut expected: Vec<String> = ["get_versions"]
+            .into_iter()
+            .chain(LOG_TOOLS.iter().copied())
+            .chain(METRIC_TOOLS.iter().copied())
+            .chain(ALERT_TOOLS.iter().copied())
+            .map(str::to_owned)
+            .collect();
+        expected.sort();
+        assert_eq!(names, expected);
+        assert_eq!(expected.len(), 14);
+        for tool in McpServer::tool_router().list_all() {
             let annotations = tool.annotations.unwrap();
-            assert_eq!(annotations.read_only_hint, Some(true));
-            assert_eq!(annotations.destructive_hint, Some(false));
+            let write = ALERT_WRITE_TOOLS.contains(&&*tool.name);
+            assert_eq!(annotations.read_only_hint, Some(!write), "{}", tool.name);
+            assert_eq!(
+                annotations.destructive_hint,
+                Some(&*tool.name == "delete_alert"),
+                "{}",
+                tool.name
+            );
             assert_eq!(annotations.open_world_hint, Some(false));
         }
+    }
+
+    #[test]
+    fn tool_rights_gate_the_allowlist_and_always_keep_get_versions() {
+        let read_logs = TokenAccess {
+            username: "alice".into(),
+            rights: Rights {
+                logs: true,
+                metrics: false,
+                alerts_write: false,
+            },
+            node_scope: Scope::All,
+        };
+        assert!(tool_allowed("search_logs", &read_logs));
+        assert!(tool_allowed("get_versions", &read_logs));
+        assert!(!tool_allowed("query_metrics", &read_logs));
+        assert!(!tool_allowed("create_alert", &read_logs));
+        let writer = TokenAccess {
+            rights: Rights {
+                logs: false,
+                metrics: true,
+                alerts_write: true,
+            },
+            ..read_logs
+        };
+        assert!(tool_allowed("create_alert", &writer));
+        assert!(tool_allowed("list_alert_groups", &writer));
+        assert!(!tool_allowed("search_logs", &writer));
+    }
+
+    #[test]
+    fn scope_filters_are_added_and_user_node_keys_are_rejected() {
+        let filters = scoped_filters(Filters::new(), Scope::Relay { id: 7 }).unwrap();
+        assert_eq!(filters.get("relay_id"), Some(&vec!["7".to_owned()]));
+        assert!(!filters.contains_key("agent_id"));
+        let user = Filters::from([("agent_id".to_owned(), vec!["3".to_owned()])]);
+        assert!(scoped_filters(user.clone(), Scope::Relay { id: 7 }).is_ok());
+        let conflict = Filters::from([("relay_id".to_owned(), vec!["8".to_owned()])]);
+        assert_eq!(
+            scoped_filters(conflict, Scope::Relay { id: 7 })
+                .unwrap_err()
+                .code,
+            "invalid_argument"
+        );
+        assert!(
+            scoped_filters(user, Scope::All)
+                .unwrap()
+                .contains_key("agent_id")
+        );
+        assert_eq!(
+            source_scope(Scope::Agent { id: 4 }).agent_id.as_deref(),
+            Some("4")
+        );
     }
 
     #[test]
@@ -1355,10 +1840,11 @@ mod tests {
     fn signed_search_cursors_keep_resolved_bounds_and_expire_after_ten_minutes() {
         let key = [7; 32];
         let cursor = PageCursor {
-            version: 1,
+            version: CURSOR_VERSION,
             from: "2026-10-29T00:00:00Z".into(),
             to: "2026-10-29T01:00:00Z".into(),
             limit: 100,
+            scope: Scope::All,
             query: CursorQuery::Search {
                 filters: Filters::default(),
                 text: None,

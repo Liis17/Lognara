@@ -10,6 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use fs2::FileExt;
 use rusqlite::{Connection, OptionalExtension};
 
+use crate::token_access::{Permissions, Rights, Scope, TokenAccess, is_granted_scope};
+
 const MIGRATIONS: &[&str] = &[
     "
     CREATE TABLE sessions (
@@ -228,6 +230,49 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX metric_alert_deliveries_pending ON metric_alert_deliveries(status, next_attempt_at, event_id);
     ",
+    // Существующие токены и гранты получают прежние права: логи и метрики, без записи, без скоупа.
+    "
+    ALTER TABLE mcp_personal_tokens ADD COLUMN logs INTEGER NOT NULL DEFAULT 1 CHECK(logs IN (0, 1));
+    ALTER TABLE mcp_personal_tokens ADD COLUMN metrics INTEGER NOT NULL DEFAULT 1 CHECK(metrics IN (0, 1));
+    ALTER TABLE mcp_personal_tokens ADD COLUMN alerts_write INTEGER NOT NULL DEFAULT 0 CHECK(alerts_write IN (0, 1));
+    ALTER TABLE mcp_personal_tokens ADD COLUMN scope_kind TEXT NOT NULL DEFAULT 'all' CHECK(scope_kind IN ('all', 'relay', 'agent'));
+    ALTER TABLE mcp_personal_tokens ADD COLUMN scope_id INTEGER NOT NULL DEFAULT 0 CHECK(scope_id >= 0);
+    ALTER TABLE oauth_grants ADD COLUMN logs INTEGER NOT NULL DEFAULT 1 CHECK(logs IN (0, 1));
+    ALTER TABLE oauth_grants ADD COLUMN metrics INTEGER NOT NULL DEFAULT 1 CHECK(metrics IN (0, 1));
+    ALTER TABLE oauth_grants ADD COLUMN alerts_write INTEGER NOT NULL DEFAULT 0 CHECK(alerts_write IN (0, 1));
+    ALTER TABLE oauth_grants ADD COLUMN scope_kind TEXT NOT NULL DEFAULT 'all' CHECK(scope_kind IN ('all', 'relay', 'agent'));
+    ALTER TABLE oauth_grants ADD COLUMN scope_id INTEGER NOT NULL DEFAULT 0 CHECK(scope_id >= 0);
+    ALTER TABLE oauth_codes ADD COLUMN logs INTEGER NOT NULL DEFAULT 1 CHECK(logs IN (0, 1));
+    ALTER TABLE oauth_codes ADD COLUMN metrics INTEGER NOT NULL DEFAULT 1 CHECK(metrics IN (0, 1));
+    ALTER TABLE oauth_codes ADD COLUMN alerts_write INTEGER NOT NULL DEFAULT 0 CHECK(alerts_write IN (0, 1));
+    ALTER TABLE oauth_codes ADD COLUMN scope_kind TEXT NOT NULL DEFAULT 'all' CHECK(scope_kind IN ('all', 'relay', 'agent'));
+    ALTER TABLE oauth_codes ADD COLUMN scope_id INTEGER NOT NULL DEFAULT 0 CHECK(scope_id >= 0);
+    ",
+    // Пересборка без потери дочерних строк: выполняется с выключенными внешними ключами.
+    // UNIQUE учитывает скоуп; NULL здесь не используется, поэтому глобальные правила уникальны.
+    "
+    CREATE TABLE metric_alerts_scoped (
+        id TEXT PRIMARY KEY,
+        server TEXT NOT NULL,
+        service TEXT NOT NULL,
+        name TEXT NOT NULL,
+        origin TEXT NOT NULL CHECK(origin IN ('counter', 'gauge', 'rule')),
+        enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
+        environment TEXT,
+        no_data TEXT NOT NULL CHECK(no_data IN ('normal', 'loss')),
+        combine_mode TEXT NOT NULL CHECK(combine_mode IN ('and', 'or')),
+        revision INTEGER NOT NULL,
+        enabled_at INTEGER NOT NULL,
+        scope_kind TEXT NOT NULL DEFAULT 'all' CHECK(scope_kind IN ('all', 'relay', 'agent')),
+        scope_id INTEGER NOT NULL DEFAULT 0 CHECK(scope_id >= 0),
+        UNIQUE(server, service, name, origin, scope_kind, scope_id)
+    );
+    INSERT INTO metric_alerts_scoped(id,server,service,name,origin,enabled,environment,no_data,combine_mode,revision,enabled_at)
+        SELECT id,server,service,name,origin,enabled,environment,no_data,combine_mode,revision,enabled_at FROM metric_alerts;
+    DROP TABLE metric_alerts;
+    ALTER TABLE metric_alerts_scoped RENAME TO metric_alerts;
+    CREATE INDEX metric_alerts_enabled ON metric_alerts(enabled, server, service, name, origin);
+    ",
 ];
 
 /// Предел строк статусов: Dock передаёт решённые и вернувшиеся fingerprint в core.
@@ -262,6 +307,8 @@ pub struct PersonalTokenInfo {
     pub created_at: i64,
     pub expires_at: i64,
     pub last_used_at: Option<i64>,
+    #[serde(flatten)]
+    pub permissions: Permissions,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -271,6 +318,8 @@ pub struct OAuthGrantInfo {
     pub scope: String,
     pub created_at: i64,
     pub last_used_at: Option<i64>,
+    #[serde(flatten)]
+    pub permissions: Permissions,
 }
 
 #[derive(Debug, Clone)]
@@ -594,14 +643,16 @@ impl Store {
         name: String,
         token_hash: [u8; 32],
         expires_at: i64,
+        permissions: Permissions,
     ) -> Result<PersonalTokenInfo, StoreError> {
         self.call(move |conn| {
             let created_at = now_ms();
+            let (logs, metrics, alerts_write, kind, scope_id) = permission_values(permissions);
             conn.execute(
-                "INSERT INTO mcp_personal_tokens(id,username,name,token_hash,created_at,expires_at) VALUES(?1,?2,?3,?4,?5,?6)",
-                rusqlite::params![id, username, name, token_hash, created_at, expires_at],
+                "INSERT INTO mcp_personal_tokens(id,username,name,token_hash,created_at,expires_at,logs,metrics,alerts_write,scope_kind,scope_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                rusqlite::params![id, username, name, token_hash, created_at, expires_at, logs, metrics, alerts_write, kind, scope_id],
             )?;
-            Ok(PersonalTokenInfo { id, name, created_at, expires_at, last_used_at: None })
+            Ok(PersonalTokenInfo { id, name, created_at, expires_at, last_used_at: None, permissions })
         }).await
     }
 
@@ -610,9 +661,10 @@ impl Store {
         username: String,
     ) -> Result<Vec<PersonalTokenInfo>, StoreError> {
         self.call(move |conn| {
-            let mut statement = conn.prepare("SELECT id,name,created_at,expires_at,last_used_at FROM mcp_personal_tokens WHERE username=?1 AND revoked_at IS NULL ORDER BY created_at DESC,id")?;
+            let mut statement = conn.prepare("SELECT id,name,created_at,expires_at,last_used_at,logs,metrics,alerts_write,scope_kind,scope_id FROM mcp_personal_tokens WHERE username=?1 AND revoked_at IS NULL ORDER BY created_at DESC,id")?;
             statement.query_map([username], |row| Ok(PersonalTokenInfo {
                 id: row.get(0)?, name: row.get(1)?, created_at: row.get(2)?, expires_at: row.get(3)?, last_used_at: row.get(4)?,
+                permissions: permissions_from_row(row, 5)?,
             }))?.collect()
         }).await
     }
@@ -630,9 +682,10 @@ impl Store {
 
     pub async fn oauth_grants(&self, username: String) -> Result<Vec<OAuthGrantInfo>, StoreError> {
         self.call(move |conn| {
-            let mut statement = conn.prepare("SELECT id,client_name,scope,created_at,last_used_at FROM oauth_grants WHERE username=?1 AND revoked_at IS NULL ORDER BY created_at DESC,id")?;
+            let mut statement = conn.prepare("SELECT id,client_name,scope,created_at,last_used_at,logs,metrics,alerts_write,scope_kind,scope_id FROM oauth_grants WHERE username=?1 AND revoked_at IS NULL ORDER BY created_at DESC,id")?;
             statement.query_map([username], |row| Ok(OAuthGrantInfo {
                 id: row.get(0)?, client_name: row.get(1)?, scope: row.get(2)?, created_at: row.get(3)?, last_used_at: row.get(4)?,
+                permissions: permissions_from_row(row, 5)?,
             }))?.collect()
         }).await
     }
@@ -669,28 +722,28 @@ impl Store {
         &self,
         token_hash: [u8; 32],
         resource: String,
-    ) -> Result<Option<String>, StoreError> {
+    ) -> Result<Option<TokenAccess>, StoreError> {
         self.call(move |conn| {
             let tx = conn.transaction()?;
             let now = now_ms();
-            let personal: Option<String> = tx.query_row(
-                "SELECT username FROM mcp_personal_tokens WHERE token_hash=?1 AND expires_at>?2 AND revoked_at IS NULL",
-                rusqlite::params![token_hash,now], |row| row.get(0),
+            let personal: Option<(String, Permissions)> = tx.query_row(
+                "SELECT username,logs,metrics,alerts_write,scope_kind,scope_id FROM mcp_personal_tokens WHERE token_hash=?1 AND expires_at>?2 AND revoked_at IS NULL",
+                rusqlite::params![token_hash,now], |row| Ok((row.get(0)?, permissions_from_row(row, 1)?)),
             ).optional()?;
-            if let Some(username) = personal {
+            if let Some((username, permissions)) = personal {
                 tx.execute("UPDATE mcp_personal_tokens SET last_used_at=?2 WHERE token_hash=?1", rusqlite::params![token_hash,now])?;
                 tx.commit()?;
-                return Ok(Some(username));
+                return Ok(Some(access(username, permissions)));
             }
-            let oauth: Option<(String,String)> = tx.query_row(
-                "SELECT g.username,g.id FROM oauth_tokens t JOIN oauth_grants g ON g.id=t.grant_id WHERE t.token_hash=?1 AND t.kind='access' AND t.expires_at>?2 AND t.revoked_at IS NULL AND g.revoked_at IS NULL AND g.scope='lognara.read' AND g.resource=?3",
-                rusqlite::params![token_hash,now,resource], |row| Ok((row.get(0)?,row.get(1)?)),
+            let oauth: Option<(String, String, Permissions)> = tx.query_row(
+                "SELECT g.username,g.id,g.logs,g.metrics,g.alerts_write,g.scope_kind,g.scope_id FROM oauth_tokens t JOIN oauth_grants g ON g.id=t.grant_id WHERE t.token_hash=?1 AND t.kind='access' AND t.expires_at>?2 AND t.revoked_at IS NULL AND g.revoked_at IS NULL AND g.resource=?3",
+                rusqlite::params![token_hash,now,resource], |row| Ok((row.get(0)?, row.get(1)?, permissions_from_row(row, 2)?)),
             ).optional()?;
-            if let Some((username,grant_id)) = oauth {
+            if let Some((username, grant_id, permissions)) = oauth {
                 tx.execute("UPDATE oauth_tokens SET last_used_at=?2 WHERE token_hash=?1", rusqlite::params![token_hash,now])?;
                 tx.execute("UPDATE oauth_grants SET last_used_at=?2 WHERE id=?1", rusqlite::params![grant_id,now])?;
                 tx.commit()?;
-                return Ok(Some(username));
+                return Ok(Some(access(username, permissions)));
             }
             tx.commit()?;
             Ok(None)
@@ -730,11 +783,12 @@ impl Store {
         }).await
     }
 
+    /// Завершает согласие: при `decision` создаёт код с выбранными правами и scope.
     pub async fn complete_oauth_pending(
         &self,
         id: String,
         username: String,
-        code_hash: Option<[u8; 32]>,
+        decision: Option<([u8; 32], Permissions)>,
     ) -> Result<Option<PendingAuthorization>, StoreError> {
         self.call(move |conn| {
             let tx = conn.transaction()?;
@@ -750,10 +804,12 @@ impl Store {
             ).optional()?;
             let Some(pending) = pending else { return Ok(None); };
             tx.execute("DELETE FROM oauth_pending WHERE id=?1", [&pending.id])?;
-            if let Some(code_hash) = code_hash {
+            if let Some((code_hash, permissions)) = decision {
+                let (logs, metrics, alerts_write, kind, scope_id) = permission_values(permissions);
+                let granted = permissions.rights.oauth_scope();
                 tx.execute(
-                    "INSERT INTO oauth_codes(code_hash,username,client_id,client_name,redirect_uri,scope,resource,code_challenge,expires_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-                    rusqlite::params![code_hash,pending.username,pending.client_id,pending.client_name,pending.redirect_uri,pending.scope,pending.resource,pending.code_challenge,now+300_000],
+                    "INSERT INTO oauth_codes(code_hash,username,client_id,client_name,redirect_uri,scope,resource,code_challenge,expires_at,logs,metrics,alerts_write,scope_kind,scope_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+                    rusqlite::params![code_hash,pending.username,pending.client_id,pending.client_name,pending.redirect_uri,granted,pending.resource,pending.code_challenge,now+300_000,logs,metrics,alerts_write,kind,scope_id],
                 )?;
             }
             tx.commit()?;
@@ -783,10 +839,10 @@ impl Store {
                     row.get::<_,String>(6)?, row.get::<_,i64>(7)?, row.get::<_,Option<i64>>(8)?,
                 )),
             ).optional()?;
-            let Some((username,stored_client,client_name,stored_redirect,scope,stored_resource,stored_challenge,expires_at,used_at)) = code else {
+            let Some((username,stored_client,_client_name,stored_redirect,scope,stored_resource,stored_challenge,expires_at,used_at)) = code else {
                 return Ok(None);
             };
-            if expires_at <= now || used_at.is_some() || scope != "lognara.read"
+            if expires_at <= now || used_at.is_some() || !is_granted_scope(&scope)
                 || client_id != stored_client || redirect_uri != stored_redirect
                 || resource != stored_resource || code_challenge != stored_challenge
             {
@@ -796,9 +852,11 @@ impl Store {
                 return Ok(None);
             }
             let grant_id = uuid::Uuid::new_v4().to_string();
+            // Права и скоуп переносятся из кода, который выбрал пользователь на согласии.
             tx.execute(
-                "INSERT INTO oauth_grants(id,username,client_id,client_name,scope,resource,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7)",
-                rusqlite::params![grant_id,username,stored_client,client_name,scope,stored_resource,now],
+                "INSERT INTO oauth_grants(id,username,client_id,client_name,scope,resource,created_at,logs,metrics,alerts_write,scope_kind,scope_id)
+                 SELECT ?1,username,client_id,client_name,scope,resource,?2,logs,metrics,alerts_write,scope_kind,scope_id FROM oauth_codes WHERE code_hash=?3",
+                rusqlite::params![grant_id,now,code_hash],
             )?;
             tx.execute(
                 "INSERT INTO oauth_tokens(token_hash,grant_id,kind,expires_at,created_at) VALUES(?1,?2,'access',?3,?4),(?5,?2,'refresh',?6,?4)",
@@ -835,7 +893,7 @@ impl Store {
                 return Ok((RefreshOutcome::Invalid,None));
             };
             if kind != "refresh" || client_id != stored_client || resource != stored_resource
-                || scope != "lognara.read" || token_revoked.is_some() || grant_revoked.is_some()
+                || !is_granted_scope(&scope) || token_revoked.is_some() || grant_revoked.is_some()
             {
                 tx.commit()?;
                 return Ok((RefreshOutcome::Invalid,None));
@@ -900,15 +958,58 @@ impl Store {
 fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "FULL")?;
-    conn.pragma_update(None, "foreign_keys", true)?;
+    // Пересборка таблицы с дочерними строками возможна только без проверки внешних ключей,
+    // поэтому ключи выключены на время миграций и включаются после проверки.
+    conn.pragma_update(None, "foreign_keys", false)?;
     let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
     for (index, sql) in MIGRATIONS.iter().enumerate().skip(version as usize) {
         let tx = conn.transaction()?;
         tx.execute_batch(sql)?;
+        // Проверка до commit: при нарушении миграция откатывается, user_version не растёт.
+        if tx.prepare("PRAGMA foreign_key_check")?.exists([])? {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
         tx.pragma_update(None, "user_version", index as i64 + 1)?;
         tx.commit()?;
     }
+    conn.pragma_update(None, "foreign_keys", true)?;
     Ok(())
+}
+
+/// Значения колонок прав: логи, метрики, запись алертов, тип и id скоупа.
+fn permission_values(permissions: Permissions) -> (i64, i64, i64, &'static str, i64) {
+    let rights = permissions.rights;
+    let (kind, id) = permissions.node_scope.columns();
+    (
+        rights.logs as i64,
+        rights.metrics as i64,
+        rights.alerts_write as i64,
+        kind,
+        id,
+    )
+}
+
+/// Читает права из колонок `logs, metrics, alerts_write, scope_kind, scope_id` начиная с `offset`.
+fn permissions_from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<Permissions> {
+    let kind: String = row.get(offset + 3)?;
+    let node_scope =
+        Scope::from_columns(&kind, row.get(offset + 4)?).ok_or(rusqlite::Error::InvalidQuery)?;
+    Ok(Permissions {
+        rights: Rights {
+            logs: row.get::<_, i64>(offset)? != 0,
+            metrics: row.get::<_, i64>(offset + 1)? != 0,
+            alerts_write: row.get::<_, i64>(offset + 2)? != 0,
+        },
+        node_scope,
+    })
+}
+
+fn access(username: String, permissions: Permissions) -> TokenAccess {
+    TokenAccess {
+        username,
+        rights: permissions.rights,
+        node_scope: permissions.node_scope,
+    }
 }
 
 /// Текущее время в миллисекундах Unix.
@@ -925,6 +1026,24 @@ mod tests {
 
     fn hash(value: &str) -> [u8; 32] {
         Sha256::digest(value.as_bytes()).into()
+    }
+
+    fn personal_permissions() -> Permissions {
+        Permissions {
+            rights: Rights::default(),
+            node_scope: Scope::All,
+        }
+    }
+
+    fn oauth_permissions() -> Permissions {
+        Permissions {
+            rights: Rights {
+                logs: true,
+                metrics: true,
+                alerts_write: true,
+            },
+            node_scope: Scope::All,
+        }
     }
 
     fn pending(id: &str) -> PendingAuthorization {
@@ -976,6 +1095,7 @@ mod tests {
                 "Codex workstation".into(),
                 token_hash,
                 now_ms() + 30 * 24 * 60 * 60 * 1000,
+                personal_permissions(),
             )
             .await
             .unwrap();
@@ -986,6 +1106,7 @@ mod tests {
                 "Expired".into(),
                 hash("expired-secret"),
                 now_ms() - 1,
+                personal_permissions(),
             )
             .await
             .unwrap();
@@ -994,8 +1115,8 @@ mod tests {
                 .authenticate_mcp_token(token_hash, "https://wrong.example/mcp".into())
                 .await
                 .unwrap()
-                .as_deref(),
-            Some("alice")
+                .map(|access| access.username),
+            Some("alice".to_owned())
         );
         assert!(
             store
@@ -1063,7 +1184,11 @@ mod tests {
             .await
             .unwrap();
         let pending = store
-            .complete_oauth_pending("pending-1".into(), "alice".into(), Some(code_hash))
+            .complete_oauth_pending(
+                "pending-1".into(),
+                "alice".into(),
+                Some((code_hash, oauth_permissions())),
+            )
             .await
             .unwrap()
             .unwrap();
@@ -1165,6 +1290,7 @@ mod tests {
                 .authenticate_mcp_token(access_hash, "https://dock.example.com/mcp".into())
                 .await
                 .unwrap()
+                .map(|access| access.username)
                 .as_deref(),
             Some("alice")
         );
@@ -1255,6 +1381,84 @@ mod tests {
         drop(store);
         let reopened = Store::open(dir.path()).unwrap();
         assert_eq!(reopened.favorite_metrics().await.unwrap(), vec![key]);
+    }
+
+    #[tokio::test]
+    async fn existing_tokens_keep_read_access_and_alert_children_survive_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let conn = Connection::open(dir.path().join("dock.sqlite3")).unwrap();
+            // Схема до прав токенов и скоупа алертов: все миграции, кроме двух последних.
+            let before = MIGRATIONS.len() - 2;
+            for sql in &MIGRATIONS[..before] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.pragma_update(None, "user_version", before as i64)
+                .unwrap();
+            conn.execute(
+                "INSERT INTO mcp_personal_tokens(id,username,name,token_hash,created_at,expires_at) VALUES('pat-old','alice','old',?1,1,?2)",
+                rusqlite::params![hash("old-pat"), i64::MAX],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO oauth_grants(id,username,client_id,client_name,scope,resource,created_at) VALUES('grant-old','alice','https://chatgpt.com/oauth/client.json','ChatGPT','lognara.read','https://dock.example.com/mcp',1)",
+                [],
+            )
+            .unwrap();
+            conn.execute_batch(
+                "INSERT INTO metric_alerts(id,server,service,name,origin,enabled,environment,no_data,combine_mode,revision,enabled_at)
+                     VALUES('alert-1','s','api','runs','counter',1,NULL,'normal','and',1,1);
+                 INSERT INTO metric_alert_triggers(alert_id,position,window_seconds,aggregate,comparator,threshold)
+                     VALUES('alert-1',0,60,'sum','>',1.0);
+                 INSERT INTO metric_alert_states(alert_id) VALUES('alert-1');
+                 INSERT INTO metric_alert_groups(id,kind,name,created_at) VALUES('group-1','personal','Team',1);
+                 INSERT INTO metric_alert_groups_used(alert_id,group_id) VALUES('alert-1','group-1');
+                 INSERT INTO metric_alert_outbox(id,alert_id,alert_revision,event_kind,message,created_at,expires_at)
+                     VALUES('event-1','alert-1',1,'firing','text',1,2);",
+            )
+            .unwrap();
+        }
+
+        let store = Store::open(dir.path()).unwrap();
+        let tokens = store.personal_tokens("alice".into()).await.unwrap();
+        assert_eq!(tokens[0].permissions, personal_permissions());
+        let grants = store.oauth_grants("alice".into()).await.unwrap();
+        assert_eq!(grants[0].permissions, personal_permissions());
+        let counts: (i64, i64, i64, i64) = store
+            .call(|conn| {
+                conn.query_row(
+                    "SELECT (SELECT count(*) FROM metric_alert_triggers WHERE alert_id='alert-1'),
+                            (SELECT count(*) FROM metric_alert_states WHERE alert_id='alert-1'),
+                            (SELECT count(*) FROM metric_alert_groups_used WHERE alert_id='alert-1'),
+                            (SELECT count(*) FROM metric_alert_outbox WHERE alert_id='alert-1')",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(counts, (1, 1, 1, 1));
+        // Глобальный и скоупленный алерт с одним ключом не конфликтуют; дубль глобального отклоняется.
+        store
+            .call(|conn| {
+                conn.execute(
+                    "INSERT INTO metric_alerts(id,server,service,name,origin,enabled,no_data,combine_mode,revision,enabled_at,scope_kind,scope_id)
+                     VALUES('alert-2','s','api','runs','counter',0,'normal','and',1,1,'relay',1)",
+                    [],
+                )
+            })
+            .await
+            .unwrap();
+        let duplicate = store
+            .call(|conn| {
+                conn.execute(
+                    "INSERT INTO metric_alerts(id,server,service,name,origin,enabled,no_data,combine_mode,revision,enabled_at)
+                     VALUES('alert-3','s','api','runs','counter',0,'normal','and',1,1)",
+                    [],
+                )
+            })
+            .await;
+        assert!(duplicate.is_err());
     }
 
     #[test]

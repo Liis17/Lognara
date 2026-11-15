@@ -25,7 +25,14 @@ pub struct Group {
     /// Сколько записей этого источника агенты вытеснили из своих буферов.
     pub dropped: u64,
     pub events: Vec<Event>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentHash>,
 }
+
+/// SHA-256 персонального токена агента.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct AgentHash(#[serde(with = "serde_bytes")] pub [u8; 32]);
 
 /// Откуда пришли события: место в иерархии инфраструктуры.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -130,21 +137,35 @@ impl CoreBatch {
         first_sequence: u64,
         received_at: i64,
     ) -> impl Iterator<Item = crate::model::StoredEvent> {
+        self.into_events_with(first_sequence, received_at, |_| None)
+    }
+
+    pub fn into_events_with(
+        self,
+        first_sequence: u64,
+        received_at: i64,
+        resolve_agent: impl Fn(&AgentHash) -> Option<crate::model::Node>,
+    ) -> impl Iterator<Item = crate::model::StoredEvent> {
         self.groups
             .into_iter()
-            .flat_map(|group| {
+            .flat_map(move |group| {
+                let node = group.agent.as_ref().and_then(&resolve_agent);
                 group
                     .events
                     .into_iter()
-                    .map(move |event| (group.source.clone(), event))
+                    .map(move |event| (group.source.clone(), event, node))
             })
             .enumerate()
-            .map(move |(offset, (source, event))| crate::model::StoredEvent {
-                sequence: first_sequence + offset as u64,
-                core_received_at: received_at,
-                source,
-                event,
-            })
+            .map(
+                move |(offset, (source, event, node))| crate::model::StoredEvent {
+                    sequence: first_sequence + offset as u64,
+                    core_received_at: received_at,
+                    relay_id: node.map(|node| node.relay_id),
+                    agent_id: node.map(|node| node.agent_id),
+                    source,
+                    event,
+                },
+            )
     }
 }
 

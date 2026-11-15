@@ -4,6 +4,7 @@ use crate::{
     definitions::{Definition, RuleSet},
     journal::Journal,
     model::StoredEvent,
+    query::QueryError,
     series::Point,
 };
 use anyhow::Result;
@@ -19,10 +20,39 @@ use std::{
 
 pub type ScopedName = (String, String, String, String, String);
 
+/// Фильтр узла из запроса; None - без ограничения. Узел точки: (relay_id, agent_id), agent 0 - неизвестен.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NodeFilter {
+    pub relay_id: Option<i64>,
+    pub agent_id: Option<i64>,
+}
+
+impl NodeFilter {
+    pub fn new(relay_id: Option<i64>, agent_id: Option<i64>) -> Result<Self, QueryError> {
+        if [relay_id, agent_id].into_iter().flatten().any(|id| id <= 0) {
+            return Err(QueryError::Invalid(
+                "relay_id and agent_id must be positive".into(),
+            ));
+        }
+        Ok(Self { relay_id, agent_id })
+    }
+
+    pub fn is_set(self) -> bool {
+        self.relay_id.is_some() || self.agent_id.is_some()
+    }
+
+    fn matches(self, relay_id: i64, agent_id: i64) -> bool {
+        self.relay_id.is_none_or(|id| id == relay_id)
+            && self.agent_id.is_none_or(|id| id == agent_id)
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct Metadata {
     pub sources: BTreeSet<(String, String)>,
     pub names: BTreeMap<ScopedName, (i64, i64)>,
+    /// Имена по узлам; точки без relay_id сюда не попадают, поэтому под фильтр узла не подходят.
+    pub nodes: BTreeMap<(i64, i64, ScopedName), (i64, i64)>,
 }
 
 #[derive(Serialize)]
@@ -40,6 +70,26 @@ impl Metadata {
     }
 
     pub fn point(&mut self, point: &Point) {
+        if let Some(relay_id) = point.relay_id {
+            let key = (
+                relay_id,
+                point.agent_id.unwrap_or(0),
+                (
+                    point.source.server.clone(),
+                    point.source.service.clone(),
+                    point.name.clone(),
+                    point.origin.as_str().into(),
+                    point.source.environment.clone().unwrap_or_default(),
+                ),
+            );
+            self.nodes
+                .entry(key)
+                .and_modify(|(first, last)| {
+                    *first = (*first).min(point.timestamp);
+                    *last = (*last).max(point.timestamp);
+                })
+                .or_insert((point.timestamp, point.timestamp));
+        }
         self.observe(
             point.source.server.clone(),
             point.source.service.clone(),
@@ -69,6 +119,54 @@ impl Metadata {
             .or_insert((ts, ts));
     }
 
+    /// Срез по узлу: имена и источники, у которых есть точки узла из фильтра.
+    pub fn for_node(&self, node: NodeFilter) -> Self {
+        let mut view = Self::default();
+        for ((relay_id, agent_id, scoped), (first, last)) in &self.nodes {
+            if node.matches(*relay_id, *agent_id) {
+                view.observe_range(scoped.clone(), *first, *last);
+            }
+        }
+        view
+    }
+
+    fn observe_range(&mut self, scoped: ScopedName, first: i64, last: i64) {
+        self.sources.insert((scoped.0.clone(), scoped.1.clone()));
+        self.names
+            .entry(scoped)
+            .and_modify(|(seen_first, seen_last)| {
+                *seen_first = (*seen_first).min(first);
+                *seen_last = (*seen_last).max(last);
+            })
+            .or_insert((first, last));
+    }
+
+    /// Имена из каталога узла по фильтру; старые строки без узла (0) под фильтр не попадают.
+    pub fn load_nodes(catalog: &Catalog, node: NodeFilter) -> Result<Self> {
+        let mut view = Self::default();
+        let mut statement = catalog.connection.prepare(
+            "SELECT server,service,name,origin,environment,first_seen,last_seen FROM series_nodes
+             WHERE (?1 IS NULL OR relay_id=?1) AND (?2 IS NULL OR agent_id=?2)",
+        )?;
+        let rows = statement.query_map(params![node.relay_id, node.agent_id], |r| {
+            Ok((
+                (
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                ),
+                (r.get::<_, i64>(5)?, r.get::<_, i64>(6)?),
+            ))
+        })?;
+        for row in rows {
+            let (scoped, (first, last)) = row?;
+            view.observe_range(scoped, first, last);
+        }
+        Ok(view)
+    }
+
     pub fn save(&self, catalog: &Catalog) -> Result<()> {
         let tx = catalog.connection.unchecked_transaction()?;
         for (server, service) in &self.sources {
@@ -81,6 +179,15 @@ impl Metadata {
             tx.execute("INSERT INTO scoped_series VALUES(?1,?2,?3,?4,?5,?6,?7)
                 ON CONFLICT(server,service,name,origin,environment) DO UPDATE SET first_seen=MIN(first_seen,excluded.first_seen),last_seen=MAX(last_seen,excluded.last_seen)",
                 params![server,service,name,origin,environment,first,last])?;
+        }
+        for ((relay_id, agent_id, (server, service, name, origin, environment)), (first, last)) in
+            &self.nodes
+        {
+            tx.execute(
+                "INSERT INTO series_nodes VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
+                ON CONFLICT(relay_id,agent_id,server,service,name,origin,environment) DO UPDATE SET first_seen=MIN(first_seen,excluded.first_seen),last_seen=MAX(last_seen,excluded.last_seen)",
+                params![relay_id, agent_id, server, service, name, origin, environment, first, last],
+            )?;
         }
         tx.commit()?;
         Ok(())
@@ -307,25 +414,37 @@ pub fn migrate(journal: &Journal) -> Result<()> {
     Ok(())
 }
 
+/// Открытый сегмент в метаданных запроса; с фильтром узла берутся только его точки.
+pub fn merge_active(metadata: &mut Metadata, scoped: &Metadata, node: NodeFilter) {
+    if node.is_set() {
+        metadata.merge(&scoped.for_node(node));
+    } else {
+        metadata.merge(scoped);
+    }
+}
+
 pub async fn sources(
     core: std::sync::Arc<crate::storage::Core>,
+    node: NodeFilter,
 ) -> Result<Vec<Source>, crate::query::QueryError> {
     let snapshot = core.snapshot();
     let mut metadata = tokio::task::spawn_blocking(move || -> Result<Metadata> {
+        if node.is_set() {
+            let catalog = core.journal.catalog.lock().unwrap();
+            return Metadata::load_nodes(&catalog, node);
+        }
         let mut heartbeat = Metadata::default();
         heartbeat_sources(&core.journal, &mut heartbeat)?;
         let catalog = core.journal.catalog.lock().unwrap();
         heartbeat.save(&catalog)?;
         let sources = catalog.connection.prepare("SELECT server,service FROM metric_sources UNION SELECT server,service FROM series_definitions")?
             .query_map([], |r| Ok((r.get(0)?,r.get(1)?)))?.collect::<Result<BTreeSet<_>,_>>()?;
-        Ok(Metadata { sources, names: BTreeMap::new() })
+        Ok(Metadata { sources, ..Default::default() })
     })
     .await
     .map_err(|e| crate::query::QueryError::Storage(e.into()))??;
     if let Some(active) = &snapshot.active {
-        metadata
-            .sources
-            .extend(active.scoped.sources.iter().cloned());
+        merge_active(&mut metadata, &active.scoped, node);
     }
     Ok(metadata
         .sources
@@ -346,12 +465,17 @@ pub struct MetricKey {
 #[serde(deny_unknown_fields)]
 pub struct LookupRequest {
     pub keys: BTreeSet<MetricKey>,
+    #[serde(default)]
+    pub relay_id: Option<i64>,
+    #[serde(default)]
+    pub agent_id: Option<i64>,
 }
 #[derive(Clone, Default)]
 pub struct Selection {
     pub server: Option<String>,
     pub service: Option<String>,
     pub keys: Option<BTreeSet<MetricKey>>,
+    pub node: NodeFilter,
 }
 impl Selection {
     fn includes_name(&self, server: &str, service: &str, name: &str) -> bool {
@@ -392,12 +516,16 @@ pub async fn selected(
     let (mut metadata, definitions) = tokio::task::spawn_blocking(move || -> Result<_> {
         let catalog = core.journal.catalog.lock().unwrap();
         let mut metadata = Metadata::default();
-        let mut statement = catalog.connection.prepare("SELECT server,service,name,origin,environment,first_seen,last_seen FROM scoped_series WHERE (?1 IS NULL OR server=?1) AND (?2 IS NULL OR service=?2)")?;
-        let rows = statement.query_map(params![filter.server,filter.service], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,i64>(5)?,r.get::<_,i64>(6)?)))?;
-        for row in rows {
-            let (server,service,name,origin,environment,first,last) = row?;
-            if filter.includes_name(&server,&service,&name) {
-                metadata.names.insert((server,service,name,origin,environment),(first,last));
+        if filter.node.is_set() {
+            metadata = Metadata::load_nodes(&catalog, filter.node)?;
+        } else {
+            let mut statement = catalog.connection.prepare("SELECT server,service,name,origin,environment,first_seen,last_seen FROM scoped_series WHERE (?1 IS NULL OR server=?1) AND (?2 IS NULL OR service=?2)")?;
+            let rows = statement.query_map(params![filter.server,filter.service], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,i64>(5)?,r.get::<_,i64>(6)?)))?;
+            for row in rows {
+                let (server,service,name,origin,environment,first,last) = row?;
+                if filter.includes_name(&server,&service,&name) {
+                    metadata.names.insert((server,service,name,origin,environment),(first,last));
+                }
             }
         }
         let mut definitions = vec![];
@@ -412,7 +540,7 @@ pub async fn selected(
     .await
     .map_err(|e| crate::query::QueryError::Storage(e.into()))??;
     if let Some(active) = &snapshot.active {
-        metadata.merge(&active.scoped);
+        merge_active(&mut metadata, &active.scoped, selection.node);
     }
     let mut metrics: BTreeMap<(String, String, String, String), Metric> = BTreeMap::new();
     let mut ranges: BTreeMap<(String, String, String, String), (i64, i64)> = BTreeMap::new();
@@ -474,7 +602,8 @@ pub async fn selected(
                 found = true;
             }
         }
-        if !found {
+        // С фильтром узла определение без точек узла не выдаётся: иначе имя метрики уходит из скоупа.
+        if !found && !selection.node.is_set() {
             metrics.insert(
                 (
                     definition.server.clone(),

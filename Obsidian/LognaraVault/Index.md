@@ -32,7 +32,7 @@ Lognara — система сбора логов: агент в контейне
 
 | Файл | Компонент | Описание |
 |------|-----------|----------|
-| [[Dock/LognaraDock]] | lognara-dock | Веб-интерфейс за nginx и read-only remote MCP: вход/passkey, PAT/OAuth, история, аналитика, метрики и Telegram-алерты; MCP по умолчанию выключен и не использует cookie браузера. |
+| [[Dock/LognaraDock]] | lognara-dock | Веб-интерфейс за nginx и remote MCP: вход/passkey, PAT/OAuth с правами и скоупом relay/агента, история, аналитика, метрики, Telegram-алерты и их создание через MCP; MCP по умолчанию выключен и не использует cookie браузера. |
 | [[Dock/LognaraDock-ProjectMap]] | lognara-dock | Дерево файлов Rust и React, связи модулей и тесты. |
 | [[Dock/DesignIntegration]] | развитие dock | Полный план шести HTML-дизайнов; этапы 0–6 реализованы, дальнейшие backend-этапы и решения пользователя. |
 

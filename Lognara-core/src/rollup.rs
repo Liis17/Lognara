@@ -59,6 +59,8 @@ pub fn schema() -> SchemaRef {
                 Field::new("origin", DataType::Utf8, false),
                 Field::new("rule_id", DataType::Utf8, true),
                 Field::new("labels", DataType::Utf8, false),
+                Field::new("relay_id", DataType::Int64, true),
+                Field::new("agent_id", DataType::Int64, true),
                 Field::new("sum", DataType::Float64, false),
                 Field::new("count", DataType::Int64, false),
                 Field::new("min", DataType::Float64, false),
@@ -146,6 +148,7 @@ fn candidate_days(files: &[Arc<SeriesFile>]) -> Result<BTreeSet<Date>> {
 }
 
 /// Отпечаток суток: SHA-256 отсортированного списка "id:rows" файлов, пересекающих сутки.
+/// Версия схемы агрегата входит в отпечаток: после её смены старые агрегаты пересобираются.
 fn fingerprint(files: &[Arc<SeriesFile>], (from, to): (i64, i64)) -> String {
     let mut items: Vec<String> = files
         .iter()
@@ -154,6 +157,7 @@ fn fingerprint(files: &[Arc<SeriesFile>], (from, to): (i64, i64)) -> String {
         .collect();
     items.sort();
     let mut hasher = Sha256::new();
+    hasher.update(b"rollup-schema-2\n");
     for item in items {
         hasher.update(item.as_bytes());
         hasher.update(b"\n");
@@ -237,6 +241,8 @@ async fn build(
             col("origin"),
             col("rule_id"),
             col("labels"),
+            col("relay_id"),
+            col("agent_id"),
         ],
         vec![
             sum(col("value")).alias("sum"),

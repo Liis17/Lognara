@@ -1,15 +1,31 @@
 import { type FormEvent, useEffect, useState } from "react";
-import { api, errorText } from "../api";
+import { api, errorText, type NodeScope } from "../api";
+import {
+  AccessFields,
+  accessBody,
+  defaultAccessDraft,
+  loadNodeLists,
+  type AccessDraft,
+  type NodeLists,
+} from "../components/AccessFields";
 
 type McpSettings = { enabled: boolean; url: string };
-type PersonalToken = {
+/** Плоские права и скоуп из ответа dock; node_name есть, если core знает имя узла. */
+type McpRights = {
+  logs: boolean;
+  metrics: boolean;
+  alerts_write: boolean;
+  node_scope: NodeScope;
+  node_name: string | null;
+};
+type PersonalToken = McpRights & {
   id: string;
   name: string;
   created_at: number;
   expires_at: number;
   last_used_at: number | null;
 };
-type OAuthGrant = {
+type OAuthGrant = McpRights & {
   id: string;
   client_name: string;
   scope: string;
@@ -21,11 +37,28 @@ function formatTime(value: number | null): string {
   return value === null ? "не использовался" : new Date(value).toLocaleString();
 }
 
+function rightsText(item: McpRights): string {
+  const rights = [
+    item.logs && "логи",
+    item.metrics && "метрики",
+    item.alerts_write && "запись алертов",
+  ].filter(Boolean);
+  return rights.length ? rights.join(", ") : "нет прав";
+}
+
+function scopeText(item: McpRights): string {
+  const { node_scope: scope } = item;
+  if (scope.kind === "all") return "все узлы";
+  return item.node_name ?? `${scope.kind === "relay" ? "relay" : "агент"} #${scope.id}`;
+}
+
 export default function McpAccess() {
   const [settings, setSettings] = useState<McpSettings | null>(null);
   const [tokens, setTokens] = useState<PersonalToken[]>([]);
   const [grants, setGrants] = useState<OAuthGrant[]>([]);
   const [name, setName] = useState("");
+  const [access, setAccess] = useState<AccessDraft>(defaultAccessDraft);
+  const [nodes, setNodes] = useState<NodeLists | null>(null);
   const [secret, setSecret] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -45,19 +78,23 @@ export default function McpAccess() {
 
   useEffect(() => {
     refresh().catch((reason) => setError(errorText(reason)));
+    loadNodeLists().then(setNodes);
   }, []);
 
   const issue = async (event: FormEvent) => {
     event.preventDefault();
+    const rights = accessBody(access);
+    if (!rights) return;
     setBusy(true);
     setError("");
     setMessage("");
     setSecret(null);
     setCopied(false);
     try {
-      const reply = await api<{ token: string }>("POST", "/api/mcp/personal-tokens", { name });
+      const reply = await api<{ token: string }>("POST", "/api/mcp/personal-tokens", { name, ...rights });
       setSecret(reply.token);
       setName("");
+      setAccess(defaultAccessDraft);
       setMessage("Токен создан. Скопируйте его сейчас: после закрытия страницы секрет нельзя будет восстановить.");
       await refresh();
     } catch (reason) {
@@ -106,7 +143,7 @@ export default function McpAccess() {
     <section className="mcp-access">
       <header>
         <h1>MCP-доступ</h1>
-        <p className="page-note">Удалённое подключение к Lognara через read-only MCP.</p>
+        <p className="page-note">Удалённое подключение к Lognara через MCP.</p>
       </header>
 
       <article className="mcp-card">
@@ -120,7 +157,7 @@ export default function McpAccess() {
         {settings && !settings.enabled && (
           <p className="page-note">Администратору нужно включить LOGNARA_DOCK_MCP_ENABLED=true и опубликовать адрес через HTTPS nginx.</p>
         )}
-        <p className="page-note">Подключение открывает чтение логов и метрик, включая полный текст логов. Токены браузерной сессии не подходят для MCP.</p>
+        <p className="page-note">Чтение логов и метрик, включая полный текст логов, выдаётся по умолчанию. Запись алертов включается отдельно. Токены браузерной сессии не подходят для MCP.</p>
       </article>
 
       <div className="mcp-grid">
@@ -130,7 +167,8 @@ export default function McpAccess() {
           <form onSubmit={issue}>
             <label htmlFor="mcp-token-name">Название</label>
             <input id="mcp-token-name" value={name} onChange={(event) => setName(event.target.value)} maxLength={80} placeholder="Codex на рабочем компьютере" />
-            <button type="submit" disabled={busy || !settings?.enabled || !name.trim()}>
+            <AccessFields draft={access} onChange={setAccess} nodes={nodes} />
+            <button type="submit" disabled={busy || !settings?.enabled || !name.trim() || !accessBody(access)}>
               Выпустить токен
             </button>
           </form>
@@ -150,6 +188,7 @@ export default function McpAccess() {
               <li key={token.id}>
                 <div>
                   <strong>{token.name}</strong>
+                  <span className="muted">Права: {rightsText(token)} · Узлы: {scopeText(token)}</span>
                   <span className="muted">Истекает {formatTime(token.expires_at)}</span>
                   <span className="muted">Последнее использование: {formatTime(token.last_used_at)}</span>
                 </div>
@@ -168,7 +207,7 @@ export default function McpAccess() {
             <li key={grant.id}>
               <div>
                 <strong>{grant.client_name}</strong>
-                <span className="muted">Разрешение: {grant.scope}</span>
+                <span className="muted">Разрешение: {grant.scope} · Права: {rightsText(grant)} · Узлы: {scopeText(grant)}</span>
                 <span className="muted">Последнее использование: {formatTime(grant.last_used_at)}</span>
               </div>
               <button type="button" className="quiet" onClick={() => revokeGrant(grant)}>Отозвать</button>

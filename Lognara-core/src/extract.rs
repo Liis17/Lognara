@@ -48,6 +48,8 @@ pub fn native(row: &StoredEvent) -> (Vec<Point>, bool) {
                         labels: String::new(),
                         value,
                         event_id: None,
+                        relay_id: row.relay_id,
+                        agent_id: row.agent_id,
                     });
                 }
                 _ => invalid = true,
@@ -114,6 +116,8 @@ pub fn rule_point(rule: &CompiledRule, row: &StoredEvent) -> (Option<Point>, boo
         labels: labels(rule, &captures),
         value,
         event_id: Some(row.event.id.0.into_bytes()),
+        relay_id: row.relay_id,
+        agent_id: row.agent_id,
     };
     (Some(point), false)
 }
@@ -161,6 +165,8 @@ mod tests {
         StoredEvent {
             sequence: 1,
             core_received_at: 0,
+            relay_id: None,
+            agent_id: None,
             source: Source {
                 environment: environment.map(Into::into),
                 server: "srv".into(),
@@ -234,6 +240,8 @@ mod tests {
                 labels: "status=200".into(),
                 value: 123.0,
                 event_id: Some(Uuid::from_u128(9).into_bytes()),
+                relay_id: None,
+                agent_id: None,
             }]
         );
     }
@@ -342,6 +350,8 @@ mod tests {
         StoredEvent {
             sequence: 1,
             core_received_at: 0,
+            relay_id: None,
+            agent_id: None,
             source: Source {
                 environment: Some("prod".into()),
                 server: "srv".into(),
@@ -387,6 +397,8 @@ mod tests {
                 labels: String::new(),
                 value: 10.0,
                 event_id: None,
+                relay_id: None,
+                agent_id: None,
             }]
         );
     }

@@ -1,4 +1,9 @@
+use axum::{
+    body::{Body, to_bytes},
+    http::{Request, StatusCode},
+};
 use lognara_core::{
+    api,
     config::Config,
     model::format_timestamp,
     query::{self, QueryError, SearchRequest, TextMode, TextQuery},
@@ -9,6 +14,7 @@ use std::{
     collections::BTreeMap,
     time::{Duration, Instant},
 };
+use tower::ServiceExt;
 
 fn config(path: &std::path::Path) -> Config {
     let mut cfg = Config::from_lookup(|key| match key {
@@ -202,4 +208,101 @@ fn search_memory_budget_rejects_large_pages_in_arrow_and_parquet() {
         );
         core.shutdown().unwrap();
     }
+}
+
+#[tokio::test]
+async fn search_filters_and_json_events_include_resolved_node_identity() {
+    use sha2::{Digest, Sha256};
+
+    let dir = tempfile::tempdir().unwrap();
+    let core = Core::open(config(dir.path())).unwrap();
+    let relay_a = core.journal.access.create_relay("relay-a").unwrap();
+    let relay_b = core.journal.access.create_relay("relay-b").unwrap();
+    let agent_a = core
+        .journal
+        .access
+        .create_agent("agent", relay_a.relay.id)
+        .unwrap();
+    let agent_b = core
+        .journal
+        .access
+        .create_agent("agent", relay_b.relay.id)
+        .unwrap();
+    let hash_a = Sha256::digest(agent_a.token.as_bytes()).into();
+    let agent_a = core
+        .journal
+        .access
+        .rotate_agent_token(agent_a.agent.id)
+        .unwrap();
+    let hash_b = Sha256::digest(agent_b.token.as_bytes()).into();
+    let mut batch = wire::decode(include_bytes!("fixtures/relay-batch.bin"), 1 << 20).unwrap();
+    let mut group_a = batch.groups[0].clone();
+    let mut group_b = group_a.clone();
+    group_a.agent = Some(wire::AgentHash(hash_a));
+    group_a.events[0].message = "relay alpha".into();
+    group_b.agent = Some(wire::AgentHash(hash_b));
+    group_b.events[0].message = "relay beta".into();
+    let mut unknown_group = group_a.clone();
+    unknown_group.agent = Some(wire::AgentHash([0x77; 32]));
+    unknown_group.events[0].message = "unknown agent".into();
+    batch.groups = vec![group_a, group_b, unknown_group];
+    let body = zstd::encode_all(&rmp_serde::to_vec_named(&batch).unwrap()[..], 3).unwrap();
+    core.journal.accept(&body).unwrap();
+    wait(&core, 3);
+
+    let mut by_agent = request();
+    by_agent.limit = 10;
+    by_agent
+        .filters
+        .insert("agent_id".into(), vec![agent_a.agent.id.to_string()]);
+    let events = search(&core, by_agent, false).unwrap().events;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].message, "relay alpha");
+    assert_eq!(events[0].relay_id, Some(relay_a.relay.id));
+    assert_eq!(events[0].agent_id, Some(agent_a.agent.id));
+
+    let mut by_relay = request();
+    by_relay.limit = 10;
+    by_relay
+        .filters
+        .insert("relay_id".into(), vec![relay_b.relay.id.to_string()]);
+    let events = search(&core, by_relay, false).unwrap().events;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].message, "relay beta");
+
+    let mut unfiltered = request();
+    unfiltered.limit = 10;
+    let unknown = search(&core, unfiltered, false)
+        .unwrap()
+        .events
+        .into_iter()
+        .find(|event| event.message == "unknown agent")
+        .unwrap();
+    assert_eq!(unknown.relay_id, None);
+    assert_eq!(unknown.agent_id, None);
+    let unknown = serde_json::to_value(unknown).unwrap();
+    assert!(unknown.get("relay_id").is_none());
+    assert!(unknown.get("agent_id").is_none());
+
+    let response = api::router(core.clone())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/traces/8c21f0a4b6c8d0e12a4b6c8d0e1f3a5b?from={}&to={}&agent_id={}",
+                    format_timestamp(TS - 1),
+                    format_timestamp(TS + 1),
+                    agent_a.agent.id,
+                ))
+                .header("authorization", "Bearer query")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+    let response: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(response["events"].as_array().unwrap().len(), 1);
+    assert_eq!(response["events"][0]["agent_id"], agent_a.agent.id);
+    core.shutdown().unwrap();
 }

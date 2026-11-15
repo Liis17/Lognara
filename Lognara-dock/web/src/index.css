@@ -392,6 +392,12 @@ pre.json, .event-details pre, tr.details pre { margin: 0; padding: 12px; backgro
 .oauth-consent dt { color: var(--ink3); }
 .oauth-consent dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
 .oauth-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 22px; }
+.access-fields { display: grid; gap: 8px; min-width: 0; margin: 0; padding: 12px; border: 1px solid var(--line); border-radius: 10px; }
+.access-fields legend { padding: 0 4px; color: var(--ink3); }
+.access-fields label { display: flex; align-items: center; gap: 8px; }
+.access-fields select { min-width: 0; }
+.access-fields .muted { font-size: 12px; }
+.access-nested { display: grid; gap: 8px; padding-left: 24px; }
 .passkeys { padding: 0; list-style: none; margin: 0 0 18px; }
 .passkeys li { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 12px 0; border-bottom: 1px solid var(--line); }
 .passkeys li .muted { font-size: 12px; }

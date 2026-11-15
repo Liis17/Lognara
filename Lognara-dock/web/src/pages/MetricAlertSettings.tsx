@@ -3,6 +3,7 @@ import {
   api,
   ApiError,
   errorText,
+  nodeScopeLabel,
   type MetricAlertDefinition,
   type MetricAlertGroup,
   type MetricAlertKey,
@@ -341,6 +342,19 @@ export default function MetricAlertSettings({
       setBusy(false);
     }
   };
+  const removeRule = async (id: string) => {
+    if (!window.confirm("Удалить правило, созданное через MCP? Ожидающие уведомления будут отменены.")) return;
+    setError("");
+    setBusy(true);
+    try {
+      await api("DELETE", `/api/alerts/rules/${encodeURIComponent(id)}`);
+      await load();
+    } catch (e) {
+      fail(e);
+    } finally {
+      setBusy(false);
+    }
+  };
   const setEnabled = async (enabled: boolean) => {
     if (!settings) return;
     setError("");
@@ -414,10 +428,19 @@ export default function MetricAlertSettings({
                 <li key={alert.id}>
                   <div>
                     <strong>{keyText(alert.key)}</strong>
+                    {alert.node_scope.kind !== "all" && (
+                      <span className="muted">Создано через MCP · {nodeScopeLabel(alert.node_scope)} · изменяется через MCP</span>
+                    )}
                     <span className="muted">{stateText(alert)} · {alert.environment ?? "все окружения"} · {alert.combine.toUpperCase()}</span>
                     {alert.no_recipients && <span className="muted">Не выбраны группы с получателями</span>}
                   </div>
-                  <a href={metricUrl(alert.key)}>Настроить</a>
+                  {alert.node_scope.kind === "all" ? (
+                    <a href={metricUrl(alert.key)}>Настроить</a>
+                  ) : (
+                    <button type="button" disabled={busy} onClick={() => removeRule(alert.id)}>
+                      Удалить
+                    </button>
+                  )}
                 </li>
               ))}
               {!settings.alerts.length && <li className="muted">Алертов пока нет</li>}

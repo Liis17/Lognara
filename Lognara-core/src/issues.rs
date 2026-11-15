@@ -87,6 +87,8 @@ pub struct RecurrenceRequest {
     pub after: u64,
     #[serde(default)]
     pub issues: Vec<Watch>,
+    #[serde(default)]
+    pub filters: Filters,
 }
 
 #[derive(Debug, Deserialize)]
@@ -235,19 +237,17 @@ pub fn id_expr() -> Expr {
     )
 }
 
-/// Только environment/service/action: ими же задана область fingerprint в каталоге.
 fn window(
     from: &str,
     to: &str,
     filters: &Filters,
     interval_seconds: u64,
 ) -> Result<Window, QueryError> {
-    if filters
-        .keys()
-        .any(|field| !["environment", "service", "action"].contains(&field.as_str()))
-    {
+    if filters.keys().any(|field| {
+        !["environment", "service", "action", "relay_id", "agent_id"].contains(&field.as_str())
+    }) {
         return Err(QueryError::Invalid(
-            "issue filters accept environment, service and action".into(),
+            "issue filters accept environment, service, action, relay_id and agent_id".into(),
         ));
     }
     let mut filters = filters.clone();
@@ -406,10 +406,11 @@ pub async fn search(core: &Core, request: IssueRequest) -> Result<IssueResponse,
         .iter()
         .copied()
         .filter(|id| {
-            state
-                .issues
-                .get(*id)
-                .is_some_and(|issue| matches(&window.filter.filters, issue))
+            (!node_scoped(&window.filter.filters) || issues.contains_key(*id))
+                && state
+                    .issues
+                    .get(*id)
+                    .is_some_and(|issue| matches(&window.filter.filters, issue))
         })
         .collect();
     let counts = Counts {
@@ -470,6 +471,7 @@ pub async fn details(
         &request.filters,
         request.interval_seconds,
     )?;
+    let scoped_to_node = node_scoped(&window.filter.filters);
     let state = core.patterns.view()?;
     if !state.issues.contains_key(fingerprint) {
         return Err(QueryError::NotFound);
@@ -498,6 +500,9 @@ pub async fn details(
         remember(&mut examples, &row)
     })
     .await?;
+    if scoped_to_node && totals.totals.count == 0 {
+        return Err(QueryError::NotFound);
+    }
     totals.servers = servers.keys().cloned().collect();
     let mut sorted: Vec<_> = servers.into_iter().collect();
     sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
@@ -528,6 +533,7 @@ pub async fn recurrences(
     request: RecurrenceRequest,
 ) -> Result<RecurrenceResponse, QueryError> {
     let deadline = Instant::now() + core.journal.config.query_timeout;
+    let filters = query::normalize_node_filters(&request.filters)?;
     if request.issues.len() > MAX_STATUSES {
         return Err(QueryError::Invalid(
             "issues accept up to 10000 fingerprints".into(),
@@ -560,8 +566,19 @@ pub async fn recurrences(
     let levels = [LogLevel::Error, LogLevel::Fatal]
         .map(|level| lit(ScalarValue::UInt8(Some(level.code()))))
         .to_vec();
-    let mut stream = raw_frame(core, &chunk, None)
-        .await?
+    let mut frame = raw_frame(core, &chunk, None).await?;
+    for (field, values) in &filters {
+        let values = values
+            .iter()
+            .map(|value| {
+                lit(ScalarValue::Int64(Some(
+                    value.parse().expect("node filters are validated"),
+                )))
+            })
+            .collect::<Vec<_>>();
+        frame = frame.filter(col(field).in_list(values, false))?;
+    }
+    let mut stream = frame
         .filter(
             col("sequence")
                 .gt(lit(request.after))
@@ -619,4 +636,8 @@ pub async fn recurrences(
         core_watermark: snapshot.watermark,
         recurrences,
     })
+}
+
+fn node_scoped(filters: &Filters) -> bool {
+    filters.contains_key("relay_id") || filters.contains_key("agent_id")
 }
