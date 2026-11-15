@@ -25,11 +25,13 @@ fn decodes_real_relay_encoder_and_preserves_nanoseconds_and_attributes() {
             },
             dropped: 3,
             events: vec![event],
+            agent: Some(core_wire::AgentHash([9; 32])),
         }],
     });
     let batch = wire::decode(&body, 4096).unwrap();
     assert_eq!(batch.dropped, 2);
     assert_eq!(batch.groups[0].dropped, 3);
+    assert_eq!(batch.groups[0].agent, Some(wire::AgentHash([9; 32])));
     let json =
         serde_json::to_value(LogEvent::from(batch.into_events(1, 7).next().unwrap())).unwrap();
     assert_eq!(json["timestamp"], "2026-09-29T10:41:51.871000001Z");

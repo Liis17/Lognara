@@ -14,7 +14,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use lognara_relay::agent_wire::{Batch, Payload, Record};
 use lognara_relay::config::Config;
-use lognara_relay::core_wire::{self, CoreBatch, Group, LogLevel, Source};
+use lognara_relay::core_wire::{self, AgentHash, CoreBatch, Group, LogLevel, Source};
 use lognara_relay::normalize;
 use lognara_relay::spool::Spool;
 use reqwest::Url;
@@ -391,6 +391,40 @@ async fn sends_early_when_batch_size_is_reached() {
     assert_eq!(messages(&batch.groups[0]), ["1", "2", "3"]);
 }
 
+fn agent_hash(token: &str) -> AgentHash {
+    AgentHash(Sha256::digest(token.as_bytes()).into())
+}
+
+#[tokio::test]
+async fn same_source_from_different_agents_is_not_merged() {
+    let mut core = fake_core().await;
+    core.set_agents(&[AGENT_TOKEN, "second-agent"]);
+    let spool = tempfile::tempdir().unwrap();
+    let relay = start_relay(config(&core, spool.path())).await;
+
+    assert_eq!(
+        send(&relay, &agent_batch("api", &["first"])).await,
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(
+        send_as(&relay, "second-agent", &agent_batch("api", &["second"])).await,
+        StatusCode::ACCEPTED
+    );
+
+    let first = core.next_batch().await;
+    assert_eq!(first.groups.len(), 1);
+    assert_eq!(first.groups[0].source, source("api"));
+    assert_eq!(first.groups[0].agent, Some(agent_hash(AGENT_TOKEN)));
+    assert_eq!(messages(&first.groups[0]), ["first"]);
+    let second = core.next_batch().await;
+    assert_eq!(second.groups.len(), 1);
+    assert_eq!(second.groups[0].source, source("api"));
+    assert_eq!(second.groups[0].agent, Some(agent_hash("second-agent")));
+    assert_eq!(messages(&second.groups[0]), ["second"]);
+    eventually(|| spooled(spool.path()) == 0).await;
+    relay.stop().await;
+}
+
 #[tokio::test]
 async fn spools_while_core_is_down_and_sends_oldest_first() {
     let mut core = fake_core().await;
@@ -419,6 +453,8 @@ async fn delivers_spool_left_from_previous_run_first() {
             source: source("api"),
             dropped: 0,
             events: vec![normalize::event(record("leftover"))],
+            // Запись spool до появления поля agent.
+            agent: None,
         }],
     };
     let mut previous = Spool::open(spool.path(), u64::MAX).await.unwrap();
@@ -840,6 +876,7 @@ async fn oversized_spool_stops_ingest_and_resumes_after_file_is_repaired() {
             source: source("api"),
             dropped: 0,
             events: vec![normalize::event(record("repaired"))],
+            agent: None,
         }],
     };
     relay.stop().await;
