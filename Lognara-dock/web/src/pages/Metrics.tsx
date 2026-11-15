@@ -606,7 +606,12 @@ export default function Metrics({
     onUnauthorized,
     favorites,
     busy,
-    alerts: new Map(alertSummary.alerts.map((alert) => [metricKey(alert.key), alert])),
+    // Плитка показывает только глобальное правило: скоупленные (через MCP) доступны лишь для чтения в настройках.
+    alerts: new Map(
+      alertSummary.alerts
+        .filter((alert) => alert.node_scope.kind === "all")
+        .map((alert) => [metricKey(alert.key), alert]),
+    ),
     alertsEnabled: alertSummary.enabled,
     onFavorite,
   };

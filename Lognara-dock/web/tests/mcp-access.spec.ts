@@ -1,23 +1,47 @@
 import { expect, test, type Page } from "@playwright/test";
 
 const secret = `lnm_${"s".repeat(43)}`;
+const nodes = {
+  relays: [{ id: 4, name: "Edge", created_at: "2026-01-01T00:00:00Z" }, { id: 5, name: "Core", created_at: "2026-01-01T00:00:00Z" }],
+  agents: [
+    { id: 9, name: "api-1", relay_id: 4, created_at: "2026-01-01T00:00:00Z" },
+    { id: 12, name: "db-1", relay_id: 5, created_at: "2026-01-01T00:00:00Z" },
+  ],
+};
 
 async function accessFixture(page: Page) {
+  const everywhere = { logs: true, metrics: true, alerts_write: false, node_scope: { kind: "all" }, node_name: null };
   const state = {
-    tokens: [{ id: "token-1", name: "Old laptop", created_at: 1_798_761_600_000, expires_at: 1_801_353_600_000, last_used_at: null }],
-    grants: [{ id: "grant-1", client_name: "ChatGPT", scope: "lognara.read", created_at: 1_798_761_600_000, last_used_at: 1_798_800_000_000 }],
+    tokens: [{ id: "token-1", name: "Old laptop", created_at: 1_798_761_600_000, expires_at: 1_801_353_600_000, last_used_at: null, ...everywhere }],
+    grants: [{ id: "grant-1", client_name: "ChatGPT", scope: "lognara.read", created_at: 1_798_761_600_000, last_used_at: 1_798_800_000_000, ...everywhere }],
     issued: 0,
+    bodies: [] as unknown[],
   };
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
     if (path === "/api/me") return route.fulfill({ json: { username: "liis", passkeys: 0 } });
     if (path === "/api/mcp/access") return route.fulfill({ json: { enabled: true, url: "https://dock.example.com/mcp" } });
+    if (path === "/api/relays") return route.fulfill({ json: { relays: nodes.relays } });
+    if (path === "/api/agents") return route.fulfill({ json: { agents: nodes.agents } });
     if (path === "/api/mcp/personal-tokens" && request.method() === "GET") return route.fulfill({ json: { tokens: state.tokens } });
     if (path === "/api/mcp/grants" && request.method() === "GET") return route.fulfill({ json: { grants: state.grants } });
     if (path === "/api/mcp/personal-tokens" && request.method() === "POST") {
       state.issued += 1;
-      const personal_token = { id: "token-new", name: request.postDataJSON().name, created_at: 1_798_761_600_000, expires_at: 1_801_353_600_000, last_used_at: null };
+      const body = request.postDataJSON();
+      state.bodies.push(body);
+      const personal_token = {
+        id: "token-new",
+        name: body.name,
+        created_at: 1_798_761_600_000,
+        expires_at: 1_801_353_600_000,
+        last_used_at: null,
+        logs: body.logs,
+        metrics: body.metrics,
+        alerts_write: body.alerts_write,
+        node_scope: body.node_scope,
+        node_name: body.node_scope.kind === "relay" ? "Edge" : null,
+      };
       state.tokens.unshift(personal_token);
       return route.fulfill({ status: 201, json: { token: secret, personal_token } });
     }
@@ -48,6 +72,7 @@ test("issues one-time PAT, copies it explicitly, lists expiry and revokes creden
   const issued = page.getByRole("region", { name: "Выданный токен" });
   await expect(issued.getByLabel("Скопируйте секрет сейчас")).toHaveValue(secret);
   expect(state.issued).toBe(1);
+  expect(state.bodies).toEqual([{ name: "Codex workstation", logs: true, metrics: true, alerts_write: false, node_scope: { kind: "all" } }]);
   expect(await page.evaluate(() => localStorage.length)).toBe(0);
   await issued.getByRole("button", { name: "Скопировать токен", exact: true }).click();
   await expect(issued.getByRole("button", { name: "Скопировано", exact: true })).toBeVisible();
@@ -73,7 +98,7 @@ test("OAuth consent names the read scope and returns only to the validated ChatG
       return route.fulfill({ json: { client_name: "ChatGPT", scope: "lognara.read", resource: "https://dock.example.com/mcp" } });
     }
     if (path === "/api/oauth/consent/pending-1" && request.method() === "POST") {
-      expect(request.postDataJSON()).toEqual({ allow: true });
+      expect(request.postDataJSON()).toEqual({ allow: true, logs: true, metrics: true, alerts_write: false, node_scope: { kind: "all" } });
       return route.fulfill({ json: { redirect_to: "https://chatgpt.com/connector_platform_oauth_redirect?code=code-1&state=state-1&iss=https%3A%2F%2Fdock.example.com" } });
     }
     return route.fulfill({ status: 404, json: { error: "not_found" } });
@@ -82,9 +107,92 @@ test("OAuth consent names the read scope and returns only to the validated ChatG
   await page.goto("/oauth/consent?request=pending-1");
   await expect(page.getByRole("heading", { name: "Разрешить подключение?", exact: true })).toBeVisible();
   await expect(page.getByText("lognara.read", { exact: true })).toBeVisible();
-  await expect(page.getByText(/текст логов не маскируется/u)).toBeVisible();
+  await expect(page.getByText(/Текст логов не маскируется/u)).toBeVisible();
   await page.getByRole("button", { name: "Разрешить", exact: true }).click();
   await expect(page).toHaveURL(/chatgpt\.com\/connector_platform_oauth_redirect\?code=code-1/u);
+});
+
+test("token with alerts write scoped to a relay is listed with its rights and node", async ({ page }) => {
+  const state = await accessFixture(page);
+  await page.getByLabel("Название", { exact: true }).fill("Alert bot");
+  const alerts = page.getByRole("checkbox", { name: "Создание и изменение алертов", exact: true });
+  await alerts.check();
+  await page.getByRole("radio", { name: "Relay и его агенты", exact: true }).check();
+  await page.getByLabel("Relay", { exact: true }).selectOption({ label: "Edge" });
+  await page.getByRole("button", { name: "Выпустить токен", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Выданный токен" })).toBeVisible();
+  expect(state.bodies).toEqual([{ name: "Alert bot", logs: true, metrics: true, alerts_write: true, node_scope: { kind: "relay", id: 4 } }]);
+  await expect(page.getByText("Права: логи, метрики, запись алертов · Узлы: Edge", { exact: true })).toBeVisible();
+});
+
+test("metrics gate alert rights and an agent is chosen only inside its relay", async ({ page }) => {
+  const state = await accessFixture(page);
+  const metrics = page.getByRole("checkbox", { name: "Метрики", exact: true });
+  const alerts = page.getByRole("checkbox", { name: "Создание и изменение алертов", exact: true });
+  await alerts.check();
+  await metrics.uncheck();
+  await expect(alerts).toBeDisabled();
+  await expect(alerts).not.toBeChecked();
+  await metrics.check();
+  await expect(alerts).toBeEnabled();
+  await expect(alerts).not.toBeChecked();
+
+  await page.getByLabel("Название", { exact: true }).fill("Agent token");
+  await page.getByRole("radio", { name: "Конкретный агент", exact: true }).check();
+  const agent = page.getByLabel("Агент", { exact: true });
+  await expect(agent).toBeDisabled();
+  await page.getByLabel("Relay", { exact: true }).selectOption({ label: "Edge" });
+  await expect(agent.locator("option")).toHaveText(["Выберите агента", "api-1"]);
+  await agent.selectOption({ label: "api-1" });
+  await page.getByRole("button", { name: "Выпустить токен", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Выданный токен" })).toBeVisible();
+  expect(state.bodies).toEqual([{ name: "Agent token", logs: true, metrics: true, alerts_write: false, node_scope: { kind: "agent", id: 9 } }]);
+  await expect(page.getByText("Права: логи, метрики · Узлы: агент #9", { exact: true })).toBeVisible();
+});
+
+test("changing the relay drops an agent chosen under the previous relay", async ({ page }) => {
+  const state = await accessFixture(page);
+  await page.getByLabel("Название", { exact: true }).fill("Stale agent");
+  await page.getByRole("radio", { name: "Конкретный агент", exact: true }).check();
+  await page.getByLabel("Relay", { exact: true }).selectOption({ label: "Edge" });
+  await page.getByLabel("Агент", { exact: true }).selectOption({ label: "api-1" });
+  await page.getByRole("radio", { name: "Relay и его агенты", exact: true }).check();
+  await page.getByLabel("Relay", { exact: true }).selectOption({ label: "Core" });
+  await page.getByRole("radio", { name: "Конкретный агент", exact: true }).check();
+  await expect(page.getByLabel("Агент", { exact: true })).toHaveValue("");
+  await expect(page.getByRole("button", { name: "Выпустить токен", exact: true })).toBeDisabled();
+  expect(state.bodies).toEqual([]);
+});
+
+test("consent offers write only when the client asked for it and posts the chosen rights", async ({ page }) => {
+  let posted: unknown = null;
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (path === "/api/me") return route.fulfill({ json: { username: "liis", passkeys: 0 } });
+    if (path === "/api/relays") return route.fulfill({ json: { relays: nodes.relays } });
+    if (path === "/api/agents") return route.fulfill({ json: { agents: nodes.agents } });
+    if (path === "/api/oauth/consent/pending-2" && request.method() === "GET") {
+      return route.fulfill({ json: { client_name: "Codex", scope: "lognara.read lognara.write", resource: "https://dock.example.com/mcp" } });
+    }
+    if (path === "/api/oauth/consent/pending-2" && request.method() === "POST") {
+      posted = request.postDataJSON();
+      return route.fulfill({ json: { redirect_to: "https://chatgpt.com/connector_platform_oauth_redirect?code=code-2&state=state-2&iss=https%3A%2F%2Fdock.example.com" } });
+    }
+    return route.fulfill({ status: 404, json: { error: "not_found" } });
+  });
+  await page.route("https://chatgpt.com/connector_platform_oauth_redirect?**", (route) => route.fulfill({ contentType: "text/html", body: "ChatGPT callback" }));
+  await page.goto("/oauth/consent?request=pending-2");
+  await expect(page.getByText("Клиент просит доступ на запись", { exact: false })).toBeVisible();
+  const alerts = page.getByRole("checkbox", { name: "Создание и изменение алертов", exact: true });
+  await expect(alerts).not.toBeChecked();
+  await alerts.check();
+  await page.getByRole("radio", { name: "Конкретный агент", exact: true }).check();
+  await page.getByLabel("Relay", { exact: true }).selectOption({ label: "Edge" });
+  await page.getByLabel("Агент", { exact: true }).selectOption({ label: "api-1" });
+  await page.getByRole("button", { name: "Разрешить", exact: true }).click();
+  await expect(page).toHaveURL(/code=code-2/u);
+  expect(posted).toEqual({ allow: true, logs: true, metrics: true, alerts_write: true, node_scope: { kind: "agent", id: 9 } });
 });
 
 test("login preserves a local OAuth authorization return path", async ({ page }) => {

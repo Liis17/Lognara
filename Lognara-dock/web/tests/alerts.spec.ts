@@ -236,6 +236,41 @@ test("missing metrics still allow alert editing and show global pause and no rec
   await expect(ruleEditor.getByLabel("Обработка отсутствия данных")).toHaveValue("normal");
 });
 
+test("MCP-scoped rule is read-only beside the global rule for the same metric", async ({ page }) => {
+  const { state } = await settingsFixture(page);
+  const base = {
+    key,
+    enabled: true,
+    environment: null,
+    no_data: "loss" as const,
+    combine: "and" as const,
+    group_ids: [],
+    triggers: [{ window_seconds: 300, aggregate: "avg" as const, comparator: ">" as const, threshold: 1 }],
+    revision: 1,
+    enabled_at: 1,
+    state: "ok" as const,
+    loss_registered: false,
+    loss_at: null,
+    last_point_at: null,
+    last_as_of: null,
+    no_recipients: false,
+  };
+  state.alerts = [
+    { ...base, id: "alert-global", node_scope: { kind: "all" } },
+    { ...base, id: "alert-mcp", enabled: false, node_scope: { kind: "relay", id: 4 } },
+  ];
+  await page.goto("/settings");
+  const rules = page.getByRole("region", { name: "Все правила" });
+  await expect(rules.getByRole("listitem")).toHaveCount(2);
+  await expect(rules.getByText("Создано через MCP · relay 4 · только для чтения", { exact: true })).toBeVisible();
+  await expect(rules.getByRole("link", { name: "Настроить", exact: true })).toHaveCount(1);
+
+  await page.route("**/api/alerts/definition**", (route) => route.fulfill({ json: { alert: null } }));
+  await page.goto("/metrics/detail?server=server-a&service=billing&name=requests&origin=counter");
+  const editor = page.getByRole("region", { name: "Алерт метрики" });
+  await expect(editor.getByText("Создано через MCP · relay 4", { exact: true })).toBeVisible();
+});
+
 test("token validation error is visible and does not enable global alerts", async ({ page }) => {
   await page.route("**/api/**", async (route) => {
     const request = route.request();

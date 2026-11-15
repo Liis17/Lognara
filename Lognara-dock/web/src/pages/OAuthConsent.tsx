@@ -1,6 +1,14 @@
 import { useEffect, useState } from "react";
 import { useLocation } from "react-router";
 import { api, errorText } from "../api";
+import {
+  AccessFields,
+  accessBody,
+  defaultAccessDraft,
+  loadNodeLists,
+  type AccessDraft,
+  type NodeLists,
+} from "../components/AccessFields";
 
 type ConsentDetails = { client_name: string; scope: string; resource: string };
 
@@ -20,6 +28,8 @@ export default function OAuthConsent() {
   const location = useLocation();
   const requestId = new URLSearchParams(location.search).get("request");
   const [details, setDetails] = useState<ConsentDetails | null>(null);
+  const [access, setAccess] = useState<AccessDraft>(defaultAccessDraft);
+  const [nodes, setNodes] = useState<NodeLists | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -31,14 +41,22 @@ export default function OAuthConsent() {
     api<ConsentDetails>("GET", `/api/oauth/consent/${encodeURIComponent(requestId)}`)
       .then(setDetails)
       .catch((reason) => setError(errorText(reason)));
+    loadNodeLists().then(setNodes);
   }, [requestId]);
 
+  const rights = accessBody(access);
+  const askedWrite = details?.scope.split(/\s+/).includes("lognara.write") ?? false;
+
   const decide = async (allow: boolean) => {
-    if (!requestId) return;
+    if (!requestId || (allow && !rights)) return;
     setBusy(true);
     setError("");
     try {
-      const reply = await api<{ redirect_to: string }>("POST", `/api/oauth/consent/${encodeURIComponent(requestId)}`, { allow });
+      const reply = await api<{ redirect_to: string }>(
+        "POST",
+        `/api/oauth/consent/${encodeURIComponent(requestId)}`,
+        allow ? { allow, ...rights } : { allow },
+      );
       window.location.assign(checkedRedirect(reply.redirect_to));
     } catch (reason) {
       setError(errorText(reason));
@@ -60,10 +78,12 @@ export default function OAuthConsent() {
               <dt>Сервер</dt>
               <dd><code>{details.resource}</code></dd>
             </dl>
-            <p className="page-note">Подключение сможет искать логи, читать trace и просматривать метрики. MCP-инструменты доступны только для чтения; текст логов не маскируется.</p>
+            {askedWrite && <p className="page-note" role="status">Клиент просит доступ на запись. По умолчанию запись выключена; включите «Создание и изменение алертов», только если это нужно.</p>}
+            <AccessFields draft={access} onChange={setAccess} nodes={nodes} />
+            <p className="page-note">Подключение сможет искать логи, читать trace и просматривать метрики. Текст логов не маскируется.</p>
             <div className="oauth-actions">
               <button type="button" className="quiet" onClick={() => decide(false)} disabled={busy}>Отклонить</button>
-              <button type="button" className="solid" onClick={() => decide(true)} disabled={busy}>Разрешить</button>
+              <button type="button" className="solid" onClick={() => decide(true)} disabled={busy || !rights}>Разрешить</button>
             </div>
           </>
         ) : !error ? <p role="status">Загружаем запрос…</p> : null}

@@ -3,6 +3,7 @@ import {
   api,
   ApiError,
   errorText,
+  nodeScopeLabel,
   type MetricAlertDefinition,
   type MetricAlertGroup,
   type MetricAlertKey,
@@ -414,10 +415,13 @@ export default function MetricAlertSettings({
                 <li key={alert.id}>
                   <div>
                     <strong>{keyText(alert.key)}</strong>
+                    {alert.node_scope.kind !== "all" && (
+                      <span className="muted">Создано через MCP · {nodeScopeLabel(alert.node_scope)} · только для чтения</span>
+                    )}
                     <span className="muted">{stateText(alert)} · {alert.environment ?? "все окружения"} · {alert.combine.toUpperCase()}</span>
                     {alert.no_recipients && <span className="muted">Не выбраны группы с получателями</span>}
                   </div>
-                  <a href={metricUrl(alert.key)}>Настроить</a>
+                  {alert.node_scope.kind === "all" && <a href={metricUrl(alert.key)}>Настроить</a>}
                 </li>
               ))}
               {!settings.alerts.length && <li className="muted">Алертов пока нет</li>}
