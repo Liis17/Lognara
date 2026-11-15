@@ -22,6 +22,7 @@ use crate::query::{
     DurationStats, GroupRequest, GroupResponse, HistogramRequest, HistogramResponse, SearchRequest,
     SearchResponse, SummaryRequest, SummaryResponse, TraceParams,
 };
+use crate::token_access::Scope;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// Core по умолчанию выполняет запрос до 30 секунд.
@@ -64,6 +65,11 @@ pub struct LogSourceFilters {
     pub server: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub environment: Option<String>,
+    /// Десятичные id узлов: core принимает их строкой, как и в фильтрах поиска.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relay_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -83,6 +89,11 @@ pub struct AlertSeriesQuery {
     pub environment: Option<String>,
     pub windows_seconds: Vec<u64>,
     pub need_increase: bool,
+    /// Узел правила; core читает только данные этого узла.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relay_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -217,18 +228,23 @@ impl CoreClient {
         Ok(reply)
     }
 
-    /// Связанные логи trace по возрастанию времени, без модели spans.
+    /// Связанные логи trace по возрастанию времени, без модели spans. `node` ограничивает узлом.
     pub async fn trace(
         &self,
         trace_id: &str,
         params: &TraceParams,
+        node: Scope,
     ) -> Result<SearchResponse, CoreQueryError> {
         let mut url = self.query_url.join("traces/").expect("core url joins path");
         url.path_segments_mut()
             .expect("core url has path segments")
             .pop_if_empty()
             .push(trace_id);
-        let reply: SearchResponse = self.query(self.http.get(url).query(params)).await?;
+        let mut request = self.http.get(url).query(params);
+        if let Some((key, id)) = node.core_param() {
+            request = request.query(&[(key, id)]);
+        }
+        let reply: SearchResponse = self.query(request).await?;
         if reply.events.len() > params.limit {
             return Err(CoreQueryError::Unexpected);
         }
@@ -471,6 +487,7 @@ impl CoreClient {
         &self,
         server: Option<&str>,
         service: Option<&str>,
+        node: Scope,
     ) -> Result<CoreReply, CoreError> {
         let mut url = Url::parse("http://core/v1/series?group_by=server").expect("static URL");
         if let Some(server) = server {
@@ -478,6 +495,9 @@ impl CoreClient {
         }
         if let Some(service) = service {
             url.query_pairs_mut().append_pair("service", service);
+        }
+        if let Some((key, id)) = node.core_param() {
+            url.query_pairs_mut().append_pair(key, &id.to_string());
         }
         let path = format!("v1/series?{}", url.query().unwrap());
         self.call(Method::GET, &path, &self.query_token, None).await

@@ -1,4 +1,5 @@
 use axum::{Router, body::Body, body::to_bytes, http::Request, routing::get};
+use lognara_dock::token_access::{Permissions, Rights, Scope};
 use lognara_dock::{api, api::App, config::Config, store};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -104,6 +105,10 @@ async fn add_token(app: &lognara_dock::api::AppState, id: &str, expires_at: i64)
             "protocol test".to_owned(),
             hash,
             expires_at,
+            Permissions {
+                rights: Rights::default(),
+                node_scope: Scope::All,
+            },
         )
         .await
         .unwrap();
