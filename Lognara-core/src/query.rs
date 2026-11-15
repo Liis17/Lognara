@@ -252,7 +252,7 @@ pub fn level(value: &str) -> Option<LogLevel> {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Cursor {
+pub(crate) struct Cursor {
     version: u8,
     instance: Uuid,
     generation: u64,
@@ -265,9 +265,9 @@ struct Cursor {
 }
 
 #[derive(Debug, Clone)]
-struct Hit {
-    timestamp: i64,
-    sequence: u64,
+pub(crate) struct Hit {
+    pub(crate) timestamp: i64,
+    pub(crate) sequence: u64,
     row_id: usize,
     source: usize,
 }
@@ -376,7 +376,7 @@ pub(crate) fn search_snapshot(
     })
 }
 
-fn build_query(
+pub(crate) fn build_query(
     filter: &PreparedFilter,
     tokens: &[String],
     mode: Option<TextMode>,
@@ -535,7 +535,7 @@ fn find_hits(
     Ok(best)
 }
 
-fn segment_hits(
+pub(crate) fn segment_hits(
     searcher: &Searcher,
     query: &dyn Query,
     limit: usize,
@@ -566,7 +566,7 @@ fn segment_hits(
         .collect()
 }
 
-fn hydrate(
+pub(crate) fn hydrate(
     snapshot: &Snapshot,
     hits: &[Hit],
     deadline: Instant,

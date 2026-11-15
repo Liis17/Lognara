@@ -35,6 +35,7 @@ pub fn router(core: Arc<Core>) -> Router {
     let queries = Router::new()
         .route("/v1/logs/search", post(search))
         .route("/v1/logs/sources", post(log_sources))
+        .route("/v1/logs/alerts/query", post(query_log_alerts))
         .route("/v1/traces/{trace_id}", get(trace))
         .route("/v1/stats/histogram", post(histogram))
         .route("/v1/stats/group-by", post(group_by))
@@ -291,6 +292,27 @@ async fn query_alerts(
         return QueryError::Busy.into_response();
     };
     run_query(&core, series_query::alert_query(core.clone(), request)).await
+}
+
+async fn query_log_alerts(
+    State(core): State<Arc<Core>>,
+    request: Result<
+        Json<crate::log_alerts::AlertQueryRequest>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> Response {
+    let request = match request {
+        Ok(Json(request)) => request,
+        Err(error) => return QueryError::Invalid(error.body_text()).into_response(),
+    };
+    if !core.journal.ready() {
+        return unavailable();
+    }
+    // Общий слот фоновых алертов: проверка алертов не занимает слоты UI.
+    let Ok(_permit) = core.alert_slots.clone().try_acquire_owned() else {
+        return QueryError::Busy.into_response();
+    };
+    run_query(&core, crate::log_alerts::alert_query(core.clone(), request)).await
 }
 
 async fn run_analytics<T: serde::Serialize>(
