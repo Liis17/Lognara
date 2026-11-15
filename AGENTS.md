@@ -15,6 +15,7 @@ Vault: `Obsidian/LognaraVault/` — память о текущем устрой�
 | `Obsidian/LognaraVault/Repository/CI.md` | Проверки Rust, веб-интерфейса и итоговый статус CI. |
 | `Obsidian/LognaraVault/Agent/LognaraAgent.md` | Приём логов, конфигурация агента и контракт с relay. |
 | `Obsidian/LognaraVault/Agent/LogSources.md` | Файлы, потоки, checkpoint и lifecycle программы. |
+| `Obsidian/LognaraVault/Host/LognaraHwAgent.md` | Агент Linux-хоста: метрики, процессы, журнал, прямая доставка в core. |
 | `Obsidian/LognaraVault/Relay/LognaraRelay.md` | Нормализация, доставка и контракт с core. |
 | `Obsidian/LognaraVault/Core/LognaraCore.md` | Хранилище, поиск, аналитика и API core. |
 | `Obsidian/LognaraVault/Dock/LognaraDock.md` | Веб-интерфейс, сессии и взаимодействие с core. |
