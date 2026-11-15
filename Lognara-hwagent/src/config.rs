@@ -11,11 +11,14 @@ use lognara_agent::sources::{Source, Sources};
 use reqwest::Url;
 use serde::Deserialize;
 
+use crate::journald::JournalSettings;
 use crate::metrics::MetricsSettings;
+use crate::processes::ProcessSettings;
 
 pub const SERVICE: &str = "host";
 const DEFAULT_CONFIG: &str = "/etc/lognara/hwagent.json";
 const DEFAULT_SPOOL: &str = "/var/lib/lognara-hwagent/spool";
+const DEFAULT_STATE: &str = "/var/lib/lognara-hwagent/state";
 const MAX_CONFIG_BYTES: u64 = 256 << 10;
 
 /// Содержимое JSON-файла хоста; неизвестные поля - ошибка запуска.
@@ -27,6 +30,10 @@ pub struct HostFile {
     pub sources: Vec<Source>,
     #[serde(default)]
     pub metrics: MetricsSettings,
+    #[serde(default)]
+    pub processes: ProcessSettings,
+    #[serde(default)]
+    pub journald: JournalSettings,
 }
 
 impl HostFile {
@@ -34,6 +41,8 @@ impl HostFile {
         let host: Self = serde_json::from_slice(bytes)
             .map_err(|error| invalid(format!("host config: {error}")))?;
         host.metrics.validate().map_err(invalid)?;
+        host.processes.validate().map_err(invalid)?;
+        host.journald.validate().map_err(invalid)?;
         Ok(host)
     }
 }
@@ -48,6 +57,8 @@ pub struct Config {
     pub heartbeat_interval: Duration,
     /// Корень `/proc` и `/sys`; в тестах - каталог с фикстурами.
     pub root: PathBuf,
+    /// Состояние сборщиков вне spool (известные исполняемые файлы, cursor journald).
+    pub state_dir: PathBuf,
 }
 
 impl fmt::Debug for Config {
@@ -58,6 +69,7 @@ impl fmt::Debug for Config {
             .field("core_url", &self.core_url)
             .field("heartbeat_interval", &self.heartbeat_interval)
             .field("root", &self.root)
+            .field("state_dir", &self.state_dir)
             .field("token", &"[redacted]")
             .finish()
     }
@@ -129,6 +141,9 @@ impl Config {
             core_url: parsed,
             token,
             root: PathBuf::from("/"),
+            state_dir: get("LOGNARA_STATE_DIR")
+                .unwrap_or_else(|| DEFAULT_STATE.into())
+                .into(),
         })
     }
 }
@@ -222,5 +237,14 @@ mod tests {
         assert!(HostFile::parse(br#"{"unknown":1}"#).is_err());
         let streams = HostFile::parse(br#"{"sources":[{"id":"out","type":"stdout"}]}"#).unwrap();
         assert!(Config::from_lookup(lookup(BASE), streams).is_err());
+    }
+
+    #[test]
+    fn shipped_examples_are_valid() {
+        for file in ["examples/hwagent.json", "examples/hwagent-rsyslog.json"] {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(file);
+            let host = HostFile::parse(&std::fs::read(path).unwrap()).unwrap();
+            Config::from_lookup(lookup(BASE), host).unwrap();
+        }
     }
 }

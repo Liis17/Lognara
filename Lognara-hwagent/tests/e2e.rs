@@ -70,7 +70,7 @@ async fn file_lines_reach_core_with_host_identity_and_exact_retries() {
 
     let host = HostFile::parse(
         format!(
-            r#"{{"sources":[{{"id":"auth","type":"file","include":["{}"]}}],"metrics":{{"enabled":false}}}}"#,
+            r#"{{"sources":[{{"id":"auth","type":"file","include":["{}"]}}],"metrics":{{"enabled":false}},"processes":{{"enabled":false}},"journald":{{"enabled":false}}}}"#,
             log.display()
         )
         .as_bytes(),

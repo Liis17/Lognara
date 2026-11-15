@@ -6,7 +6,9 @@
 pub mod config;
 pub mod encoder;
 pub mod heartbeat;
+pub mod journald;
 pub mod metrics;
+pub mod processes;
 
 use std::io;
 use std::sync::Arc;
@@ -37,6 +39,23 @@ pub async fn run(config: Config, shutdown: CancellationToken) -> io::Result<()> 
         tasks.spawn(metrics::run(
             config.root.clone(),
             config.host.metrics.clone(),
+            embedded.collector(),
+            stop.clone(),
+        ));
+    }
+    if config.host.processes.enabled {
+        tasks.spawn(processes::run(
+            config.root.clone(),
+            config.host.processes.clone(),
+            config.state_dir.join("executables.json"),
+            embedded.collector(),
+            stop.clone(),
+        ));
+    }
+    if config.host.journald.enabled {
+        tasks.spawn(journald::run(
+            config.host.journald.clone(),
+            config.state_dir.join("journal.cursor"),
             embedded.collector(),
             stop.clone(),
         ));
