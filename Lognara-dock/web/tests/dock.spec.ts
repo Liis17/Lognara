@@ -112,6 +112,8 @@ test('password login and existing account forms remain usable', async ({ page })
   await page.getByLabel('Пароль', { exact: true }).fill('test-password');
   await page.getByRole('button', { name: 'Войти', exact: true }).click();
   await expect(page.getByRole('link', { name: 'Настройки', exact: true })).toBeVisible();
+  // Страница логов дописывает параметры в адрес; без этого ожидания её запись переписывает переход.
+  await expect(page).toHaveURL(/view=events/);
   await page.getByRole('link', { name: 'Настройки', exact: true }).click();
   await expect(page).toHaveURL(/\/settings$/);
   await expect(page.getByRole('heading', { name: 'Пароль', exact: true })).toBeVisible();
