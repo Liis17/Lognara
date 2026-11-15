@@ -78,7 +78,7 @@ volumes:
 
 После декодирования relay требует хотя бы одну запись: `records=[]` отклоняется с `400` при любом `dropped`, до создания группы и резервирования памяти буфера. Пустая пачка не меняет счётчики и не попадает в core или spool; сведения о потерях агент передаёт вместе с записями.
 
-Агент сначала регистрируется в core через dock с привязкой к relay. Поля `service/server/backend` принимаются без проверки принадлежности.
+Агент сначала регистрируется в core через dock с привязкой к relay. Поля `service/server/backend` принимаются без проверки принадлежности. Принадлежность событий узлу доказывает не source, а хеш токена: middleware кладёт SHA-256 авторизованного агента в extensions, `ingest::accept` записывает его в поле `agent` единственной группы запроса.
 
 ## Разбор записей в события
 
@@ -102,7 +102,8 @@ Origin агента необязателен и совместим со стар
 
 ```rust
 struct CoreBatch { dropped: u64, groups: Vec<Group> }
-struct Group { source: Source, dropped: u64, events: Vec<Event> }
+struct Group { source: Source, dropped: u64, events: Vec<Event>, agent: Option<AgentHash> }
+struct AgentHash([u8; 32]);  // bin 32: SHA-256 токена агента; ключ отсутствует при None
 struct Source { environment: Option<String>, server, backend, service: String, service_instance: Option<String> }
 struct Event { id: LogId, timestamp, ingested_at: i64, action: Option<String>, level: LogLevel, message: String,
                trace_id: Option<TraceId>, span_id, parent_span_id: Option<SpanId>, request_id: Option<String>,
@@ -112,6 +113,7 @@ struct LogId(Uuid); struct TraceId([u8; 16]); struct SpanId([u8; 8]);  // bin 16
 ```
 
 - Полный `LogEvent` в core = `Source` группы + `Event`. Группы упорядочены по `Source`, события внутри группы — в порядке приёма.
+- `Group.agent` идёт внутри закодированного тела, поэтому формат spool не менялся и повтор отправляет те же байты. Один запрос агента даёт группы с хешем только этого агента; группы разных агентов с одинаковым source не склеиваются, `encode_split` сохраняет `agent` в каждой части. Без хеша (старые записи spool) ключ не сериализуется, байты совпадают с прежними. Core переводит хеш в `relay_id`/`agent_id` и отклоняет хеш агента чужого relay: [[Core/LognaraCore]].
 - `CoreBatch.dropped` — счётчик совместимости старых пачек; новые пачки содержат 0; `Group.dropped` — сумма `dropped` от агентов источника.
 - `2xx` — доставлено; только после ACK удаляется файл. Любой отказ или сетевая ошибка сохраняет пачку для повторов, включая `400`, `401` и `413`.
 - Доставка «хотя бы один раз»: после сбоя посреди отправки пачка может прийти повторно. [[Core/LognaraCore]] дедуплицирует SHA-256 исходных сжатых байтов пачки; перегруппирование тех же событий не устраняет повторы.
