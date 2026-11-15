@@ -73,6 +73,7 @@ async fn core_handler(State(core): State<Arc<FakeCore>>, request: AxumRequest) -
         ("GET", p) if p.starts_with("/v1/traces/") => {
             json!({"events": [], "next_cursor": null, "as_of": "t"})
         }
+        ("POST", "/v1/stats/group-by") => json!({"groups": [], "as_of": "t"}),
         ("GET", "/v1/series") => json!({"metrics": []}),
         ("POST", "/v1/series/query") => json!({"kind": "delta", "unit": "requests", "series": []}),
         ("GET", "/v1/admin/relays") => {
@@ -408,9 +409,18 @@ async fn cursor_from_another_scope_is_rejected() {
 async fn alerts_over_mcp_are_created_within_scope_and_hidden_outside_it() {
     let (_core, core_url) = spawn_core().await;
     let t = dock(&core_url);
-    let all = token(&t.app, "alerts-all", all_rights()).await;
-    let relay = token(&t.app, "alerts-relay", node(Scope::Relay { id: 1 })).await;
-    let agent = token(&t.app, "alerts-agent", node(Scope::Agent { id: 3 })).await;
+    // Инструменты алертов доступны только с правом записи.
+    let writer = |node_scope| Permissions {
+        rights: Rights {
+            logs: true,
+            metrics: true,
+            alerts_write: true,
+        },
+        node_scope,
+    };
+    let all = token(&t.app, "alerts-all", writer(Scope::All)).await;
+    let relay = token(&t.app, "alerts-relay", writer(Scope::Relay { id: 1 })).await;
+    let agent = token(&t.app, "alerts-agent", writer(Scope::Agent { id: 3 })).await;
 
     // Группы создаёт только человек: через браузерный API с сессией.
     let session = login(&t, "alice", "password-123").await.session();

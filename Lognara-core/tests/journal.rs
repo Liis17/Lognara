@@ -200,23 +200,25 @@ async fn ingest_rejects_an_agent_owned_by_another_relay_but_accepts_unknown_hash
     let body = zstd::encode_all(&rmp_serde::to_vec_named(&batch).unwrap()[..], 3).unwrap();
     let router = api::ingest_router(journal.clone());
 
+    // Чужой relay отклоняется до записи. Тот же body после приёма владельцем ушёл бы
+    // в дедупликацию: она возвращает прежний receipt и новых событий не добавляет.
     assert_eq!(
         router
             .clone()
-            .oneshot(request(&owner.token, Body::from(body.clone())))
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::NO_CONTENT
-    );
-    assert_eq!(
-        router
-            .clone()
-            .oneshot(request(&other.token, Body::from(body)))
+            .oneshot(request(&other.token, Body::from(body.clone())))
             .await
             .unwrap()
             .status(),
         StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(request(&owner.token, Body::from(body)))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
     );
 
     batch.groups[0].agent = Some(lognara_core::wire::AgentHash([0x77; 32]));
