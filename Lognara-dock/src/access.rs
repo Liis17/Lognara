@@ -97,6 +97,40 @@ pub async fn delete_agent(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Хост-агент: relay вида host и встроенный агент с одним токеном, отправка прямо в core.
+pub async fn create_host(
+    State(app): State<AppState>,
+    user: AuthUser,
+    body: Result<Json<NewRelay>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let Json(host) = body.map_err(|_| ApiError::BadRequest("invalid_request"))?;
+    let created = app.core.create_host(&host.name).await?;
+    tracing::info!(username = %user.username, "host created");
+    Ok(issued(created))
+}
+
+pub async fn rotate_host_token(
+    State(app): State<AppState>,
+    user: AuthUser,
+    id: Result<Path<i64>, PathRejection>,
+) -> Result<Response, ApiError> {
+    let Path(id) = id.map_err(|_| ApiError::BadRequest("invalid_request"))?;
+    let rotated = app.core.rotate_host_token(id).await?;
+    tracing::info!(username = %user.username, id, "host token rotated");
+    Ok((StatusCode::OK, [(CACHE_CONTROL, "no-store")], Json(rotated)).into_response())
+}
+
+pub async fn delete_host(
+    State(app): State<AppState>,
+    user: AuthUser,
+    id: Result<Path<i64>, PathRejection>,
+) -> Result<StatusCode, ApiError> {
+    let Path(id) = id.map_err(|_| ApiError::BadRequest("invalid_request"))?;
+    app.core.delete_host(id).await?;
+    tracing::info!(username = %user.username, id, "host deleted");
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Ответ с токеном не должен попадать в кэш.
 fn issued(body: Value) -> Response {
     (

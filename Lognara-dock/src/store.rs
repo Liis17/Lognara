@@ -273,6 +273,38 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE metric_alerts_scoped RENAME TO metric_alerts;
     CREATE INDEX metric_alerts_enabled ON metric_alerts(enabled, server, service, name, origin);
     ",
+    // Алерты на логи: общие получатели, группы, outbox и Telegram с алертами метрик.
+    "
+    CREATE TABLE log_alerts (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
+        query TEXT NOT NULL,
+        filters TEXT NOT NULL,
+        text TEXT,
+        text_mode TEXT NOT NULL CHECK(text_mode IN ('all', 'phrase')),
+        threshold INTEGER NOT NULL CHECK(threshold BETWEEN 1 AND 1000000),
+        cooldown_seconds INTEGER NOT NULL CHECK(cooldown_seconds BETWEEN 0 AND 86400),
+        revision INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+    );
+    CREATE TABLE log_alert_groups_used (
+        alert_id TEXT NOT NULL REFERENCES log_alerts(id) ON DELETE CASCADE,
+        group_id TEXT NOT NULL REFERENCES metric_alert_groups(id),
+        PRIMARY KEY(alert_id, group_id)
+    );
+    CREATE TABLE log_alert_states (
+        alert_id TEXT PRIMARY KEY REFERENCES log_alerts(id) ON DELETE CASCADE,
+        after_sequence INTEGER,
+        suppressed INTEGER NOT NULL DEFAULT 0,
+        last_sent_at INTEGER,
+        last_count INTEGER NOT NULL DEFAULT 0,
+        last_match_at INTEGER,
+        last_checked_at INTEGER
+    );
+    ALTER TABLE metric_alert_outbox ADD COLUMN log_alert_id TEXT REFERENCES log_alerts(id) ON DELETE CASCADE;
+    ALTER TABLE metric_alert_global ADD COLUMN log_core_status TEXT NOT NULL DEFAULT 'unknown';
+    ",
 ];
 
 /// Предел строк статусов: Dock передаёт решённые и вернувшиеся fingerprint в core.
@@ -1388,8 +1420,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         {
             let conn = Connection::open(dir.path().join("dock.sqlite3")).unwrap();
-            // Схема до прав токенов и скоупа алертов: все миграции, кроме двух последних.
-            let before = MIGRATIONS.len() - 2;
+            // Схема до прав токенов и скоупа алертов: без них и последующих миграций.
+            let before = MIGRATIONS.len() - 3;
             for sql in &MIGRATIONS[..before] {
                 conn.execute_batch(sql).unwrap();
             }
