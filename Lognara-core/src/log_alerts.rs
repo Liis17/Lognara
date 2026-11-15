@@ -182,7 +182,7 @@ fn evaluate(
             count += matched;
             hits.extend(found);
         }
-        hits.sort_by(|a, b| (b.timestamp, b.sequence).cmp(&(a.timestamp, a.sequence)));
+        hits.sort_by_key(|hit| std::cmp::Reverse((hit.timestamp, hit.sequence)));
         hits.truncate(MAX_SAMPLES);
         let samples = query::hydrate(
             &snapshot,
