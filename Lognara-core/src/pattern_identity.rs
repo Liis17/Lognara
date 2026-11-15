@@ -1,6 +1,8 @@
 //! Консервативная нормализация v1: заменяются только UUID, IP, длинные hex-ID,
 //! явно обозначенные ID и длительности; в access-log и ServiceMetrics также
-//! время и числовые измерения. Слова, статусы и коды ошибок сохраняются.
+//! время и числовые измерения, в префиксах syslog, postgres, redis и audit —
+//! время, PID и номера записей, а также veth-интерфейсы Docker. Слова, статусы
+//! и коды ошибок сохраняются.
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -11,7 +13,8 @@ use std::{
 
 pub const VERSION: u8 = 1;
 /// Отдельная ревизия производных индексов; не меняет ID незатронутых сообщений.
-pub(crate) const INDEX_PAYLOAD: &str = "lognara-pattern-normalization-2";
+/// При смене правил повышается вместе с версией схемы `pattern_catalog::SCHEMA`.
+pub(crate) const INDEX_PAYLOAD: &str = "lognara-pattern-normalization-3";
 const MAX_MESSAGE: usize = 16 << 10;
 const MAX_VARIABLES: usize = 64;
 const PREVIEW_BYTES: usize = 4096;
@@ -216,6 +219,7 @@ fn normalize(message: &str) -> Option<(Vec<Part>, Vec<Variable>)> {
 }
 
 /// Только подтверждённые структурные форматы: произвольные числа остаются литералами.
+/// Возвращает упорядоченные непересекающиеся границы.
 fn format_variables(message: &str) -> Vec<(usize, usize, VariableType)> {
     static ACCESS: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(
@@ -227,34 +231,53 @@ fn format_variables(message: &str) -> Vec<(usize, usize, VariableType)> {
         r#"^ServiceMetrics \{ ServiceName: "(?:[^"\\]|\\.)*", Metrics: \[(?<metrics>.*)\], Timestamp: (?<timestamp>[0-9]{1,2}/[0-9]{1,2}/[0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2}) \}$"#,
     ).expect("fixed ServiceMetrics expression")
     });
-    static METRIC: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r#"\("(?:[^"\\]|\\.)+": (?<number>-?[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)\)"#)
-            .expect("fixed metric expression")
+    // SchemaVersion, сервис и названия метрик остаются литералами.
+    static METRICS_V2: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+        r#"^ServiceMetrics \{ SchemaVersion: [0-9]+, ServiceName: "(?:[^"\\]|\\.)*", Counters: \[(?<counters>.*?)\], Gauges: \[(?<gauges>.*)\], Timestamp: (?<timestamp>[0-9]{1,2}/[0-9]{1,2}/[0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2}) \}$"#,
+    ).expect("fixed ServiceMetrics v2 expression")
     });
+    // Префикс строки syslog/postgres: время, PID процесса syslog `prog[pid]:` или
+    // postgres `[pid]` и PID дочерней команды cron `(user) CMD ([pid] ...`.
+    static ISO_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+        r#"^(?<timestamp>[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(?:[.,][0-9]+)?(?:Z|[+-][0-9]{2}:?[0-9]{2}| UTC| GMT)?)(?: \[(?<process>[0-9]+)\]| \S+ [^\s\[\]]+\[(?<pid>[0-9]+)\]:(?: \([^()\s]+\) (?:CMD|END) \(\[(?<child>[0-9]+)\])?)? "#,
+    ).expect("fixed timestamp prefix expression")
+    });
+    static REDIS: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+        r#"^(?<pid>[0-9]+):[XCSM] (?<timestamp>[0-9]{1,2} [A-Z][a-z]{2} [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}) [.*#-] "#,
+    ).expect("fixed redis expression")
+    });
+    // Linux audit: время и номер записи, номер сессии входа растёт с каждой сессией.
+    static AUDIT: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r#"^type=[A-Z0-9_]+ msg=audit\((?<timestamp>[0-9]+\.[0-9]+):(?<serial>[0-9]+)\): "#,
+        )
+        .expect("fixed audit expression")
+    });
+    static SESSION: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#" ses=(?<session>[0-9]+)(?: |$)"#).expect("fixed audit session expression")
+    });
+    // Имя veth-интерфейса Docker создаётся случайно для каждого контейнера.
+    static VETH: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r#"\bveth[0-9a-f]{7}\b"#).expect("fixed veth expression"));
     let span = |value: regex::Match<'_>, kind| (value.start(), value.end(), kind);
     if message.starts_with("ServiceMetrics {") {
-        let Some(captures) = METRICS.captures(message) else {
+        let Some(captures) = METRICS
+            .captures(message)
+            .or_else(|| METRICS_V2.captures(message))
+        else {
             return vec![];
         };
-        let metrics = captures.name("metrics").unwrap();
         let mut result = vec![];
-        let mut end = 0;
-        for pair in METRIC.captures_iter(metrics.as_str()) {
-            let whole = pair.get(0).unwrap();
-            let separator = if end == 0 { "" } else { ", " };
-            if &metrics.as_str()[end..whole.start()] != separator {
+        // В v1 есть только `metrics`, в v2 — `counters` и `gauges` в этом порядке.
+        for name in ["metrics", "counters", "gauges"] {
+            if let Some(list) = captures.name(name)
+                && !metric_values(list, &mut result)
+            {
                 return vec![];
             }
-            let number = pair.name("number").unwrap();
-            result.push((
-                metrics.start() + number.start(),
-                metrics.start() + number.end(),
-                VariableType::Number,
-            ));
-            end = whole.end();
-        }
-        if end != metrics.as_str().len() {
-            return vec![];
         }
         result.push(span(
             captures.name("timestamp").unwrap(),
@@ -276,7 +299,73 @@ fn format_variables(message: &str) -> Vec<(usize, usize, VariableType)> {
         }
         return result;
     }
-    vec![]
+    let mut result = vec![];
+    let bytes = message.as_bytes();
+    let prefix = if bytes.first().is_some_and(u8::is_ascii_digit) {
+        // Байт-проверки отсекают обычные сообщения до запуска regexp.
+        if bytes.get(4) == Some(&b'-') {
+            ISO_PREFIX.captures(message)
+        } else {
+            REDIS.captures(message)
+        }
+    } else if message.starts_with("type=") {
+        AUDIT.captures(message)
+    } else {
+        None
+    };
+    if let Some(captures) = prefix {
+        for (name, kind) in [
+            ("pid", VariableType::Id),
+            ("timestamp", VariableType::Timestamp),
+            ("process", VariableType::Id),
+            ("serial", VariableType::Id),
+            ("child", VariableType::Id),
+        ] {
+            if let Some(value) = captures.name(name) {
+                result.push(span(value, kind));
+            }
+        }
+        if captures.name("serial").is_some()
+            && let Some(session) = SESSION.captures(message)
+        {
+            result.push(span(session.name("session").unwrap(), VariableType::Id));
+        }
+    }
+    if message.contains("veth") {
+        result.extend(
+            VETH.find_iter(message)
+                .map(|value| span(value, VariableType::Id)),
+        );
+    }
+    result.sort_unstable_by_key(|span| span.0);
+    // Пересечение невозможно у разобранных форматов, но цикл `normalize` его не допускает.
+    result.dedup_by(|next, previous| next.0 < previous.1);
+    result
+}
+
+/// Числовые значения списка `("name": value), ...`; false, если формат списка нарушен.
+fn metric_values(list: regex::Match<'_>, result: &mut Vec<(usize, usize, VariableType)>) -> bool {
+    static METRIC: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r#"\("(?:[^"\\]|\\.)+": (?<number>-?[0-9]+(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)\)"#)
+            .expect("fixed metric expression")
+    });
+    let text = list.as_str();
+    let mut end = 0;
+    for pair in METRIC.captures_iter(text) {
+        let whole = pair.get(0).unwrap();
+        let separator = if end == 0 { "" } else { ", " };
+        if &text[end..whole.start()] != separator {
+            return false;
+        }
+        let number = pair.name("number").unwrap();
+        result.push((
+            list.start() + number.start(),
+            list.start() + number.end(),
+            VariableType::Number,
+        ));
+        end = whole.end();
+    }
+    end == text.len()
 }
 
 /// Возвращает границы значения переменной; ключ и разделитель остаются литералом.
@@ -650,5 +739,183 @@ mod tests {
             preview.id,
             identify(None, "api", "error", &format!("{} id=1", "x".repeat(5001))).id
         );
+    }
+
+    /// Соседние события одного источника объединяются, структурные отличия — нет.
+    fn same_pattern(service: &str, first: &str, second: &str, different: &[String]) -> Identity {
+        let a = identify(None, service, "info", first);
+        let b = identify(None, service, "info", second);
+        assert_eq!(a.id, b.id, "{} | {}", a.template, b.template);
+        assert_ne!(a.variables, b.variables);
+        for message in different {
+            assert_ne!(
+                a.id,
+                identify(None, service, "info", message).id,
+                "{message}"
+            );
+        }
+        a
+    }
+
+    #[test]
+    fn service_metrics_v2_values_and_timestamp_do_not_create_patterns() {
+        let first = r#"ServiceMetrics { SchemaVersion: 2, ServiceName: "BarkFluff.Federation", Counters: [("grpc_requests_total": 1)], Gauges: [], Timestamp: 11/15/2026 20:37:51 }"#;
+        let second = first
+            .replace(": 1)", ": 17)")
+            .replace("11/15/2026 20:37:51", "11/16/2026 01:02:03");
+        let a = same_pattern(
+            "federation",
+            first,
+            &second,
+            &[
+                first.replace("grpc_requests_total", "grpc_errors_total"),
+                first.replace("BarkFluff.Federation", "BarkFluff.Onliner"),
+                first.replace("SchemaVersion: 2", "SchemaVersion: 3"),
+                // Метрика перешла из Counters в Gauges.
+                first.replace(
+                    r#"Counters: [("grpc_requests_total": 1)], Gauges: []"#,
+                    r#"Counters: [], Gauges: [("grpc_requests_total": 1)]"#,
+                ),
+            ],
+        );
+        assert_eq!(
+            a.template,
+            r#"ServiceMetrics { SchemaVersion: 2, ServiceName: "BarkFluff.Federation", Counters: [("grpc_requests_total": <number_1>)], Gauges: [], Timestamp: <timestamp_1> }"#
+        );
+        let both = r#"ServiceMetrics { SchemaVersion: 2, ServiceName: "BarkFluff.Settings", Counters: [("config_get_requests": 1), ("grpc_requests_total": 2)], Gauges: [("last_config_get_items": 74), ("last_config_get_unix": 1794775125)], Timestamp: 11/15/2026 20:38:48 }"#;
+        assert_eq!(
+            identify(None, "settings", "info", both).template,
+            r#"ServiceMetrics { SchemaVersion: 2, ServiceName: "BarkFluff.Settings", Counters: [("config_get_requests": <number_1>), ("grpc_requests_total": <number_2>)], Gauges: [("last_config_get_items": <number_3>), ("last_config_get_unix": <number_4>)], Timestamp: <timestamp_1> }"#
+        );
+        // Нарушенный список не нормализуется частично.
+        assert!(
+            identify(
+                None,
+                "settings",
+                "info",
+                &both.replace(": 74)", ": 74oops)")
+            )
+            .variables
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn log_line_prefixes_do_not_create_patterns() {
+        let cron = "2026-11-15T20:39:01.951070+00:00 mail CRON[8455]: (mail) CMD ([8457] /opt/admin/bin/console monitoring:heartbeat --env=prod)";
+        let a = same_pattern(
+            "poste",
+            cron,
+            &cron
+                .replace("20:39:01.951070", "20:40:01.112233")
+                .replace("8455", "8460")
+                .replace("8457", "8462"),
+            &[
+                cron.replace("CMD", "END"),
+                cron.replace("(mail)", "(root)"),
+                cron.replace("CRON", "anacron"),
+            ],
+        );
+        assert_eq!(
+            a.template,
+            "<timestamp_1> mail CRON[<id_1>]: (mail) CMD ([<id_2>] /opt/admin/bin/console monitoring:heartbeat --env=prod)"
+        );
+        let dovecot = "2026-11-15T20:39:01.584703+00:00 mail dovecot: pop3-login: Login aborted";
+        same_pattern(
+            "poste",
+            dovecot,
+            &dovecot.replace("20:39:01.584703", "21:00:00.000001"),
+            &[dovecot.replace("pop3", "imap")],
+        );
+        let postgres = "2026-11-15 20:36:33.814 UTC [42] LOG:  checkpoint starting: time";
+        assert_eq!(
+            same_pattern(
+                "postgres",
+                postgres,
+                &postgres
+                    .replace("20:36:33.814", "20:41:33.902")
+                    .replace("42", "57"),
+                &[postgres.replace("LOG", "ERROR")],
+            )
+            .template,
+            "<timestamp_1> [<id_1>] LOG:  checkpoint starting: time"
+        );
+        let redis = "1284:C 15 Nov 2026 20:40:08.589 * DB saved on disk";
+        assert_eq!(
+            same_pattern(
+                "redis",
+                redis,
+                &redis
+                    .replace("1284", "1291")
+                    .replace("20:40:08.589", "20:45:08.012"),
+                &[redis.replace("saved", "loaded"), redis.replace(":C", ":M")],
+            )
+            .template,
+            "<id_1>:C <timestamp_1> * DB saved on disk"
+        );
+        // Время не в начале строки и похожие на префикс сообщения не меняются.
+        for message in [
+            "deploy finished at 2026-11-15T20:39:01Z",
+            "2026-11-15 report ready",
+            "2026-11-15T20:39:01 INFO started",
+            "17 Nov 2026 20:40:08.589 * no pid",
+        ] {
+            let identity = identify(None, "api", "info", message);
+            if message.ends_with("started") {
+                assert_eq!(identity.template, "<timestamp_1> INFO started");
+            } else {
+                assert!(identity.variables.is_empty(), "{message}");
+                assert_eq!(
+                    identity.id,
+                    hash(&(
+                        1u8,
+                        None::<&str>,
+                        "api",
+                        "info",
+                        "parts",
+                        vec![Part::Literal {
+                            text: message.into()
+                        }]
+                    ))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn audit_records_and_docker_interfaces_do_not_create_patterns() {
+        let audit = "type=USER_END msg=audit(1794775201.671:1352): pid=3865241 uid=0 auid=8 ses=813 subj=docker-default msg='op=PAM:session_close acct=\"mail\" exe=\"/usr/sbin/cron\" res=success'";
+        let a = same_pattern(
+            "host",
+            audit,
+            &audit
+                .replace("1794775201.671:1352", "1794775261.702:1360")
+                .replace("3865241", "3865302")
+                .replace("ses=813", "ses=814"),
+            &[
+                audit.replace("USER_END", "USER_START"),
+                audit.replace("res=success", "res=failed"),
+                audit.replace("auid=8", "auid=0"),
+            ],
+        );
+        assert_eq!(
+            a.template,
+            "type=USER_END msg=audit(<timestamp_1>:<id_1>): pid=<id_2> uid=<id_3> auid=8 ses=<id_4> subj=docker-default msg='op=PAM:session_close acct=\"mail\" exe=\"/usr/sbin/cron\" res=success'"
+        );
+        let veth = "Interface \"veth65291dc\" not found.";
+        assert_eq!(
+            same_pattern(
+                "host",
+                veth,
+                &veth.replace("veth65291dc", "vethc208596"),
+                &[veth.replace("veth65291dc", "eth0")],
+            )
+            .template,
+            "Interface \"<id_1>\" not found."
+        );
+        // Не только veth-интерфейсы Docker и не внутри слова.
+        for message in ["link veth0 up", "Interface xveth65291dc down"] {
+            assert!(identify(None, "host", "info", message).variables.is_empty());
+        }
     }
 }
