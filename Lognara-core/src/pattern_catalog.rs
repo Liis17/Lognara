@@ -24,6 +24,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Версия производной схемы; повышается при смене правил нормализации вместе с
+/// `pattern_identity::INDEX_PAYLOAD`, чтобы каталог пересобрался из raw.
+const SCHEMA: u32 = 4;
+
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Known {
     pub id: String,
@@ -234,14 +238,16 @@ impl DiskCatalog {
         let connection = Connection::open(path)?;
         connection.busy_timeout(Duration::from_secs(1))?;
         let version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        ensure!(version <= 3, "unsupported patterns schema");
+        ensure!(version <= SCHEMA, "unsupported patterns schema");
         // Новые правила объединяют старые ID; производные метаданные пересобираются
         // из raw, иначе накопленные временные метки продолжат занимать весь каталог.
-        let reset = if version < 3 {
-            "DROP TABLE IF EXISTS progress; DROP TABLE IF EXISTS patterns; DROP TABLE IF EXISTS issues;"
-        } else {
-            ""
-        };
+        // VACUUM до проверки бюджета: DROP не уменьшает файл, и переполненный
+        // старый каталог иначе не открылся бы при меньшем лимите.
+        if version < SCHEMA {
+            connection.execute_batch(
+                "BEGIN IMMEDIATE; DROP TABLE IF EXISTS progress; DROP TABLE IF EXISTS patterns; DROP TABLE IF EXISTS issues; COMMIT; VACUUM;",
+            )?;
+        }
         let page_size: usize = connection.query_row("PRAGMA page_size", [], |row| row.get(0))?;
         let page_count: usize = connection.query_row("PRAGMA page_count", [], |row| row.get(0))?;
         ensure!(
@@ -255,12 +261,12 @@ impl DiskCatalog {
         )?;
         connection.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;")?;
         connection.execute_batch(&format!(
-            "BEGIN IMMEDIATE; {reset}
+            "BEGIN IMMEDIATE;
             CREATE TABLE IF NOT EXISTS progress(singleton INTEGER PRIMARY KEY CHECK(singleton=1), checkpoint INTEGER NOT NULL, as_of INTEGER NOT NULL, history_from INTEGER, complete INTEGER NOT NULL);
             INSERT OR IGNORE INTO progress VALUES(1,0,0,NULL,1);
             CREATE TABLE IF NOT EXISTS patterns(id TEXT PRIMARY KEY, metadata TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS issues(id TEXT PRIMARY KEY, metadata TEXT NOT NULL);
-            PRAGMA user_version=3; COMMIT;",
+            PRAGMA user_version={SCHEMA}; COMMIT;",
         ))?;
         let mut state = connection.query_row(
             "SELECT checkpoint,as_of,history_from,complete FROM progress WHERE singleton=1",

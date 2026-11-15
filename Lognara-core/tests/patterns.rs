@@ -27,13 +27,12 @@ async fn structured_logs_fit_capacity_and_rebuild_old_catalog_and_indexes() {
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = config(dir.path());
     cfg.pattern_max_entries = 4;
+    cfg.pattern_catalog_bytes = 1 << 20;
     let core = Core::open(cfg.clone()).unwrap();
-    let messages: Vec<_> = (0..40).map(|i| {
-        if i % 2 == 0 {
-            format!(r#"10.0.0.1 - - [19/Oct/2026:22:28:{i:02} +0000] "POST /v1/batches HTTP/1.1" 204 {i} "-" "-""#)
-        } else {
-            format!(r#"ServiceMetrics {{ ServiceName: "api", Metrics: [("requests_total": {i})], Timestamp: 10/23/2026 12:14:{i:02} }}"#)
-        }
+    let messages: Vec<_> = (0..42).map(|i| match i % 3 {
+        0 => format!(r#"10.0.0.1 - - [19/Oct/2026:22:28:{i:02} +0000] "POST /v1/batches HTTP/1.1" 204 {i} "-" "-""#),
+        1 => format!(r#"ServiceMetrics {{ ServiceName: "api", Metrics: [("requests_total": {i})], Timestamp: 10/23/2026 12:14:{i:02} }}"#),
+        _ => format!(r#"ServiceMetrics {{ SchemaVersion: 2, ServiceName: "api", Counters: [("requests_total": {i})], Gauges: [], Timestamp: 11/15/2026 20:37:{i:02} }}"#),
     }).collect();
     let events: Vec<_> = messages
         .iter()
@@ -41,27 +40,29 @@ async fn structured_logs_fit_capacity_and_rebuild_old_catalog_and_indexes() {
         .map(|(i, message)| (LogLevel::Info, message.as_str(), i as i64))
         .collect();
     core.journal.accept(&batch(&events)).unwrap();
-    processed(&core, 40).await;
+    processed(&core, 42).await;
     let response = patterns::search(&core, request(100, Sort::Count, &[]))
         .await
         .unwrap();
-    assert_eq!((response.total_events, response.total_patterns), (40, 2));
+    assert_eq!((response.total_events, response.total_patterns), (42, 3));
     let id = response.patterns[0].pattern_id.clone();
     core.shutdown().unwrap();
     let closed = core.snapshot().closed.clone();
     drop(core);
 
-    // Эмулируем старый каталог, переполненный до загрузки, и индекс без ревизии.
-    let db = rusqlite::Connection::open(dir.path().join("patterns.sqlite")).unwrap();
-    db.execute_batch("PRAGMA user_version=2;").unwrap();
+    // Эмулируем каталог прежней ревизии, файл которого больше бюджета, и старый индекс.
+    let path = dir.path().join("patterns.sqlite");
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute_batch("PRAGMA user_version=3;").unwrap();
     for i in 0..8 {
         db.execute(
             "INSERT INTO patterns VALUES(?1,?2)",
-            rusqlite::params![format!("stale-{i}"), "invalid old metadata"],
+            rusqlite::params![format!("stale-{i}"), "x".repeat(256 << 10)],
         )
         .unwrap();
     }
     drop(db);
+    assert!(std::fs::metadata(&path).unwrap().len() > 1 << 20);
     for segment in &closed {
         let path = segment.path.join("index/meta.json");
         let mut meta: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
@@ -69,12 +70,13 @@ async fn structured_logs_fit_capacity_and_rebuild_old_catalog_and_indexes() {
         std::fs::write(path, serde_json::to_vec(&meta).unwrap()).unwrap();
     }
     let core = Core::open(cfg).unwrap();
-    processed(&core, 40).await;
+    processed(&core, 42).await;
     let response = patterns::search(&core, request(100, Sort::Count, &[]))
         .await
         .unwrap();
-    assert_eq!((response.total_events, response.total_patterns), (40, 2));
-    assert!(response.patterns.iter().all(|p| p.count == 20));
+    assert_eq!((response.total_events, response.total_patterns), (42, 3));
+    assert!(response.patterns.iter().all(|p| p.count == 14));
+    assert!(std::fs::metadata(&path).unwrap().len() <= 1 << 20);
     let found = query::search(
         &core,
         SearchRequest {
@@ -89,7 +91,7 @@ async fn structured_logs_fit_capacity_and_rebuild_old_catalog_and_indexes() {
         Instant::now() + Duration::from_secs(20),
     )
     .unwrap();
-    assert_eq!(found.events.len(), 20);
+    assert_eq!(found.events.len(), 14);
     assert!(!closed.is_empty());
     for segment in &closed {
         assert_eq!(
@@ -99,7 +101,7 @@ async fn structured_logs_fit_capacity_and_rebuild_old_catalog_and_indexes() {
                 .unwrap()
                 .payload
                 .as_deref(),
-            Some("lognara-pattern-normalization-2")
+            Some("lognara-pattern-normalization-3")
         );
     }
     core.shutdown().unwrap();
