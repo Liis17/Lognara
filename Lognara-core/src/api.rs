@@ -64,6 +64,9 @@ pub fn router(core: Arc<Core>) -> Router {
             "/v1/admin/agents/{id}/rotate-token",
             post(rotate_agent_token),
         )
+        .route("/v1/admin/hosts", post(create_host))
+        .route("/v1/admin/hosts/{id}", axum::routing::delete(delete_host))
+        .route("/v1/admin/hosts/{id}/rotate-token", post(rotate_host_token))
         .route_layer(middleware::from_fn_with_state(
             token_hash(&core.journal.config.admin_token),
             authorize,
@@ -727,6 +730,7 @@ impl IntoResponse for AccessError {
             Self::RelayNotFound => (StatusCode::NOT_FOUND, "relay_not_found"),
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             Self::RelayHasAgents => (StatusCode::CONFLICT, "relay_has_agents"),
+            Self::HostNode => (StatusCode::CONFLICT, "host_node"),
             Self::Storage(error) => {
                 tracing::error!(%error, "access operation failed");
                 (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable")
@@ -823,6 +827,41 @@ async fn rotate_agent_token(
         return invalid_request();
     };
     let mut response = access_task(move || access.rotate_agent_token(id), StatusCode::OK).await;
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+async fn create_host(
+    State(access): State<Arc<Access>>,
+    body: Result<Json<RelayName>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Ok(Json(body)) = body else {
+        return invalid_request();
+    };
+    no_store(access_task(move || access.create_host(&body.name), StatusCode::CREATED).await)
+}
+async fn rotate_host_token(
+    State(access): State<Arc<Access>>,
+    id: Result<Path<i64>, axum::extract::rejection::PathRejection>,
+) -> Response {
+    let Ok(Path(id)) = id else {
+        return invalid_request();
+    };
+    no_store(access_task(move || access.rotate_host_token(id), StatusCode::OK).await)
+}
+async fn delete_host(
+    State(access): State<Arc<Access>>,
+    id: Result<Path<i64>, axum::extract::rejection::PathRejection>,
+) -> Response {
+    let Ok(Path(id)) = id else {
+        return invalid_request();
+    };
+    access_task(move || access.delete_host(id), StatusCode::NO_CONTENT).await
+}
+fn no_store(mut response: Response) -> Response {
     response.headers_mut().insert(
         axum::http::header::CACHE_CONTROL,
         axum::http::HeaderValue::from_static("no-store"),

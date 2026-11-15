@@ -315,7 +315,9 @@ fn migrates_access_schema_v1_and_retains_agent_identity_hashes() {
         .unwrap()
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
+    let relays = access.list_relays().unwrap();
+    assert_eq!(relays[0].kind, "relay");
     assert_eq!(
         access.agent_node(&lognara_core::wire::AgentHash(agent_hash)),
         Some(lognara_core::model::Node {
@@ -681,4 +683,242 @@ async fn heartbeats_follow_authenticated_relay_and_core_clock() {
         )
         .unwrap();
     assert_eq!(rows, 0);
+}
+
+fn host_batch(token: &str, message: &str) -> Vec<u8> {
+    use lognara_core::wire::{AgentHash, CoreBatch, Event, Group, LogId, LogLevel, Source};
+    let now = lognara_core::model::now_nanos();
+    let batch = CoreBatch {
+        dropped: 0,
+        groups: vec![Group {
+            source: Source {
+                environment: None,
+                server: "srv-host".into(),
+                backend: "host".into(),
+                service: "host".into(),
+                service_instance: None,
+            },
+            dropped: 0,
+            events: vec![Event {
+                id: LogId(uuid::Uuid::now_v7()),
+                timestamp: now,
+                ingested_at: now,
+                action: None,
+                level: LogLevel::Info,
+                message: message.into(),
+                trace_id: None,
+                span_id: None,
+                parent_span_id: None,
+                request_id: None,
+                attributes: Default::default(),
+            }],
+            agent: Some(AgentHash(Sha256::digest(token.as_bytes()).into())),
+        }],
+    };
+    zstd::encode_all(&rmp_serde::to_vec_named(&batch).unwrap()[..], 3).unwrap()
+}
+
+async fn post_batch(router: &Router, token: &str, body: Vec<u8>) -> StatusCode {
+    router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/batches")
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/msgpack")
+                .header("content-encoding", "zstd")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+}
+
+#[tokio::test]
+async fn host_sends_directly_and_keeps_node_identity_after_token_rotation() {
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = Config::from_lookup(|key| match key {
+        "LOGNARA_ADMIN_TOKEN" => Some("admin".into()),
+        "LOGNARA_QUERY_TOKEN" => Some("query".into()),
+        _ => None,
+    })
+    .unwrap();
+    config.data_dir = dir.path().into();
+    let core = Core::open(config).unwrap();
+    let router = api::router(core.clone());
+    let nil = serde_json::Value::Null;
+
+    let (status, host) = call(
+        &router,
+        "POST",
+        "/v1/admin/hosts",
+        "admin",
+        json!({"name":"mail"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(host["relay"]["kind"], "host");
+    let host_id = host["relay"]["id"].as_i64().unwrap();
+    let agent_id = host["agent"]["id"].as_i64().unwrap();
+    assert_eq!(host["agent"]["relay_id"], host_id);
+    let old_token = host["token"].as_str().unwrap().to_owned();
+    assert!(old_token.starts_with("lnh_"));
+    assert_eq!(
+        call(
+            &router,
+            "POST",
+            "/v1/admin/hosts",
+            "admin",
+            json!({"name":"mail"})
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+
+    // Узел хоста управляется только hosts API.
+    let conflict = (StatusCode::CONFLICT, json!({"error":"host_node"}));
+    assert_eq!(
+        call(
+            &router,
+            "POST",
+            "/v1/admin/agents",
+            "admin",
+            json!({"name":"x","relay_id":host_id})
+        )
+        .await,
+        conflict
+    );
+    assert_eq!(
+        call(
+            &router,
+            "DELETE",
+            &format!("/v1/admin/relays/{host_id}"),
+            "admin",
+            nil.clone()
+        )
+        .await,
+        conflict
+    );
+    assert_eq!(
+        call(
+            &router,
+            "DELETE",
+            &format!("/v1/admin/agents/{agent_id}"),
+            "admin",
+            nil.clone()
+        )
+        .await,
+        conflict
+    );
+    assert_eq!(
+        call(
+            &router,
+            "POST",
+            &format!("/v1/admin/agents/{agent_id}/rotate-token"),
+            "admin",
+            nil.clone()
+        )
+        .await,
+        conflict
+    );
+    let (_, relays) = call(&router, "GET", "/v1/admin/relays", "admin", nil.clone()).await;
+    assert_eq!(relays["relays"][0]["kind"], "host");
+
+    assert!(
+        post_batch(
+            &router,
+            &old_token,
+            host_batch(&old_token, "before rotation")
+        )
+        .await
+        .is_success()
+    );
+    let rotate = format!("/v1/admin/hosts/{host_id}/rotate-token");
+    for token in ["", "query", old_token.as_str()] {
+        assert_eq!(
+            call(&router, "POST", &rotate, token, nil.clone()).await.0,
+            401
+        );
+    }
+    let (status, rotated) = call(&router, "POST", &rotate, "admin", nil.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(rotated["relay"]["id"], host_id);
+    assert_eq!(rotated["agent"]["id"], agent_id);
+    let new_token = rotated["token"].as_str().unwrap().to_owned();
+    assert_ne!(new_token, old_token);
+
+    // Старый токен сразу отозван; пачка, подготовленная со старым хешем, принимается новым.
+    assert_eq!(
+        post_batch(&router, &old_token, host_batch(&old_token, "rejected")).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert!(
+        post_batch(
+            &router,
+            &new_token,
+            host_batch(&old_token, "prepared before")
+        )
+        .await
+        .is_success()
+    );
+    assert!(
+        post_batch(
+            &router,
+            &new_token,
+            host_batch(&new_token, "after rotation")
+        )
+        .await
+        .is_success()
+    );
+
+    let from = "2000-01-01T00:00:00Z";
+    let to = "2100-01-01T00:00:00Z";
+    let (status, found) = call(
+        &router,
+        "POST",
+        "/v1/logs/search",
+        "query",
+        json!({"from":from,"to":to,"filters":{"agent_id":[agent_id.to_string()]},"limit":10}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let events = found["events"].as_array().unwrap();
+    let mut messages: Vec<_> = events
+        .iter()
+        .map(|e| e["message"].as_str().unwrap())
+        .collect();
+    messages.sort();
+    assert_eq!(
+        messages,
+        ["after rotation", "before rotation", "prepared before"]
+    );
+    assert!(
+        events
+            .iter()
+            .all(|e| e["relay_id"] == host_id && e["agent_id"] == agent_id)
+    );
+
+    assert_eq!(
+        call(
+            &router,
+            "DELETE",
+            &format!("/v1/admin/hosts/{host_id}"),
+            "admin",
+            nil.clone()
+        )
+        .await
+        .0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        post_batch(&router, &new_token, host_batch(&new_token, "deleted")).await,
+        StatusCode::UNAUTHORIZED
+    );
+    let (_, relays) = call(&router, "GET", "/v1/admin/relays", "admin", nil).await;
+    assert!(relays["relays"].as_array().unwrap().is_empty());
+    core.shutdown().unwrap();
 }
