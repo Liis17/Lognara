@@ -213,6 +213,11 @@ pub struct LogEvent {
     pub id: String,
     pub timestamp: String,
     pub ingested_at: String,
+    /// Core отдаёт привязку к relay и агенту только для событий узлов с персональным токеном.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<i64>,
     pub environment: Option<String>,
     pub server: String,
     pub backend: String,

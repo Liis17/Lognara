@@ -128,6 +128,27 @@ fn endpoints() -> Vec<(Method, String, Option<Value>)> {
 }
 
 #[tokio::test]
+async fn search_accepts_events_bound_to_relay_and_agent() {
+    let (t, session, core) = setup().await;
+    let mut bound = page();
+    bound["events"][0]["relay_id"] = json!(3);
+    bound["events"][0]["agent_id"] = json!(7);
+    core.reply(StatusCode::OK, bound.clone());
+    let reply = send(
+        &t.router,
+        request(
+            Method::POST,
+            "/api/logs/search",
+            Some(&session),
+            Some(range()),
+        ),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(reply.body, bound);
+}
+
+#[tokio::test]
 async fn search_preserves_filters_text_cursor_and_full_page() {
     let (t, session, core) = setup().await;
     let body = json!({
