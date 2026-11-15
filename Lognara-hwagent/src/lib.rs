@@ -6,11 +6,13 @@
 pub mod config;
 pub mod encoder;
 pub mod heartbeat;
+pub mod metrics;
 
 use std::io;
 use std::sync::Arc;
 
 use lognara_agent::Embedded;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
@@ -26,13 +28,23 @@ pub async fn run(config: Config, shutdown: CancellationToken) -> io::Result<()> 
         .await?,
     );
     let stop = CancellationToken::new();
-    let heartbeat = tokio::spawn({
+    let mut tasks = JoinSet::new();
+    tasks.spawn({
         let embedded = embedded.clone();
         heartbeat::run(config.clone(), move || embedded.telemetry(), stop.clone())
     });
+    if config.host.metrics.enabled {
+        tasks.spawn(metrics::run(
+            config.root.clone(),
+            config.host.metrics.clone(),
+            embedded.collector(),
+            stop.clone(),
+        ));
+    }
     shutdown.cancelled().await;
+    // Сборщики останавливаются до финальной отправки: всё сохранённое уйдёт или останется в spool.
     stop.cancel();
-    let _ = heartbeat.await;
+    while tasks.join_next().await.is_some() {}
     match Arc::into_inner(embedded) {
         Some(embedded) => embedded.finish().await,
         None => return Err(io::Error::other("collector still holds the queue")),

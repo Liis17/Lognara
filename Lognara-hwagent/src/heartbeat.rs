@@ -4,6 +4,7 @@
 use std::time::Duration;
 
 use lognara_agent::TelemetrySnapshot;
+use reqwest::header::CONTENT_TYPE;
 use reqwest::{Client, StatusCode, Url};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -83,7 +84,8 @@ pub async fn run(
         let request = client
             .post(url.clone())
             .bearer_auth(&config.token)
-            .json(&body(&config, telemetry()))
+            .header(CONTENT_TYPE, "application/json")
+            .body(body(&config, telemetry()).to_string())
             .send();
         let result = tokio::select! {
             _ = stop.cancelled() => return,

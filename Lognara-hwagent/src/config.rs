@@ -11,6 +11,8 @@ use lognara_agent::sources::{Source, Sources};
 use reqwest::Url;
 use serde::Deserialize;
 
+use crate::metrics::MetricsSettings;
+
 pub const SERVICE: &str = "host";
 const DEFAULT_CONFIG: &str = "/etc/lognara/hwagent.json";
 const DEFAULT_SPOOL: &str = "/var/lib/lognara-hwagent/spool";
@@ -23,11 +25,16 @@ pub struct HostFile {
     /// Файлы логов в формате источников агента.
     #[serde(default)]
     pub sources: Vec<Source>,
+    #[serde(default)]
+    pub metrics: MetricsSettings,
 }
 
 impl HostFile {
     pub fn parse(bytes: &[u8]) -> io::Result<Self> {
-        serde_json::from_slice(bytes).map_err(|error| invalid(format!("host config: {error}")))
+        let host: Self = serde_json::from_slice(bytes)
+            .map_err(|error| invalid(format!("host config: {error}")))?;
+        host.metrics.validate().map_err(invalid)?;
+        Ok(host)
     }
 }
 

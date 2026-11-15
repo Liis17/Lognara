@@ -877,6 +877,12 @@ async fn host_sends_directly_and_keeps_node_identity_after_token_rotation() {
 
     let from = "2000-01-01T00:00:00Z";
     let to = "2100-01-01T00:00:00Z";
+    // Пачки подтверждены после WAL; поиск видит их после материализации.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while core.snapshot().watermark < 3 {
+        assert!(std::time::Instant::now() < deadline && core.journal.ready());
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
     let (status, found) = call(
         &router,
         "POST",
