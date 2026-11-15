@@ -3,7 +3,7 @@ import { api, ApiError, type Agent, errorText, type Relay } from "../api";
 
 /** Токен, который core показывает один раз. */
 interface Issued {
-  kind: "relay" | "agent";
+  kind: "relay" | "agent" | "host";
   name: string;
   token: string;
   envLine: string;
@@ -14,6 +14,7 @@ export default function Access({ onUnauthorized }: { onUnauthorized: () => void 
   const [relays, setRelays] = useState<Relay[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [relayName, setRelayName] = useState("");
+  const [hostName, setHostName] = useState("");
   const [agentName, setAgentName] = useState("");
   const [relayId, setRelayId] = useState("");
   const [issued, setIssued] = useState<Issued | null>(null);
@@ -57,10 +58,44 @@ export default function Access({ onUnauthorized }: { onUnauthorized: () => void 
     group.push(agent);
     agentsByRelay.set(agent.relay_id, group);
   }
+  // Хост - relay вида host со встроенным агентом; агентов к нему не подключают.
+  const hosts = relays.filter((relay) => relay.kind === "host");
+  const plainRelays = relays.filter((relay) => relay.kind !== "host");
+  const plainAgents = agents.filter((agent) => plainRelays.some((relay) => relay.id === agent.relay_id));
   // Пока relay не выбран явно, предлагается первый из списка.
-  const selectedRelay = relays.some((relay) => String(relay.id) === relayId)
+  const selectedRelay = plainRelays.some((relay) => String(relay.id) === relayId)
     ? relayId
-    : String(relays[0]?.id ?? "");
+    : String(plainRelays[0]?.id ?? "");
+
+  const addHost = (event: FormEvent) => {
+    event.preventDefault();
+    run(async () => {
+      const reply = await api<{ relay: Relay; token: string }>("POST", "/api/hosts", { name: hostName });
+      setIssued({
+        kind: "host",
+        name: reply.relay.name,
+        token: reply.token,
+        envLine: `LOGNARA_HOST_TOKEN=${reply.token}`,
+      });
+      setCopyStatus("");
+      setHostName("");
+    });
+  };
+
+  const rotateHost = (host: Relay) => {
+    if (!window.confirm(`Сменить токен хоста «${host.name}»? Старый токен перестанет работать сразу. История и привязки алертов сохранятся.`)) return;
+    run(async () => {
+      const reply = await api<{ relay: Relay; token: string }>("POST", `/api/hosts/${host.id}/rotate-token`);
+      setIssued({
+        kind: "host",
+        name: reply.relay.name,
+        token: reply.token,
+        envLine: `LOGNARA_HOST_TOKEN=${reply.token}`,
+        rotated: true,
+      });
+      setCopyStatus("");
+    });
+  };
 
   const addRelay = (event: FormEvent) => {
     event.preventDefault();
@@ -122,7 +157,7 @@ export default function Access({ onUnauthorized }: { onUnauthorized: () => void 
     }
   };
 
-  const remove = (kind: "relays" | "agents", id: number, name: string) => {
+  const remove = (kind: "relays" | "agents" | "hosts", id: number, name: string) => {
     if (!window.confirm(`Удалить «${name}»? Его токен перестанет работать.`)) return;
     run(async () => {
       await api("DELETE", `/api/${kind}/${id}`);
@@ -147,9 +182,9 @@ export default function Access({ onUnauthorized }: { onUnauthorized: () => void 
           <div className="access-agent-fields">
             <label>
               Relay агента
-              <select value={selectedRelay} onChange={(e) => setRelayId(e.target.value)} disabled={relays.length === 0}>
-                {relays.length === 0 && <option value="">Сначала создайте relay</option>}
-                {relays.map((relay) => <option key={relay.id} value={relay.id}>{relay.name}</option>)}
+              <select value={selectedRelay} onChange={(e) => setRelayId(e.target.value)} disabled={plainRelays.length === 0}>
+                {plainRelays.length === 0 && <option value="">Сначала создайте relay</option>}
+                {plainRelays.map((relay) => <option key={relay.id} value={relay.id}>{relay.name}</option>)}
               </select>
             </label>
             <label>
@@ -159,14 +194,26 @@ export default function Access({ onUnauthorized }: { onUnauthorized: () => void 
           </div>
           <button type="submit" disabled={busy || issued !== null || !agentName.trim() || !selectedRelay}>Добавить агента</button>
         </form>
+        <form onSubmit={addHost} aria-label="Создать хост">
+          <h3>Создать хост</h3>
+          <label>
+            Имя хоста
+            <input value={hostName} onChange={(e) => setHostName(e.target.value)} placeholder="mail-01" />
+          </label>
+          <p className="muted">lognara-hwagent на машине отправляет метрики, процессы и системные логи прямо в core.</p>
+          <button type="submit" disabled={busy || issued !== null || !hostName.trim()}>Добавить хост</button>
+        </form>
       </div>
       {issued && (
         <div className="token" role="region" aria-label="Выданный токен">
           <p>
-            <strong>{issued.rotated ? `Токен агента «${issued.name}» перевыпущен.` : `${issued.kind === "relay" ? "Relay" : "Агент"} «${issued.name}» создан.`}</strong>{" "}
-            Токен показан только сейчас и больше не покажется: добавьте строку в .env и сохраните её.
+            <strong>{issued.rotated
+              ? `Токен ${issued.kind === "host" ? "хоста" : "агента"} «${issued.name}» перевыпущен.`
+              : `${issued.kind === "relay" ? "Relay" : issued.kind === "host" ? "Хост" : "Агент"} «${issued.name}» создан.`}</strong>{" "}
+            Токен показан только сейчас и больше не покажется: {issued.kind === "host" ? "добавьте строку в /etc/lognara/hwagent.env (права 0600)" : "добавьте строку в .env"} и сохраните её.
           </p>
-          {issued.rotated && <p className="muted">Обновите конфигурацию агента. Замена применяется после успешной синхронизации relay с core, обычно в пределах 10 секунд.</p>}
+          {issued.rotated && issued.kind === "host" && <p className="muted">Замените токен в hwagent.env и перезапустите lognara-hwagent. Старый токен уже не принимается.</p>}
+          {issued.rotated && issued.kind === "agent" && <p className="muted">Обновите конфигурацию агента. Замена применяется после успешной синхронизации relay с core, обычно в пределах 10 секунд.</p>}
           <label>
             Строка для .env
             <textarea readOnly value={issued.envLine} rows={3} spellCheck={false} />
@@ -182,11 +229,29 @@ export default function Access({ onUnauthorized }: { onUnauthorized: () => void 
       {error && <p className="error">{error}</p>}
 
       <div className="access-list-heading">
+        <h3>Хост-агенты</h3>
+        <span className="muted">Хостов: {hosts.length}</span>
+      </div>
+      <div className="access-agent-grid">
+        {hosts.map((host) => (
+          <article className="access-agent" key={host.id} aria-label={`Хост ${host.name}`}>
+            <h4>{host.name}</h4>
+            <p className="muted">Создан {new Date(host.created_at).toLocaleString()}</p>
+            <div className="access-actions">
+              <button type="button" onClick={() => rotateHost(host)} disabled={busy || issued !== null}>Сменить токен</button>
+              <button type="button" className="quiet" onClick={() => remove("hosts", host.id, host.name)} disabled={busy}>Удалить</button>
+            </div>
+          </article>
+        ))}
+      </div>
+      {hosts.length === 0 && !busy && <p className="empty">Хостов пока нет.</p>}
+
+      <div className="access-list-heading">
         <h3>Relay и агенты</h3>
-        <span className="muted">Relay: {relays.length} · Агенты: {agents.length}</span>
+        <span className="muted">Relay: {plainRelays.length} · Агенты: {plainAgents.length}</span>
       </div>
       <div className="access-relays">
-        {relays.map((relay) => {
+        {plainRelays.map((relay) => {
           const relayAgents = agentsByRelay.get(relay.id) ?? [];
           return (
             <section className="access-relay" key={relay.id} aria-label={`Relay ${relay.name}`}>
@@ -213,7 +278,7 @@ export default function Access({ onUnauthorized }: { onUnauthorized: () => void 
             </section>
           );
         })}
-        {relays.length === 0 && !busy && <p className="empty">Relay пока нет. Создайте первый relay в форме выше.</p>}
+        {plainRelays.length === 0 && !busy && <p className="empty">Relay пока нет. Создайте первый relay в форме выше.</p>}
       </div>
     </section>
   );

@@ -172,6 +172,8 @@ export interface MetricAlertGroup {
   name: string;
   recipient_ids: string[];
   alerts: MetricAlertKey[];
+  /** Имена алертов на логи с этой группой. */
+  log_alerts?: string[];
 }
 export interface MetricAlertSettings {
   enabled: boolean;
@@ -213,7 +215,40 @@ export interface PreviewReply {
 export interface Relay {
   id: number;
   name: string;
+  /** `host` - хост-агент со встроенным агентом, отправляет прямо в core. */
+  kind?: "relay" | "host";
   created_at: string;
+}
+
+export interface LogAlertText {
+  query: string;
+  mode: "all" | "phrase";
+}
+
+export interface LogAlertInput {
+  name: string;
+  enabled: boolean;
+  query: string;
+  filters: Record<string, string[]>;
+  text: LogAlertText | null;
+  threshold: number;
+  cooldown_seconds: number;
+  group_ids: string[];
+}
+
+export interface LogAlert extends LogAlertInput {
+  id: string;
+  revision: number;
+  no_recipients: boolean;
+  last_count: number;
+  last_match_at: number | null;
+  last_checked_at: number | null;
+  last_sent_at: number | null;
+}
+
+export interface LogAlertList {
+  alerts: LogAlert[];
+  core_status: "unknown" | "available" | "busy" | "incompatible" | "unavailable";
 }
 
 export interface Agent {
@@ -234,6 +269,8 @@ const messages: Record<string, string> = {
   invalid_request: "Некорректный запрос",
   name_taken: "Такое имя уже занято",
   relay_has_agents: "У relay есть агенты, сначала удалите их",
+  host_node: "Узлом хоста управляет раздел «Хост-агенты»",
+  log_alert_limit: "Включено максимальное число алертов на логи (100)",
   relay_not_found: "Relay не найден, обновите страницу",
   invalid_scope: "Выбранный relay или агент не найден, обновите список",
   not_found: "Запись не найдена, обновите страницу",

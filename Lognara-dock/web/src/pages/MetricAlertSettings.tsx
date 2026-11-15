@@ -221,10 +221,14 @@ function Groups({
       onChange();
     } catch (e) {
       if (e instanceof ApiError && e.code === "group_in_use") {
-        const keys = (e.data as { alerts?: MetricAlertKey[] } | undefined)?.alerts ?? [];
+        const data = e.data as { alerts?: MetricAlertKey[]; log_alerts?: string[] } | undefined;
+        const names = [
+          ...(data?.alerts ?? []).map(keyText),
+          ...(data?.log_alerts ?? []).map((name) => `логи: ${name}`),
+        ];
         setError(
-          keys.length
-            ? `Сначала отсоедините группу от алертов: ${keys.map(keyText).join("; ")}`
+          names.length
+            ? `Сначала отсоедините группу от алертов: ${names.join("; ")}`
             : errorText(e),
         );
       } else setError(errorText(e));
