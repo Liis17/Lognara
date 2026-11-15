@@ -1,0 +1,90 @@
+name: Build host agent
+
+on:
+  push:
+    branches: [master]
+    paths: ['Lognara-hwagent/**', 'Lognara-agent/**', 'Lognara-relay/**', 'Lognara-spool/**']
+  pull_request:
+    paths: ['Lognara-hwagent/**', 'Lognara-agent/**', 'Lognara-relay/**', 'Lognara-spool/**', '.github/workflows/build-hwagent.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: 2
+
+jobs:
+  build:
+    name: Linux (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    defaults:
+      run:
+        working-directory: Lognara-hwagent
+    env:
+      CARGO_BUILD_TARGET: ${{ matrix.target }}
+      CC: musl-gcc
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install native musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools binutils
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: Lognara-hwagent -> target
+          key: hwagent-release-${{ matrix.target }}
+      - name: Build static binary
+        run: cargo build --locked --release --bin lognara-hwagent
+      - name: Verify static ELF and package
+        env:
+          TARGET: ${{ matrix.target }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          binary="target/$TARGET/release/lognara-hwagent"
+          if readelf -l "$binary" | grep INTERP > /dev/null; then
+            echo 'Unexpected dynamic loader' >&2
+            exit 1
+          fi
+          if readelf -d "$binary" | grep NEEDED > /dev/null; then
+            echo 'Unexpected shared library dependency' >&2
+            exit 1
+          fi
+          mkdir -p package dist
+          install -m 755 "$binary" package/lognara-hwagent
+          cp ../LICENSE package/LICENSE
+          cp -r examples packaging README.md package/
+          tar -czf "dist/lognara-hwagent-linux-$ARCH.tar.gz" -C package .
+          cd dist
+          sha256sum "lognara-hwagent-linux-$ARCH.tar.gz" > "SHA256SUMS-$ARCH"
+          sha256sum -c "SHA256SUMS-$ARCH"
+      - name: Smoke test configuration errors
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -u
+          output=$(LOGNARA_HWAGENT_CONFIG=examples/hwagent.json "target/$TARGET/release/lognara-hwagent" 2>&1) && exit 1
+          echo "$output" | grep -q 'LOGNARA_CORE_URL is required'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hwagent-${{ matrix.arch }}
+          path: |
+            Lognara-hwagent/dist/*.tar.gz
+            Lognara-hwagent/dist/SHA256SUMS-*
+          if-no-files-found: error
