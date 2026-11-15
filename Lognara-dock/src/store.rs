@@ -965,14 +965,12 @@ fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
     for (index, sql) in MIGRATIONS.iter().enumerate().skip(version as usize) {
         let tx = conn.transaction()?;
         tx.execute_batch(sql)?;
-        tx.pragma_update(None, "user_version", index as i64 + 1)?;
-        tx.commit()?;
-    }
-    if version < MIGRATIONS.len() as i64 {
-        let broken = conn.prepare("PRAGMA foreign_key_check")?.exists([])?;
-        if broken {
+        // Проверка до commit: при нарушении миграция откатывается, user_version не растёт.
+        if tx.prepare("PRAGMA foreign_key_check")?.exists([])? {
             return Err(rusqlite::Error::InvalidQuery);
         }
+        tx.pragma_update(None, "user_version", index as i64 + 1)?;
+        tx.commit()?;
     }
     conn.pragma_update(None, "foreign_keys", true)?;
     Ok(())

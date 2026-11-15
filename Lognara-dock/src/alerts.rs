@@ -195,6 +195,10 @@ fn validate_key(key: &MetricKey) -> Result<(), AlertStoreError> {
         || key.name.is_empty()
         || key.name.len() > 128
         || !matches!(key.origin.as_str(), "counter" | "gauge" | "rule")
+        // Управляющие символы подделали бы строки текста уведомления.
+        || [&key.server, &key.service, &key.name]
+            .iter()
+            .any(|value| value.chars().any(char::is_control))
     {
         return Err(AlertStoreError::Invalid("invalid metric identity"));
     }
@@ -206,9 +210,9 @@ fn validate_definition(input: &DefinitionInput) -> Result<(), AlertStoreError> {
     if input
         .environment
         .as_ref()
-        .is_some_and(|value| value.len() > 128)
+        .is_some_and(|value| value.len() > 128 || value.chars().any(char::is_control))
     {
-        return Err(AlertStoreError::Invalid("environment is too long"));
+        return Err(AlertStoreError::Invalid("invalid environment"));
     }
     if !matches!(input.no_data.as_str(), "normal" | "loss") {
         return Err(AlertStoreError::Invalid("no_data must be normal or loss"));
@@ -1094,7 +1098,7 @@ enum AlertWrite {
 fn map_alert_save_error(error: StoreError) -> AlertStoreError {
     match error {
         StoreError::Sqlite(rusqlite::Error::SqliteFailure(failure, _))
-            if failure.code == rusqlite::ErrorCode::ConstraintViolation =>
+            if failure.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE =>
         {
             AlertStoreError::Conflict("alert_exists")
         }
@@ -1372,6 +1376,20 @@ pub async fn update_recipient(
     Json(input): Json<RecipientInput>,
 ) -> Result<Json<Recipient>, ApiError> {
     Ok(Json(app.store.update_recipient(id, input).await?))
+}
+
+/// Удаление правила по id из UI: человек снимает и скоупленные правила, созданные через MCP.
+pub async fn delete_rule(
+    State(app): State<AppState>,
+    _user: crate::session::AuthUser,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<StatusCode, ApiError> {
+    Uuid::parse_str(&id).map_err(|_| ApiError::BadRequest("invalid_request"))?;
+    if app.store.delete_alert_by_id(id).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::NotFound)
+    }
 }
 
 pub async fn delete_recipient(
@@ -2537,6 +2555,36 @@ mod tests {
             name: "requests".into(),
             origin: "counter".into(),
         }
+    }
+
+    #[test]
+    fn control_characters_cannot_forge_notification_lines() {
+        assert!(validate_key(&test_key()).is_ok());
+        for forged in [
+            MetricKey {
+                name: "requests\nУсловие: подделка".into(),
+                ..test_key()
+            },
+            MetricKey {
+                service: "api\r".into(),
+                ..test_key()
+            },
+            MetricKey {
+                server: "server\u{7}".into(),
+                ..test_key()
+            },
+        ] {
+            assert!(matches!(
+                validate_key(&forged),
+                Err(AlertStoreError::Invalid(_))
+            ));
+        }
+        let mut definition = input(test_key(), "normal", vec![]);
+        definition.environment = Some("prod\nПоследняя точка: 0".into());
+        assert!(matches!(
+            validate_definition(&definition),
+            Err(AlertStoreError::Invalid("invalid environment"))
+        ));
     }
 
     fn input(key: MetricKey, no_data: &str, group_ids: Vec<String>) -> DefinitionInput {
