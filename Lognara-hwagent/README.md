@@ -11,7 +11,7 @@
 ## Установка
 
 1. В Dock откройте «Доступ → Хост-агенты» и создайте хост. Токен показывается один раз.
-2. Скопируйте бинарник `lognara-hwagent` (static musl, amd64/arm64) в `/usr/local/bin/`.
+2. Скачайте из GitHub Releases релиз с тегом `hwagent-*` (не `agent-*`) и архив `lognara-hwagent-linux-amd64.tar.gz` или `-arm64`, проверьте сумму по `SHA256SUMS`, распакуйте и скопируйте бинарник `lognara-hwagent` (static musl) в `/usr/local/bin/`. Пример env, unit и конфигурации лежат в архиве в `packaging/` и `examples/`.
 3. Создайте `/etc/lognara/hwagent.env` по [`packaging/hwagent.env.example`](packaging/hwagent.env.example) с правами `0600 root:root`.
 4. Скопируйте конфигурацию в `/etc/lognara/hwagent.json`:
    - [`examples/hwagent.json`](examples/hwagent.json): система с journald (Debian 12+, Ubuntu, RHEL). Журнал даёт sshd, sudo, ядро, cron и юниты; файлы добавляют audit, fail2ban и историю пакетов.

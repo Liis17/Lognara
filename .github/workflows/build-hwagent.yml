@@ -3,7 +3,7 @@ name: Build host agent
 on:
   push:
     branches: [master]
-    paths: ['Lognara-hwagent/**', 'Lognara-agent/**', 'Lognara-relay/**', 'Lognara-spool/**']
+    paths: ['Lognara-hwagent/**', 'Lognara-agent/**', 'Lognara-relay/**', 'Lognara-spool/**', '.github/workflows/build-hwagent.yml']
   pull_request:
     paths: ['Lognara-hwagent/**', 'Lognara-agent/**', 'Lognara-relay/**', 'Lognara-spool/**', '.github/workflows/build-hwagent.yml']
   workflow_dispatch:
@@ -88,3 +88,63 @@ jobs:
             Lognara-hwagent/dist/*.tar.gz
             Lognara-hwagent/dist/SHA256SUMS-*
           if-no-files-found: error
+
+  publish:
+    name: Publish host agent release
+    needs: [build]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    concurrency:
+      group: hwagent-release-publication
+      cancel-in-progress: false
+      queue: max
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: hwagent-*
+          merge-multiple: true
+          path: release-assets
+      - name: Verify complete release assets
+        working-directory: release-assets
+        run: |
+          cat SHA256SUMS-amd64 SHA256SUMS-arm64 > SHA256SUMS
+          sha256sum -c SHA256SUMS
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          sha="$GITHUB_SHA"
+          tag="hwagent-$(TZ=UTC git show -s --date=format-local:%Y%m%d-%H%M%S --format=%cd "$sha")-${sha:0:12}"
+          state=$(gh release list --repo "$REPO" --limit 1000 --json tagName,isDraft \
+            --jq ".[] | select(.tagName == \"$tag\") | .isDraft")
+          if [ "$state" = "false" ]; then
+            echo "Release $tag already published; leaving its assets unchanged"
+            exit 0
+          fi
+          base="https://github.com/$REPO/releases/download/$tag"
+          cat > notes.md <<NOTES
+          Статические Linux-бинарники musl агента хоста. Исходный коммит: \`$sha\`.
+
+          - Linux amd64: [lognara-hwagent-linux-amd64.tar.gz]($base/lognara-hwagent-linux-amd64.tar.gz)
+          - Linux arm64: [lognara-hwagent-linux-arm64.tar.gz]($base/lognara-hwagent-linux-arm64.tar.gz)
+          - Контрольные суммы: [SHA256SUMS]($base/SHA256SUMS)
+
+          В архиве бинарник \`lognara-hwagent\`, примеры \`examples/\`, systemd unit и пример env в \`packaging/\`. Установка: README.md в архиве.
+          NOTES
+          if [ -z "$state" ]; then
+            gh release create "$tag" --repo "$REPO" --target "$sha" --draft \
+              --title "Lognara Host Agent $tag" --notes-file notes.md
+          fi
+          gh release upload "$tag" --repo "$REPO" --clobber \
+            release-assets/lognara-hwagent-linux-amd64.tar.gz \
+            release-assets/lognara-hwagent-linux-arm64.tar.gz \
+            release-assets/SHA256SUMS
+          gh release edit "$tag" --repo "$REPO" --notes-file notes.md --draft=false --latest=false

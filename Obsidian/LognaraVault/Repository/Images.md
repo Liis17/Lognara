@@ -43,6 +43,12 @@ Job `publish-images` в `.github/workflows/ci.yml` при push в `master` по�
 
 Описание начинается коммитами agent/spool после предыдущего опубликованного релиза агента в истории текущего коммита; первый выпуск включает всю историю этих путей. Затем идут SHA и ссылки на архивы. В конце подставляется `Lognara-agent/docs/release-nginx.md`: Dockerfile скачивает архив по закреплённому тегу через TARGETARCH, проверяет сумму и копирует бинарник в nginx; Compose задаёт init, 30 секунд остановки, volume spool и runtime-параметры. Агент оборачивает штатный `/docker-entrypoint.sh` и собирает stdout/stderr. Relay должен быть доступен из сети nginx, персональный токен выдаётся в dock.
 
+## Архивы хост-агента
+
+Job `publish` в `.github/workflows/build-hwagent.yml` работает только для `master` (push или ручной запуск) после сборки обеих архитектур. Push запускает его при изменениях hwagent, agent, relay, spool и самого workflow: эти crates входят в бинарник.
+
+Тег `hwagent-YYYYMMDD-HHMMSS-<12 символов SHA>` по UTC-времени коммита; префикс не совпадает с шаблоном `release_agent.py`, поэтому changelog и latest агента выпуски hwagent не учитывают. Файлы: `lognara-hwagent-linux-amd64.tar.gz`, `lognara-hwagent-linux-arm64.tar.gz`, `SHA256SUMS`; в архиве `lognara-hwagent`, `LICENSE`, `README.md`, `examples/` и `packaging/`. Как у агента, сначала создаётся draft, затем загружаются файлы и релиз публикуется; опубликованный релиз при повторе не меняется. Релиз публикуется с `--latest=false`, чтобы отметка Latest оставалась у агента. Описание короткое: SHA и ссылки на архивы, без списка коммитов.
+
 ## Связи
 
 - [[Repository/CI]] — проверки, предшествующие публикации.
