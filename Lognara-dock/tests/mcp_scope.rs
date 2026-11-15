@@ -339,6 +339,7 @@ async fn node_scope_reaches_every_core_query_and_user_filters_cannot_override_it
         json!({"operation": "group", "from": RANGE, "to": RANGE_END, "group_by": ["service"]}),
     )
     .await;
+    assert!(!is_error(&summary), "{summary}");
     assert_eq!(
         core.last("/v1/stats/group-by").body["filters"]["relay_id"],
         json!(["1"])

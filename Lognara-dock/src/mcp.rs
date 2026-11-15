@@ -24,10 +24,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use hmac::{Hmac, Mac};
 use rmcp::{
     ErrorData, RoleServer, ServerHandler,
-    handler::server::{
-        router::tool::{ToolCallContext, ToolRouter},
-        wrapper::Parameters,
-    },
+    handler::server::{router::tool::ToolRouter, tool::ToolCallContext, wrapper::Parameters},
     model::{
         CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
         ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,

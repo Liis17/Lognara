@@ -1292,6 +1292,7 @@ mod tests {
                 .authenticate_mcp_token(access_hash, "https://dock.example.com/mcp".into())
                 .await
                 .unwrap()
+                .map(|access| access.username)
                 .as_deref(),
             Some("alice")
         );
