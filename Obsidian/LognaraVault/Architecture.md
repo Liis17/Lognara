@@ -19,6 +19,7 @@ Parent: [[Index]]
 | Компонент | Каталог | Состояние |
 |-----------|---------|-----------|
 | [[Agent/LognaraAgent]] | `Lognara-agent/` | HTTP, файлы и stdout/stderr через `run --`, атомарная дисковая очередь и отправка в relay; [[Agent/LogSources]]. |
+| [[Host/LognaraHwAgent]] | `Lognara-hwagent/` | Агент Linux-хоста под systemd: метрики, процессы, journald и файлы; встраивает очередь агента и нормализацию relay и отправляет прямо в core. |
 | [[Relay/LognaraRelay]] | `Lognara-relay/` | Реализованы приём пачек агентов, разбор в события, группировка по источнику, отправка в core и spool на диске. Структура в [[Relay/LognaraRelay-ProjectMap]]. |
 | [[Core/LognaraCore]] | `Lognara-core/` | Реализованы реестр подключений access.sqlite3 и admin API, авторизация relay, HTTP-приём, WAL, Arrow/Parquet, поиск Tantivy, аналитика DataFusion, retained-source API, retention, метрики и build version metadata, паттерны, проблемы и heartbeat. Структура в [[Core/LognaraCore-ProjectMap]]. |
 | [[Dock/LognaraDock]] | `Lognara-dock/` | Реализованы вход по htpasswd/passkey, сессии в SQLite, браузерное управление PAT/OAuth, opt-in Streamable HTTP MCP с правами и скоупом relay/агента для каждого токена и инструментами алертов метрик, исторический поиск/cursor/Trace, SSE, аналитика и метрики. MCP отделён от cookie API и использует Core query API. Структура в [[Dock/LognaraDock-ProjectMap]]. |
@@ -33,6 +34,7 @@ Parent: [[Index]]
 | Путь | Роль |
 |------|------|
 | `Lognara-agent/src/main.rs` | Точка входа агента. Параметры `LOGNARA_*`, JSON `LOGNARA_SOURCES_FILE`; обычный режим или `run -- программа аргументы`. |
+| `Lognara-hwagent/src/main.rs` | Точка входа хост-агента под systemd: `LOGNARA_CORE_URL`, `LOGNARA_HOST_TOKEN`, JSON `LOGNARA_HWAGENT_CONFIG`; unit и примеры в `Lognara-hwagent/packaging/` и `examples/`. |
 | `Lognara-relay/src/main.rs` | Точка входа relay. Параметры задаются переменными `LOGNARA_*`, spool хранится в `LOGNARA_SPOOL_DIR`. |
 | `Lognara-core/src/main.rs` | Точка входа core; отдельный crate, конфигурация `LOGNARA_*`. |
 | `Example/compose.yaml` | Запуск app, relay, core и dock на одной машине; dock-init создаёт тестовый вход, на хост публикуются localhost:8881, localhost:7402 и localhost:7403. |
@@ -67,6 +69,14 @@ Parent: [[Index]]
 Удалённый MCP — отдельный Streamable HTTP маршрут Dock `/mcp`, включаемый только `LOGNARA_DOCK_MCP_ENABLED=true`. Он принимает PAT или OAuth Bearer; browser cookie не авторизует MCP. OAuth Code + PKCE S256 ограничен ChatGPT CIMD; права и скоуп выбираются на согласии, grants/PAT хешируются в SQLite Dock. Инструменты используют query API core (включая `POST /v1/logs/sources`) и сервис алертов Dock; каждый вызов несёт скоуп токена. Core остаётся частной сетью.
 
 Скоуп узла — сквозной поток agent → relay → core → dock: relay ставит в группу пачки SHA-256 токена авторизованного агента ([[Relay/LognaraRelay]]), core проверяет, что хеш принадлежит этому relay, и при материализации сохраняет `relay_id`/`agent_id` в событиях, индексе и точках метрик; все query API фильтруют по ним ([[Core/LognaraCore]], [[Design/Metrics]]). Данные до раскатки и от старого relay узла не имеют и видны только без скоупа. Порядок раскатки: core, затем relay, затем dock. Новый dock со старым core небезопасен: старый `GET /v1/series?group_by=server` молча игнорирует `relay_id`/`agent_id`, и `list_metrics` скоупленного токена отдал бы имена метрик всех узлов (остальные запросы старый core отклоняет). Откат необратим: старый dock не читает колонки прав и превратит скоупленные PAT в полные read-токены (перед откатом их нужно отозвать), старый core не откроет `access.sqlite3` версии 2.
+
+## Хост-агент
+
+Сборщики хоста → durable очередь агента → нормализация relay в процессе → `POST /v1/batches` core с токеном хоста. В core хост - relay вида `host` со встроенным агентом того же токена, поэтому события, точки метрик и heartbeat получают `relay_id`/`agent_id` без изменений приёма; relay не нужен. Метрики хоста идут встроенным форматом `ServiceMetrics`. Подробности: [[Host/LognaraHwAgent]], раздел «Хосты» [[Core/LognaraCore]].
+
+## Алерты на логи
+
+Dock `alerts::watch` раз в минуту одним запросом `POST /v1/logs/alerts/query` получает новые совпадения правил с прошлого watermark (по `sequence`, а не времени события), фиксирует watermark и события в своей SQLite и отправляет их через общий с алертами метрик outbox в Telegram. Раскатка: core, затем dock. Подробности: [[Core/LognaraCore]], [[Dock/LognaraDock]].
 
 ## Мониторинг цепочки
 

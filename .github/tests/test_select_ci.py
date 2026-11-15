@@ -21,7 +21,9 @@ class SelectTests(unittest.TestCase):
         })
 
     def test_spool_dependents_do_not_select_dock(self):
-        result = select(["Lognara-spool", "Lognara-agent", "Lognara-relay", "Lognara-core"])
+        result = select([
+            "Lognara-spool", "Lognara-agent", "Lognara-relay", "Lognara-hwagent", "Lognara-core",
+        ])
         self.assertEqual(result["rust"], CRATES[:-1])
         self.assertEqual(result["images"], ["core", "relay"])
         self.assertFalse(result["web"])

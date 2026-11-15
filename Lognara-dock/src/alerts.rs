@@ -32,7 +32,7 @@ const MAX_TRIGGERS: usize = 20;
 const ALERT_SEND_PASS_LIMIT: usize = 10;
 const ALERT_SEND_PASS_BUDGET: Duration = Duration::from_secs(30);
 const NO_DATA_LOSS_MS: i64 = 5 * 60 * 1000;
-const OUTBOX_TTL_MS: i64 = 24 * 60 * 60 * 1000;
+pub(crate) const OUTBOX_TTL_MS: i64 = 24 * 60 * 60 * 1000;
 const OUTBOX_RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 const TELEGRAM_API: &str = "https://api.telegram.org/";
 
@@ -98,6 +98,8 @@ pub struct Group {
     pub name: String,
     pub recipient_ids: Vec<String>,
     pub alerts: Vec<MetricKey>,
+    /// Имена алертов на логи с этой группой.
+    pub log_alerts: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -180,7 +182,7 @@ enum AlertStoreError {
     #[error("alert record not found")]
     NotFound,
     #[error("recipient group is still used by alerts")]
-    GroupInUse(Vec<MetricKey>),
+    GroupInUse(Vec<MetricKey>, Vec<String>),
     #[error("group recipients must match its type")]
     GroupKindMismatch,
     #[error("recipient type is used by a group")]
@@ -462,6 +464,11 @@ impl Store {
                         "UPDATE metric_alerts SET enabled_at=?1 WHERE enabled=1",
                         [now_ms()],
                     )?;
+                    // Лог-алерты начинают с текущего watermark: события паузы не рассылаются.
+                    tx.execute(
+                        "UPDATE log_alert_states SET after_sequence=NULL,suppressed=0",
+                        [],
+                    )?;
                 }
                 if !enabled {
                     tx.execute(
@@ -525,7 +532,8 @@ impl Store {
                             })
                         })?
                         .collect::<Result<Vec<_>, _>>()?;
-                    groups.push(Group { id, kind, name, recipient_ids, alerts });
+                    let log_alerts = group_log_alerts(conn, &id)?;
+                    groups.push(Group { id, kind, name, recipient_ids, alerts, log_alerts });
                 }
             }
             let alerts = read_alerts(conn)?;
@@ -994,8 +1002,9 @@ impl Store {
                         }))?
                         .collect::<Result<Vec<_>, _>>()?
                 };
+                let log_alerts = group_log_alerts(&tx, &id)?;
                 tx.commit()?;
-                Ok(Group { id, kind: input.kind, name: input.name, recipient_ids: input.recipient_ids, alerts })
+                Ok(Group { id, kind: input.kind, name: input.name, recipient_ids: input.recipient_ids, alerts, log_alerts })
             }
         })
         .await
@@ -1026,9 +1035,10 @@ impl Store {
                     })?
                     .collect::<Result<Vec<_>, _>>()?
             };
-            if !alerts.is_empty() {
+            let log_alerts = group_log_alerts(&tx, &id)?;
+            if !alerts.is_empty() || !log_alerts.is_empty() {
                 tx.commit()?;
-                return Ok(Err(alerts));
+                return Ok(Err((alerts, log_alerts)));
             }
             let changed = tx.execute("DELETE FROM metric_alert_groups WHERE id=?1", [&id])?;
             if changed == 0 {
@@ -1047,8 +1057,17 @@ impl Store {
             StoreError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => AlertStoreError::NotFound,
             error => AlertStoreError::Store(error),
         })?
-        .map_err(AlertStoreError::GroupInUse)
+        .map_err(|(alerts, log_alerts)| AlertStoreError::GroupInUse(alerts, log_alerts))
     }
+}
+
+/// Имена алертов на логи, использующих группу.
+pub(crate) fn group_log_alerts(conn: &Connection, group_id: &str) -> rusqlite::Result<Vec<String>> {
+    let mut statement = conn.prepare(
+        "SELECT a.name FROM log_alert_groups_used u JOIN log_alerts a ON a.id=u.alert_id
+         WHERE u.group_id=?1 ORDER BY a.name,a.id",
+    )?;
+    statement.query_map([group_id], |row| row.get(0))?.collect()
 }
 
 fn id_is_group(conn: &Connection, id: &str) -> rusqlite::Result<bool> {
@@ -1078,7 +1097,7 @@ fn cancel_alert_pending(conn: &Connection, alert_id: &str, now: i64) -> rusqlite
     finish_outbox(conn, now)
 }
 
-fn finish_outbox(conn: &Connection, now: i64) -> rusqlite::Result<()> {
+pub(crate) fn finish_outbox(conn: &Connection, now: i64) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE metric_alert_outbox SET finished_at=?1 WHERE finished_at IS NULL
          AND NOT EXISTS(SELECT 1 FROM metric_alert_deliveries d
@@ -1133,7 +1152,7 @@ impl From<AlertStoreError> for AlertToolError {
                 tracing::error!(%error, "metric alert storage failed");
                 Self::Unavailable
             }
-            AlertStoreError::GroupInUse(_)
+            AlertStoreError::GroupInUse(..)
             | AlertStoreError::GroupKindMismatch
             | AlertStoreError::RecipientKindInUse => Self::Conflict("alert_conflict"),
         }
@@ -1255,7 +1274,9 @@ impl From<AlertStoreError> for ApiError {
             AlertStoreError::Invalid(message) => ApiError::Invalid(message.to_owned()),
             AlertStoreError::Conflict(code) => ApiError::Conflict(code),
             AlertStoreError::NotFound => ApiError::NotFound,
-            AlertStoreError::GroupInUse(alerts) => ApiError::GroupInUse(alerts),
+            AlertStoreError::GroupInUse(alerts, log_alerts) => {
+                ApiError::GroupInUse(alerts, log_alerts)
+            }
             AlertStoreError::GroupKindMismatch => {
                 ApiError::Invalid("group members must have the same type".into())
             }
@@ -1431,9 +1452,9 @@ pub async fn delete_group(
 ) -> Response {
     match app.store.delete_group(id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(AlertStoreError::GroupInUse(alerts)) => (
+        Err(AlertStoreError::GroupInUse(alerts, log_alerts)) => (
             StatusCode::CONFLICT,
-            Json(json!({"error":"group_in_use","alerts":alerts})),
+            Json(json!({"error":"group_in_use","alerts":alerts,"log_alerts":log_alerts})),
         )
             .into_response(),
         Err(error) => ApiError::from(error).into_response(),
@@ -1674,6 +1695,8 @@ async fn run_alert_pass(
             }
         }
     }
+    // Отдельный статус Core: старый Core без запроса логов не останавливает алерты метрик.
+    crate::log_alerts::run_log_pass(app, global.revision).await;
     send_pending(app).await;
 }
 
@@ -1945,14 +1968,16 @@ impl Store {
                  JOIN metric_alert_outbox o ON o.id=d.event_id
                  JOIN metric_alert_global g ON g.singleton=1
                  WHERE d.status='pending' AND d.next_attempt_at<=?1 AND o.expires_at>?1
-                   AND (o.alert_id IS NULL OR EXISTS(
+                   AND ((o.alert_id IS NULL AND o.log_alert_id IS NULL) OR EXISTS(
                        SELECT 1 FROM metric_alerts a WHERE a.id=o.alert_id AND a.enabled=1
-                         AND a.revision=o.alert_revision))
+                         AND a.revision=o.alert_revision) OR EXISTS(
+                       SELECT 1 FROM log_alerts l WHERE l.id=o.log_alert_id AND l.enabled=1
+                         AND l.revision=o.alert_revision))
                    AND NOT EXISTS(
                      SELECT 1 FROM metric_alert_deliveries earlier
                      JOIN metric_alert_outbox eo ON eo.id=earlier.event_id
                      WHERE earlier.recipient_id=d.recipient_id
-                       AND COALESCE(eo.alert_id,'')=COALESCE(o.alert_id,'')
+                       AND COALESCE(eo.alert_id,eo.log_alert_id,'')=COALESCE(o.alert_id,o.log_alert_id,'')
                        AND earlier.status IN ('pending','sending')
                        AND (eo.created_at<o.created_at OR (eo.created_at=o.created_at AND eo.id<o.id)))
                  ORDER BY o.created_at,o.id,d.recipient_id LIMIT 1",
@@ -2065,7 +2090,7 @@ impl Store {
     }
 }
 
-async fn send_pending(app: &AppState) {
+pub(crate) async fn send_pending(app: &AppState) {
     send_pending_bounded(app, ALERT_SEND_PASS_LIMIT, ALERT_SEND_PASS_BUDGET).await;
 }
 
@@ -2149,7 +2174,7 @@ fn insert_core_event(
     now: i64,
 ) -> rusqlite::Result<()> {
     let previous: Option<i64> = tx.query_row(
-        "SELECT max(created_at) FROM metric_alert_outbox WHERE alert_id IS NULL",
+        "SELECT max(created_at) FROM metric_alert_outbox WHERE alert_id IS NULL AND log_alert_id IS NULL",
         [],
         |row| row.get(0),
     )?;
@@ -2170,7 +2195,13 @@ fn current_enabled_recipients(
          JOIN metric_alert_groups_used g ON g.alert_id=a.id
          JOIN metric_alert_group_recipients gr ON gr.group_id=g.group_id
          JOIN metric_alert_recipients r ON r.id=gr.recipient_id
-         WHERE a.enabled=1 ORDER BY r.id",
+         WHERE a.enabled=1
+         UNION
+         SELECT r.id,r.name,r.chat_id FROM log_alerts a
+         JOIN log_alert_groups_used g ON g.alert_id=a.id
+         JOIN metric_alert_group_recipients gr ON gr.group_id=g.group_id
+         JOIN metric_alert_recipients r ON r.id=gr.recipient_id
+         WHERE a.enabled=1 ORDER BY 1",
     )?;
     statement
         .query_map([], |row| {
@@ -2204,7 +2235,7 @@ fn snapshot_event_recipients(
         .collect()
 }
 
-fn insert_deliveries(
+pub(crate) fn insert_deliveries(
     tx: &rusqlite::Transaction<'_>,
     event_id: &str,
     recipients: &[(String, String, i64)],
@@ -2220,7 +2251,7 @@ fn insert_deliveries(
     Ok(())
 }
 
-fn finish_single_outbox(
+pub(crate) fn finish_single_outbox(
     tx: &rusqlite::Transaction<'_>,
     event_id: &str,
     now: i64,
@@ -2233,7 +2264,7 @@ fn finish_single_outbox(
     Ok(())
 }
 
-fn parse_timestamp_ms(value: &str) -> Option<i64> {
+pub(crate) fn parse_timestamp_ms(value: &str) -> Option<i64> {
     OffsetDateTime::parse(value, &Rfc3339)
         .ok()
         .map(|time| (time.unix_timestamp_nanos() / 1_000_000) as i64)
@@ -2372,13 +2403,13 @@ fn metric_link(public_url: &Url, alert: &AlertDefinition) -> String {
     url.to_string()
 }
 
-fn settings_link(public_url: &Url) -> String {
+pub(crate) fn settings_link(public_url: &Url) -> String {
     public_url
         .join("settings#alerts")
         .map_or_else(|_| "/settings#alerts".into(), |url| url.to_string())
 }
 
-fn append_message_link(mut body: String, link: String) -> String {
+pub(crate) fn append_message_link(mut body: String, link: String) -> String {
     let suffix = format!("\nОткрыть: {link}");
     let budget = 4096usize.saturating_sub(suffix.chars().count());
     if body.chars().count() > budget {
@@ -2971,7 +3002,7 @@ mod tests {
         );
         assert!(matches!(
             store.delete_group(alert.group_ids[0].clone()).await,
-            Err(AlertStoreError::GroupInUse(_))
+            Err(AlertStoreError::GroupInUse(..))
         ));
 
         let kind_change = store
@@ -4253,5 +4284,123 @@ mod tests {
             assert_eq!(body["error"], expected_code);
         }
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn log_alerts_share_delivery_and_respect_baseline_disable_and_groups() {
+        use crate::core_client::{LogAlertReply, LogAlertResult};
+        use crate::log_alerts::{LogAlertInput, LogAlertText};
+
+        let directory = tempfile::tempdir().unwrap();
+        let (store, metric_alert, _) = configured_store(directory.path(), "normal", 1).await;
+        let group = metric_alert.group_ids[0].clone();
+        let input = LogAlertInput {
+            name: "sudo".into(),
+            enabled: true,
+            query: "service:host sudo".into(),
+            filters: BTreeMap::from([("service".into(), vec!["host".into()])]),
+            text: Some(LogAlertText {
+                query: "sudo".into(),
+                mode: "all".into(),
+            }),
+            threshold: 2,
+            cooldown_seconds: 0,
+            group_ids: vec![group.clone()],
+        };
+        let mut invalid = input.clone();
+        invalid.filters = BTreeMap::from([("message".into(), vec!["x".into()])]);
+        assert!(store.save_log_alert(None, invalid).await.is_err());
+        let mut no_words = input.clone();
+        no_words.text = Some(LogAlertText {
+            query: "!!!".into(),
+            mode: "all".into(),
+        });
+        assert!(store.save_log_alert(None, no_words).await.is_err());
+
+        let id = store.save_log_alert(None, input.clone()).await.unwrap();
+        let alerts = store.log_alerts().await.unwrap();
+        assert!(!alerts[0].no_recipients);
+        let revision = store.alert_global().await.unwrap().revision;
+        let url = Url::parse("https://dock.example/").unwrap();
+        let reply = |watermark: u64, count: u64| LogAlertReply {
+            as_of: "2026-01-01T00:00:00Z".into(),
+            watermark,
+            results: vec![LogAlertResult {
+                id: id.clone(),
+                count,
+                samples: vec![json!({"timestamp":"2026-01-01T00:00:00Z","server":"mail",
+                    "service":"host","level":"info","message":"sudo: eve COMMAND=/tmp/xmrig"})],
+            }],
+        };
+
+        // Первая проверка только запоминает watermark.
+        store
+            .commit_log_evaluation(revision, alerts.clone(), reply(10, 5), url.clone())
+            .await
+            .unwrap();
+        assert!(store.next_alert_delivery().await.unwrap().is_none());
+        // Ниже порога событий нет.
+        store
+            .commit_log_evaluation(revision, alerts.clone(), reply(11, 1), url.clone())
+            .await
+            .unwrap();
+        assert!(store.next_alert_delivery().await.unwrap().is_none());
+        store
+            .commit_log_evaluation(revision, alerts.clone(), reply(13, 2), url.clone())
+            .await
+            .unwrap();
+        let delivery = store.next_alert_delivery().await.unwrap().unwrap();
+        assert!(delivery.message.contains("Алерт на логи: sudo"));
+        assert!(delivery.message.contains("Новых совпадений: 2"));
+        assert!(delivery.message.contains("sudo: eve COMMAND=/tmp/xmrig"));
+        assert!(
+            delivery
+                .message
+                .contains("https://dock.example/logs?q=service%3Ahost+sudo")
+        );
+
+        // Выключенное правило не доставляет уже поставленные события.
+        store
+            .finish_alert_delivery(delivery, Err(TelegramFailure::Transient))
+            .await
+            .unwrap();
+        store
+            .call(|conn| {
+                conn.execute("UPDATE metric_alert_deliveries SET next_attempt_at=0", [])?;
+                conn.execute("UPDATE log_alerts SET enabled=0", [])
+            })
+            .await
+            .unwrap();
+        assert!(store.next_alert_delivery().await.unwrap().is_none());
+        store
+            .call(|conn| conn.execute("UPDATE log_alerts SET enabled=1", []))
+            .await
+            .unwrap();
+        assert!(store.next_alert_delivery().await.unwrap().is_some());
+
+        // Результат запроса к старой версии правила не применяется.
+        store.save_log_alert(Some(id.clone()), input).await.unwrap();
+        store
+            .commit_log_evaluation(revision, alerts.clone(), reply(20, 9), url.clone())
+            .await
+            .unwrap();
+        let state: Option<i64> = store
+            .call(|conn| {
+                conn.query_row("SELECT after_sequence FROM log_alert_states", [], |row| {
+                    row.get(0)
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(state, None);
+
+        match store.delete_group(group).await {
+            Err(AlertStoreError::GroupInUse(_, log_alerts)) => assert_eq!(log_alerts, ["sudo"]),
+            other => panic!("unexpected {other:?}"),
+        }
+        let settings = store.alert_settings().await.unwrap();
+        assert_eq!(settings.groups[0].log_alerts, ["sudo"]);
+        assert!(store.delete_log_alert(id).await.unwrap());
+        assert!(store.log_alerts().await.unwrap().is_empty());
     }
 }

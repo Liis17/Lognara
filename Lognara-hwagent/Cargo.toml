@@ -1,0 +1,27 @@
+[package]
+name = "lognara-hwagent"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Собирает метрики, процессы и логи Linux-хоста и отправляет их прямо в lognara-core"
+publish = false
+
+[dependencies]
+lognara-agent = { path = "../Lognara-agent" }
+lognara-relay = { path = "../Lognara-relay" }
+libc = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+rmp-serde = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync", "process", "io-util", "fs"] }
+tokio-util = "0.7"
+tracing = "0.1"
+time = { version = "0.3", features = ["formatting"] }
+tracing-subscriber = "0.3"
+zstd = "0.13"
+
+[dev-dependencies]
+axum = "0.8"
+tempfile = "3"

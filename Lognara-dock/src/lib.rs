@@ -12,6 +12,7 @@ pub mod htpasswd;
 pub mod infra;
 pub mod issues;
 pub mod live;
+pub mod log_alerts;
 pub mod mcp;
 pub mod mcp_access;
 pub mod oauth;

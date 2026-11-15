@@ -10,6 +10,7 @@ const Infrastructure = lazy(() => import("./pages/Infrastructure"));
 const InfrastructureTree = lazy(() => import("./pages/InfrastructureTree"));
 const Login = lazy(() => import("./pages/Login"));
 const Logs = lazy(() => import("./pages/Logs"));
+const LogAlerts = lazy(() => import("./pages/LogAlerts"));
 const Metrics = lazy(() => import("./pages/Metrics"));
 const MetricDetail = lazy(() => import("./pages/MetricDetail"));
 const McpAccess = lazy(() => import("./pages/McpAccess"));
@@ -91,6 +92,7 @@ export default function App() {
         <nav aria-label="Разделы">
           <NavLink to="/logs">Логи</NavLink>
           <NavLink to="/errors">Ошибки</NavLink>
+          <NavLink to="/log-alerts">Алерты логов</NavLink>
           <NavLink to="/analytics">Аналитика</NavLink>
           <NavLink to="/infrastructure">Инфраструктура</NavLink>
           <NavLink to="/metrics">Метрики</NavLink>
@@ -118,6 +120,7 @@ export default function App() {
             <Routes>
               <Route path="/logs" element={<Logs onUnauthorized={() => setMe(null)} />} />
               <Route path="/errors" element={<Errors onUnauthorized={() => setMe(null)} />} />
+              <Route path="/log-alerts" element={<LogAlerts onUnauthorized={() => setMe(null)} />} />
               <Route path="/analytics" element={<Analytics onUnauthorized={() => setMe(null)} />} />
               <Route path="/infrastructure" element={<Infrastructure onUnauthorized={() => setMe(null)} />} />
               <Route path="/infrastructure/tree" element={<InfrastructureTree onUnauthorized={() => setMe(null)} />} />

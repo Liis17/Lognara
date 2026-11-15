@@ -14,9 +14,39 @@ use crate::config::{Config, INDEX_BYTES, INDEX_ENTRIES};
 use crate::heartbeat::Telemetry;
 use crate::wire::{self, Batch, Record};
 
+/// Превращает несжатую MessagePack-пачку агента в тело HTTP-отправки.
+///
+/// Вызывается в blocking-работнике под резервом подготовки: `model_bytes` - память,
+/// доступная кодировщику сверх входной пачки. `Error::TooLarge` для пачки из нескольких
+/// частей уменьшает её; пачку из одной части кодировщик обязан закодировать.
+pub trait BodyEncoder: Send + Sync {
+    fn encode(&self, packed: Vec<u8>, model_bytes: usize) -> Result<Vec<u8>, Error>;
+    /// Максимум готового тела, включая сохранённое в `pending/`.
+    fn body_limit(&self) -> usize;
+}
+
+/// Прежний формат relay: MessagePack агента, сжатый zstd.
+struct Zstd {
+    limit: usize,
+}
+
+impl BodyEncoder for Zstd {
+    fn encode(&self, packed: Vec<u8>, _model_bytes: usize) -> Result<Vec<u8>, Error> {
+        let mut encoder = zstd::stream::write::Encoder::new(Limited::new(self.limit), 3)?;
+        encoder.window_log(23)?;
+        encoder.write_all(&packed)?;
+        drop(packed);
+        Ok(encoder.finish()?.bytes)
+    }
+    fn body_limit(&self) -> usize {
+        self.limit
+    }
+}
+
 pub struct Buffer {
     queue: Mutex<Queue>,
     config: Config,
+    encoder: Arc<dyn BodyEncoder>,
     template: Batch,
     events: AtomicU64,
     bytes: AtomicU64,
@@ -45,6 +75,16 @@ pub(crate) struct SourceAdmission {
 
 impl Buffer {
     pub async fn open(config: Config) -> Result<Arc<Self>, Error> {
+        let encoder = Arc::new(Zstd {
+            limit: config.max_batch_bytes,
+        });
+        Self::open_with(config, encoder).await
+    }
+
+    pub async fn open_with(
+        config: Config,
+        encoder: Arc<dyn BodyEncoder>,
+    ) -> Result<Arc<Self>, Error> {
         let init = config.clone();
         let queue = tokio::task::spawn_blocking(move || {
             Queue::open_limited(
@@ -85,6 +125,7 @@ impl Buffer {
             _metadata: metadata,
             source_memory,
             config,
+            encoder,
             events: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
             available: AtomicBool::new(false),
@@ -262,7 +303,8 @@ impl Buffer {
         permit: OwnedSemaphorePermit,
     ) -> Result<Option<Pending>, Error> {
         let queue = self.queue.lock().unwrap();
-        if let Some(PendingBatch { body, entries }) = queue.pending(self.config.max_batch_bytes)? {
+        let body_limit = self.encoder.body_limit();
+        if let Some(PendingBatch { body, entries }) = queue.pending(body_limit)? {
             if !entries.is_empty() {
                 return Ok(Some(Pending {
                     body: body.into(),
@@ -279,6 +321,33 @@ impl Buffer {
         {
             return Ok(None);
         }
+        let mut max_entries = usize::MAX;
+        loop {
+            let (batch, entries) = self.select(&queue, max_entries)?;
+            let mut batch = batch;
+            batch.sent_at = wire::unix_nanos();
+            let packed = pack(&batch, self.config.max_batch_bytes)?;
+            drop(batch);
+            let body = match self.encoder.encode(packed, self.model_limit()) {
+                Ok(body) if body.len() <= body_limit => body,
+                Ok(_) | Err(Error::TooLarge) if entries.len() > 1 => {
+                    max_entries = entries.len() / 2;
+                    continue;
+                }
+                Ok(_) => return Err(Error::TooLarge),
+                Err(error) => return Err(error),
+            };
+            queue.save_pending(&entries, &body, body_limit)?;
+            return Ok(Some(Pending {
+                body: body.into(),
+                entries,
+                _models: permit,
+            }));
+        }
+    }
+
+    /// Старейшие последовательные части одного источника в пределах лимитов пачки.
+    fn select(&self, queue: &Queue, max_entries: usize) -> Result<(Batch, Vec<Entry>), Error> {
         let mut batch: Option<Batch> = None;
         let mut entries = Vec::new();
         let mut raw_size = 0usize;
@@ -286,7 +355,8 @@ impl Buffer {
         for entry in queue.entries() {
             if let Some(batch) = &batch
                 && (batch.records.len() as u64 + entry.events > self.config.batch_size as u64
-                    || raw_size + entry.size as usize > self.raw_limit())
+                    || raw_size + entry.size as usize > self.raw_limit()
+                    || entries.len() >= max_entries)
             {
                 break;
             }
@@ -321,22 +391,8 @@ impl Buffer {
                 break;
             }
         }
-        let mut batch = batch.ok_or_else(|| io::Error::other("empty spool batch"))?;
-        batch.sent_at = wire::unix_nanos();
-        let packed = pack(&batch, self.config.max_batch_bytes)?;
-        drop(batch);
-        let mut encoder =
-            zstd::stream::write::Encoder::new(Limited::new(self.config.max_batch_bytes), 3)?;
-        encoder.window_log(23)?;
-        encoder.write_all(&packed)?;
-        drop(packed);
-        let body = encoder.finish()?.bytes;
-        queue.save_pending(&entries, &body, self.config.max_batch_bytes)?;
-        Ok(Some(Pending {
-            body: body.into(),
-            entries,
-            _models: permit,
-        }))
+        let batch = batch.ok_or_else(|| io::Error::other("empty spool batch"))?;
+        Ok((batch, entries))
     }
 
     pub fn ack(&self, pending: Pending) -> Result<(), Error> {
@@ -559,6 +615,53 @@ mod tests {
         assert_eq!(decode(&p).records.len(), 3);
         b.ack_async(p).await.unwrap();
         assert_eq!(b.len(), 1);
+    }
+
+    /// Принимает пачку не больше чем из `max` записей; тело - несжатая пачка.
+    struct Capped {
+        max: usize,
+    }
+    impl BodyEncoder for Capped {
+        fn encode(&self, packed: Vec<u8>, model_bytes: usize) -> Result<Vec<u8>, Error> {
+            assert!(model_bytes > 0);
+            let batch: Batch = rmp_serde::from_slice(&packed).unwrap();
+            if batch.records.len() > self.max {
+                return Err(Error::TooLarge);
+            }
+            Ok(packed)
+        }
+        fn body_limit(&self) -> usize {
+            16 << 20
+        }
+    }
+
+    #[tokio::test]
+    async fn custom_encoder_shrinks_batch_and_replays_its_exact_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = config(dir.path());
+        c.batch_size = 10;
+        let encoder = Arc::new(Capped { max: 2 });
+        let b = Buffer::open_with(c.clone(), encoder.clone()).await.unwrap();
+        for _ in 0..4 {
+            b.push(records(1)).unwrap();
+        }
+        let p = prepare(&b, true).await.unwrap();
+        let first: Batch = rmp_serde::from_slice(&p.body).unwrap();
+        assert_eq!(first.records.len(), 2);
+        let bytes = p.body.clone();
+        drop(p);
+        drop(b);
+        let b = Buffer::open_with(c, encoder).await.unwrap();
+        let p = prepare(&b, true).await.unwrap();
+        assert_eq!(p.body, bytes);
+        b.ack_async(p).await.unwrap();
+        assert_eq!(b.len(), 2);
+        b.ack_async(prepare(&b, true).await.unwrap()).await.unwrap();
+        assert_eq!(b.len(), 0);
+        // Одна часть не уменьшается: ошибка кодировщика не теряет данные.
+        b.push(records(3)).unwrap();
+        assert!(matches!(b.prepare_async(true).await, Err(Error::TooLarge)));
+        assert_eq!(b.len(), 3);
     }
 
     #[tokio::test]

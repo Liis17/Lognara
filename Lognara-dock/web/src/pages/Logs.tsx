@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "react-router";
+import { Link, useSearchParams } from "react-router";
 import { api, ApiError, errorText } from "../api";
 import EventsChart from "../components/EventsChart";
 import Patterns from "../components/Patterns";
@@ -399,6 +399,9 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
           onClick={() => setLiveEnabled((current) => !current)}>Live {liveEnabled ? "вкл" : "выкл"}</button>
         <button type="button" className="button" aria-expanded={exportsOpen} disabled={!rows.length}
           onClick={() => setExportsOpen((current) => !current)}>Экспорт</button>
+        {location.view === "events" && location.q.trim() && !parsed.error && (
+          <Link className="button" to={`/log-alerts?${new URLSearchParams({ q: location.q })}`}>Создать алерт</Link>
+        )}
       </>}
     </div>
     {exportsOpen && location.view !== "patterns" && <div className="export-menu panel"><span>Только загруженные строки: {rows.length}.</span>

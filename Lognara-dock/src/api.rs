@@ -26,6 +26,7 @@ use crate::htpasswd::Htpasswd;
 use crate::infra;
 use crate::issues;
 use crate::live::{self, Live};
+use crate::log_alerts;
 use crate::mcp_access;
 use crate::passkey::{self, Challenges};
 use crate::patterns;
@@ -95,7 +96,7 @@ pub enum ApiError {
     NotFound,
     RelayNotFound,
     Conflict(&'static str),
-    GroupInUse(Vec<crate::series::MetricKey>),
+    GroupInUse(Vec<crate::series::MetricKey>, Vec<String>),
     TooManyRequests(Duration),
     Internal,
     /// Core недоступен или ответил неожиданно.
@@ -130,6 +131,7 @@ impl From<CoreError> for ApiError {
                 (404, "not_found") => Self::NotFound,
                 (409, "name_taken") => Self::Conflict("name_taken"),
                 (409, "relay_has_agents") => Self::Conflict("relay_has_agents"),
+                (409, "host_node") => Self::Conflict("host_node"),
                 _ => {
                     tracing::warn!("core admin request failed: {status} {code:?}");
                     Self::CoreUnavailable
@@ -185,10 +187,10 @@ impl IntoResponse for ApiError {
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             Self::RelayNotFound => (StatusCode::NOT_FOUND, "relay_not_found"),
             Self::Conflict(code) => (StatusCode::CONFLICT, code),
-            Self::GroupInUse(alerts) => {
+            Self::GroupInUse(alerts, log_alerts) => {
                 return (
                     StatusCode::CONFLICT,
-                    Json(json!({ "error": "group_in_use", "alerts": alerts })),
+                    Json(json!({ "error": "group_in_use", "alerts": alerts, "log_alerts": log_alerts })),
                 )
                     .into_response();
             }
@@ -305,6 +307,17 @@ pub fn router(app: AppState) -> Router {
             "/alerts/groups/{id}",
             put(alerts::update_group).delete(alerts::delete_group),
         )
+        .route(
+            "/log-alerts",
+            get(log_alerts::list).post(log_alerts::create),
+        )
+        .route(
+            "/log-alerts/{id}",
+            put(log_alerts::update).delete(log_alerts::delete),
+        )
+        .route("/hosts", post(access::create_host))
+        .route("/hosts/{id}", delete(access::delete_host))
+        .route("/hosts/{id}/rotate-token", post(access::rotate_host_token))
         .route(
             "/relays",
             get(access::list_relays).post(access::create_relay),

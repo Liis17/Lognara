@@ -1,0 +1,36 @@
+[Unit]
+Description=Lognara host agent
+After=network-online.target systemd-journald.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/lognara-hwagent
+EnvironmentFile=/etc/lognara/hwagent.env
+Environment=LOGNARA_HWAGENT_CONFIG=/etc/lognara/hwagent.json
+Environment=LOGNARA_SPOOL_DIR=/var/lib/lognara-hwagent/spool
+Environment=LOGNARA_STATE_DIR=/var/lib/lognara-hwagent/state
+StateDirectory=lognara-hwagent
+StateDirectoryMode=0700
+# root нужен для /proc всех процессов, журнала и /var/log/audit; запись только в StateDirectory.
+User=root
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+# /dev/nvidia* нужен nvidia-smi, поэтому PrivateDevices не используется.
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryMax=512M
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

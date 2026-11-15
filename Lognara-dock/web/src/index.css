@@ -722,3 +722,9 @@ table.preview .message { overflow-wrap: anywhere; min-width: 150px; }
 .metric-chart, .metric-chart > div { min-width: 0; max-width: 100%; }
 .metric-chart-unit { margin-bottom: 8px; color: var(--ink3); overflow-wrap: anywhere; }
 @media (hover: none), (pointer: coarse) { .metric-favorite { opacity: 1; } }
+
+.log-alerts { display: grid; gap: 14px; max-width: 980px; }
+.log-alert-form { display: grid; gap: 12px; padding: 16px; border: 1px solid var(--line); border-radius: 8px; }
+.log-alert-form fieldset { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 0; padding: 8px 0 0; border: 0; }
+.log-alert-numbers { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.log-alert-preview { margin: 0; padding: 10px; overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; border: 1px solid var(--line); border-radius: 6px; }

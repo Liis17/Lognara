@@ -153,3 +153,18 @@ test("fingerprint is validated, lowercased and replaces only its own filter", ()
     filters: { service: ["api"], fingerprint: [id] },
   });
 });
+
+test("log alert form keeps the Logs query and rejects single-event fields", async () => {
+  const { logAlertInput } = await import("./logs.ts");
+  const form = { name: " sudo ", enabled: true, query: 'service:host level:(WARN OR ERROR) "COMMAND=/tmp"', threshold: 3,
+    cooldownMinutes: 10, groupIds: ["g1"] };
+  assert.deepEqual(logAlertInput(form), {
+    name: "sudo", enabled: true, query: 'service:host level:(WARN OR ERROR) "COMMAND=/tmp"',
+    filters: { service: ["host"], level: ["warn", "error"] }, text: { query: "COMMAND=/tmp", mode: "phrase" },
+    threshold: 3, cooldown_seconds: 600, group_ids: ["g1"],
+  });
+  assert.throws(() => logAlertInput({ ...form, query: "trace_id:0123456789abcdef0123456789abcdef" }), /trace_id/);
+  assert.throws(() => logAlertInput({ ...form, query: "" }), /фильтр или текст/);
+  assert.throws(() => logAlertInput({ ...form, threshold: 0 }), /Порог/);
+  assert.throws(() => logAlertInput({ ...form, name: " " }), /имя/);
+});

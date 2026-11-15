@@ -71,6 +71,7 @@ await Log.CloseAndFlushAsync();
 | Компонент | Документация |
 |-----------|--------------|
 | [Lognara-agent](Lognara-agent) — приём HTTP, файлов и stdout/stderr, spool, отправка в relay | [руководство источников](Lognara-agent/docs/log-sources.md), [заметка agent](Obsidian/LognaraVault/Agent/LognaraAgent.md) |
+| [Lognara-hwagent](Lognara-hwagent) — агент Linux-хоста: метрики, процессы, системные логи, прямая отправка в core | [Lognara-hwagent/README.md](Lognara-hwagent/README.md), [заметка hwagent](Obsidian/LognaraVault/Host/LognaraHwAgent.md) |
 | [Lognara-relay](Lognara-relay) — нормализация и доставка в core | [заметка relay](Obsidian/LognaraVault/Relay/LognaraRelay.md) |
 | [Lognara-core](Lognara-core) — хранение, поиск, аналитика, API | [Lognara-core/README.md](Lognara-core/README.md), [эксплуатация](Lognara-core/docs/operations.md), [заметка core](Obsidian/LognaraVault/Core/LognaraCore.md) |
 | [Lognara-dock](Lognara-dock) — веб-интерфейс за nginx | [Lognara-dock/README.md](Lognara-dock/README.md), [заметка dock](Obsidian/LognaraVault/Dock/LognaraDock.md) |
@@ -234,6 +235,7 @@ cargo fmt --all --check && cargo clippy --locked --all-targets --all-features --
 Lognara-agent/            HTTP, файлы, stdout/stderr, spool и отправка в relay
   docs/log-sources.md     настройка источников, гарантии и запуск приложений
   examples/log-sources/   Nginx, PostgreSQL, Seq, MinIO и multiline
+Lognara-hwagent/          агент хоста под systemd: метрики, процессы, journald, отправка в core
 Lognara-relay/            разбор, группировка, spool, отправка в core
 Lognara-spool/            общая атомарная файловая очередь
 Lognara-core/             WAL, хранилище, поиск, аналитика, HTTP API

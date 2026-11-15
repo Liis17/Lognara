@@ -79,6 +79,32 @@ pub struct LogSourcesPage {
     pub as_of: String,
 }
 
+/// Правило алерта на логи в `POST /v1/logs/alerts/query`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LogAlertRule {
+    pub id: String,
+    pub filters: std::collections::BTreeMap<String, Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after_sequence: Option<u64>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct LogAlertReply {
+    pub as_of: String,
+    pub watermark: u64,
+    pub results: Vec<LogAlertResult>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct LogAlertResult {
+    pub id: String,
+    pub count: u64,
+    #[serde(default)]
+    pub samples: Vec<Value>,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct AlertSeriesQuery {
     pub server: String,
@@ -546,6 +572,51 @@ impl CoreClient {
         .await
     }
 
+    /// Новые совпадения алертов на логи с прошлого watermark; общий слот алертов Core.
+    pub async fn log_alert_query(
+        &self,
+        rules: &[LogAlertRule],
+    ) -> Result<LogAlertReply, AlertSeriesStatus> {
+        let url = self
+            .query_url
+            .join("logs/alerts/query")
+            .expect("core url joins path");
+        let unavailable = |error: reqwest::Error| {
+            if error.is_timeout() {
+                AlertSeriesStatus::Timeout
+            } else {
+                AlertSeriesStatus::Unavailable
+            }
+        };
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(&self.query_token)
+            .timeout(SERIES_QUERY_TIMEOUT)
+            .json(&json!({ "rules": rules }))
+            .send()
+            .await
+            .map_err(unavailable)?;
+        let status = response.status();
+        let bytes = response.bytes().await.map_err(unavailable)?;
+        if !status.is_success() {
+            let reply: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+            return Err(classify_alert_series_status(status, &reply));
+        }
+        let reply: LogAlertReply =
+            serde_json::from_slice(&bytes).map_err(|_| AlertSeriesStatus::Misconfigured)?;
+        if reply.results.len() != rules.len()
+            || reply
+                .results
+                .iter()
+                .zip(rules)
+                .any(|(result, rule)| result.id != rule.id)
+        {
+            return Err(AlertSeriesStatus::Misconfigured);
+        }
+        Ok(reply)
+    }
+
     /// Exact raw aggregates for metric alerts. Capacity is managed by Core's dedicated slot.
     pub async fn alert_series_query(
         &self,
@@ -687,6 +758,22 @@ impl CoreClient {
 
     pub async fn delete_agent(&self, id: i64) -> Result<(), CoreError> {
         let path = format!("agents/{id}");
+        self.admin(Method::DELETE, path, None).await.map(drop)
+    }
+
+    /// `POST /v1/admin/hosts`: `{"relay": {...}, "agent": {...}, "token": "lnh_..."}`.
+    pub async fn create_host(&self, name: &str) -> Result<Value, CoreError> {
+        let body = json!({ "name": name });
+        self.admin(Method::POST, "hosts".into(), Some(body)).await
+    }
+
+    pub async fn rotate_host_token(&self, id: i64) -> Result<Value, CoreError> {
+        self.admin(Method::POST, format!("hosts/{id}/rotate-token"), None)
+            .await
+    }
+
+    pub async fn delete_host(&self, id: i64) -> Result<(), CoreError> {
+        let path = format!("hosts/{id}");
         self.admin(Method::DELETE, path, None).await.map(drop)
     }
 

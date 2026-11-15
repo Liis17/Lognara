@@ -1,0 +1,15 @@
+{
+  "sources": [
+    {"id": "auth", "type": "file", "include": ["/var/log/auth.log*", "/var/log/secure*"], "start_at": "beginning"},
+    {"id": "syslog", "type": "file", "include": ["/var/log/syslog*", "/var/log/messages*"], "start_at": "end"},
+    {"id": "kern", "type": "file", "include": ["/var/log/kern.log*"], "start_at": "end"},
+    {"id": "mail", "type": "file", "include": ["/var/log/mail.log*", "/var/log/maillog*"], "start_at": "end"},
+    {"id": "cron", "type": "file", "include": ["/var/log/cron*"], "start_at": "end"},
+    {"id": "audit", "type": "file", "include": ["/var/log/audit/audit.log*"], "start_at": "end"},
+    {"id": "fail2ban", "type": "file", "include": ["/var/log/fail2ban.log*"], "start_at": "end"},
+    {"id": "dpkg", "type": "file", "include": ["/var/log/dpkg.log*"], "start_at": "end"},
+    {"id": "apt", "type": "file", "include": ["/var/log/apt/history.log*"], "start_at": "end"},
+    {"id": "ufw", "type": "file", "include": ["/var/log/ufw.log*"], "start_at": "end"}
+  ],
+  "journald": {"enabled": false}
+}

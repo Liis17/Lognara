@@ -56,3 +56,7 @@ Cargo ограничен двумя параллельными заданиям�
 - Используется в: [[Architecture]], [[Repository/RootFiles]], `README.md`.
 
 Изменение `Lognara-dock/web/public/metrics-nginx.json` также запускает проверки Core: его тесты проверяют импортируемые nginx-регулярки тем же Rust regex, который использует извлечение.
+
+## Хост-агент
+
+`Lognara-hwagent` выбирается фильтром по путям hwagent, agent, relay и spool и проверяется тем же Rust-набором. Отдельный workflow `.github/workflows/build-hwagent.yml` (PR, push в `master`, ручной запуск) собирает static musl `lognara-hwagent` для amd64/arm64, проверяет отсутствие динамического загрузчика, упаковывает бинарник с примерами и systemd unit и загружает архивы как artifacts. Публикации в GitHub Releases для hwagent нет.

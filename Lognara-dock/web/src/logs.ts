@@ -1,3 +1,4 @@
+import type { LogAlertInput } from "./api";
 import type { LogEvent, QueryFilters, TextQuery } from "./types";
 
 export const MAX_LIVE_ROWS = 2000;
@@ -248,4 +249,50 @@ export function withFilter(query: string, field: "pattern_id" | "fingerprint", i
     ? `message:${JSON.stringify(parsed.text.query)}`
     : parsed.text.query.split(/\s+/u).map((word) => `message:${word}`).join(" AND "));
   return clauses.join(" AND ");
+}
+
+/** Поля алерта на логи; id и trace_id описывают одно событие, а не условие. */
+export const LOG_ALERT_FIELDS = [
+  "environment", "server", "backend", "service", "service_instance", "action", "request_id", "level",
+] as const;
+
+export interface LogAlertForm {
+  name: string;
+  enabled: boolean;
+  query: string;
+  threshold: number;
+  cooldownMinutes: number;
+  groupIds: string[];
+}
+
+/** Строка запроса Logs → тело правила алерта; бросает Error с текстом для формы. */
+export function logAlertInput(form: LogAlertForm): LogAlertInput {
+  const name = form.name.trim();
+  if (!name) throw new Error("Укажите имя алерта.");
+  const query = form.query.trim();
+  const parsed = parseQuery(query);
+  const unsupported = Object.keys(parsed.filters)
+    .filter((field) => !(LOG_ALERT_FIELDS as readonly string[]).includes(field));
+  if (unsupported.length) {
+    throw new Error(`Поле ${unsupported[0]} нельзя использовать в алерте: оно указывает на одно событие.`);
+  }
+  if (!Object.keys(parsed.filters).length && !parsed.text) {
+    throw new Error("Укажите фильтр или текст, например service:host sudo.");
+  }
+  if (!Number.isInteger(form.threshold) || form.threshold < 1 || form.threshold > 1_000_000) {
+    throw new Error("Порог - целое число от 1 до 1000000.");
+  }
+  if (!Number.isInteger(form.cooldownMinutes) || form.cooldownMinutes < 0 || form.cooldownMinutes > 1440) {
+    throw new Error("Пауза - целое число минут от 0 до 1440.");
+  }
+  return {
+    name,
+    enabled: form.enabled,
+    query,
+    filters: parsed.filters,
+    text: parsed.text ?? null,
+    threshold: form.threshold,
+    cooldown_seconds: form.cooldownMinutes * 60,
+    group_ids: form.groupIds,
+  };
 }

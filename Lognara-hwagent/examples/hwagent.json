@@ -1,0 +1,11 @@
+{
+  "sources": [
+    {"id": "audit", "type": "file", "include": ["/var/log/audit/audit.log*"], "start_at": "end"},
+    {"id": "fail2ban", "type": "file", "include": ["/var/log/fail2ban.log*"], "start_at": "end"},
+    {"id": "dpkg", "type": "file", "include": ["/var/log/dpkg.log*"], "start_at": "end"},
+    {"id": "apt", "type": "file", "include": ["/var/log/apt/history.log*"], "start_at": "end"}
+  ],
+  "journald": {"enabled": true, "backfill_auth": true},
+  "metrics": {"interval_seconds": 15},
+  "processes": {"interval_seconds": 5, "top": 10, "report_starts": false}
+}

@@ -242,3 +242,15 @@ API GET/POST `/api/relays`, `/api/agents`, DELETE по `/{id}` и POST `/api/age
 | `access::delete_agent(State<AppState>, AuthUser, Path<i64>): Result<StatusCode, ApiError>` | Проксирует удаление агента. |
 
 Обработчики принимают JSON/Path как Result и возвращают JSON invalid_request вместо plain-text rejection. tests/access.rs проверяет admin Bearer/path/body, no-store, сессию, Origin, 409/404 и 502.
+
+### Хост-агенты
+
+Страница «Подключения» показывает хосты отдельным разделом: создание (`POST /api/hosts`), смена токена (`POST /api/hosts/{id}/rotate-token`) и удаление (`DELETE /api/hosts/{id}`) проксируются в hosts API core ([[Core/LognaraCore]]) с admin-токеном. Токен `LOGNARA_HOST_TOKEN` показывается один раз. Хосты не попадают в выбор relay для агента и в список relay; 409 `host_node` от core показывается текстом.
+
+### Алерты на логи
+
+Страница `/log-alerts` (`Lognara-dock/web/src/pages/LogAlerts.tsx`) и API `GET/POST /api/log-alerts`, `PUT/DELETE /api/log-alerts/{id}` (`Lognara-dock/src/log_alerts.rs`). Правило хранит строку запроса страницы «Логи» и разобранные фильтры (`environment`, `server`, `backend`, `service`, `service_instance`, `action`, `request_id`, `level`, `relay_id`, `agent_id`) и текст; поля одного события (`id`, `trace_id` и т. п.) отклоняются. Порог - минимум новых совпадений за одну проверку, пауза - минимальный интервал между сообщениями; совпадения паузы приходят сводкой. Кнопка «Создать алерт» на странице логов переносит текущий запрос, «Проверить за час» считает совпадения через summary. До 100 включённых правил.
+
+`alerts::watch` после алертов метрик одним запросом `POST /v1/logs/alerts/query` проверяет все включённые лог-алерты (`log_alerts::run_log_pass`). Первая проверка, изменение правила, повторное включение алертов или уменьшение watermark (новые данные Core) только запоминают watermark. Результат фиксируется одной транзакцией вместе с событиями outbox; изменение правил во время запроса (ревизия global) отбрасывает его. Статус Core для лог-алертов хранится отдельно (`metric_alert_global.log_core_status`): старый Core без маршрута помечается `incompatible` и не влияет на алерты метрик и событие потери Core.
+
+Получатели, группы, outbox и доставка Telegram общие с алертами метрик. Миграция SQLite добавляет `log_alerts`, `log_alert_groups_used`, `log_alert_states` и `metric_alert_outbox.log_alert_id`. Доставка проверяет, что лог-алерт включён и ревизия события совпадает; очередь одного получателя упорядочена отдельно для каждого правила и для общих событий Core. Группа, используемая лог-алертом, не удаляется (`group_in_use` с полем `log_alerts`); получатели включённых лог-алертов получают и общее событие потери Core. Раскатка: core, затем dock.

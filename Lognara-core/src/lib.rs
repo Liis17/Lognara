@@ -13,6 +13,7 @@ pub mod index;
 pub mod issue_identity;
 pub mod issues;
 pub mod journal;
+pub mod log_alerts;
 pub mod metrics;
 pub mod model;
 pub mod pattern_catalog;
