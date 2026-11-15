@@ -1390,10 +1390,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         {
             let conn = Connection::open(dir.path().join("dock.sqlite3")).unwrap();
-            for sql in &MIGRATIONS[..3] {
+            // Схема до прав токенов и скоупа алертов: все миграции, кроме двух последних.
+            let before = MIGRATIONS.len() - 2;
+            for sql in &MIGRATIONS[..before] {
                 conn.execute_batch(sql).unwrap();
             }
-            conn.pragma_update(None, "user_version", 3).unwrap();
+            conn.pragma_update(None, "user_version", before as i64)
+                .unwrap();
             conn.execute(
                 "INSERT INTO mcp_personal_tokens(id,username,name,token_hash,created_at,expires_at) VALUES('pat-old','alice','old',?1,1,?2)",
                 rusqlite::params![hash("old-pat"), i64::MAX],
