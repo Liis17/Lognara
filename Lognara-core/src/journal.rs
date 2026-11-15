@@ -113,22 +113,6 @@ impl Journal {
         if !self.ready() {
             return Err(IngestError::Unavailable);
         }
-        let batch = wire::decode_with_budget(
-            body,
-            self.config.max_decoded_bytes,
-            self.config.max_model_bytes,
-        )?;
-        if let Some(relay_id) = relay_id
-            && batch.groups.iter().any(|group| {
-                group
-                    .agent
-                    .as_ref()
-                    .and_then(|hash| self.access.agent_relay(hash))
-                    .is_some_and(|owner| owner != relay_id)
-            })
-        {
-            return Err(IngestError::Invalid(DecodeError::Invalid));
-        }
         if let Some(receipt) = wal.find(&hash) {
             self.metrics
                 .duplicate_batches
@@ -158,6 +142,24 @@ impl Journal {
                     .saturating_add(body.len() as u64 + 84)
         {
             return Err(IngestError::Unavailable);
+        }
+        // Декодирование после дедупликации и квот: повтор и перегрузка не тратят на него CPU.
+        let batch = wire::decode_with_budget(
+            body,
+            self.config.max_decoded_bytes,
+            self.config.max_model_bytes,
+        )?;
+        // Хеш агента чужого relay недопустим; неизвестный (удалённый агент) принимается.
+        if let Some(relay_id) = relay_id
+            && batch.groups.iter().any(|group| {
+                group
+                    .agent
+                    .as_ref()
+                    .and_then(|hash| self.access.agent_relay(hash))
+                    .is_some_and(|owner| owner != relay_id)
+            })
+        {
+            return Err(IngestError::Invalid(DecodeError::Invalid));
         }
         let count = batch.event_count() as u64;
         let agents_dropped = batch
