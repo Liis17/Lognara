@@ -71,6 +71,7 @@ pub struct CreatedAgent {
 pub struct Access {
     connection: Mutex<Connection>,
     relays: RwLock<HashMap<[u8; 32], i64>>,
+    agent_nodes: RwLock<HashMap<[u8; 32], crate::model::Node>>,
 }
 
 impl Access {
@@ -78,22 +79,24 @@ impl Access {
         let connection = Connection::open(path)?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         let version: u32 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-        anyhow::ensure!(version <= 1, "unsupported access schema version {version}");
+        anyhow::ensure!(version <= 2, "unsupported access schema version {version}");
         connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;
             CREATE TABLE IF NOT EXISTS relays(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, token_hash BLOB NOT NULL UNIQUE, created_at TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS agents(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, relay_id INTEGER NOT NULL REFERENCES relays(id), token_hash BLOB NOT NULL UNIQUE, created_at TEXT NOT NULL, UNIQUE(relay_id,name));
             CREATE TABLE IF NOT EXISTS heartbeats(kind TEXT NOT NULL CHECK(kind IN ('relay','agent')), node_id INTEGER NOT NULL, received_at INTEGER NOT NULL, telemetry TEXT NOT NULL, PRIMARY KEY(kind,node_id));
-            PRAGMA user_version=1;")?;
+            CREATE TABLE IF NOT EXISTS retired_agent_tokens(token_hash BLOB PRIMARY KEY, agent_id INTEGER NOT NULL REFERENCES agents(id) ON DELETE CASCADE);
+            PRAGMA user_version=2;")?;
         crate::wal::sync_dir(path.parent().expect("access has a parent"))?;
         let access = Self {
             connection: Mutex::new(connection),
             relays: RwLock::new(HashMap::new()),
+            agent_nodes: RwLock::new(HashMap::new()),
         };
-        access.reload_relays(&access.connection.lock().unwrap())?;
+        access.reload_tokens(&access.connection.lock().unwrap())?;
         Ok(access)
     }
 
-    fn reload_relays(&self, connection: &Connection) -> Result<()> {
+    fn reload_tokens(&self, connection: &Connection) -> Result<()> {
         let mut statement = connection.prepare("SELECT token_hash,id FROM relays")?;
         let relays = statement
             .query_map([], |row| {
@@ -101,6 +104,24 @@ impl Access {
             })?
             .collect::<std::result::Result<HashMap<_, _>, _>>()?;
         *self.relays.write().unwrap() = relays;
+        let mut statement = connection.prepare(
+            "SELECT token_hash,id,relay_id FROM agents
+             UNION ALL
+             SELECT retired.token_hash,agents.id,agents.relay_id
+             FROM retired_agent_tokens AS retired JOIN agents ON agents.id=retired.agent_id",
+        )?;
+        let agent_nodes = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, [u8; 32]>(0)?,
+                    crate::model::Node {
+                        agent_id: row.get(1)?,
+                        relay_id: row.get(2)?,
+                    },
+                ))
+            })?
+            .collect::<std::result::Result<HashMap<_, _>, _>>()?;
+        *self.agent_nodes.write().unwrap() = agent_nodes;
         Ok(())
     }
 
@@ -127,7 +148,7 @@ impl Access {
             created_at,
             heartbeat: None,
         };
-        self.reload_relays(&connection)?;
+        self.reload_tokens(&connection)?;
         Ok(CreatedRelay { relay, token })
     }
 
@@ -166,36 +187,44 @@ impl Access {
             created_at,
             heartbeat: None,
         };
-        self.reload_relays(&connection)?;
+        self.reload_tokens(&connection)?;
         Ok(CreatedAgent { agent, token })
     }
 
     pub fn rotate_agent_token(&self, id: i64) -> Result<CreatedAgent> {
         let mut connection = self.connection.lock().unwrap();
         let transaction = connection.transaction()?;
-        let agent = transaction
+        let (agent, old_hash) = transaction
             .query_row(
-                "SELECT id,name,relay_id,created_at,telemetry FROM agents
+                "SELECT id,name,relay_id,created_at,telemetry,token_hash FROM agents
                  LEFT JOIN heartbeats ON kind='agent' AND node_id=id WHERE id=?1",
                 [id],
                 |row| {
-                    Ok(Agent {
-                        id: row.get(0)?,
-                        name: row.get(1)?,
-                        relay_id: row.get(2)?,
-                        created_at: row.get(3)?,
-                        heartbeat: telemetry(row.get(4)?),
-                    })
+                    Ok((
+                        Agent {
+                            id: row.get(0)?,
+                            name: row.get(1)?,
+                            relay_id: row.get(2)?,
+                            created_at: row.get(3)?,
+                            heartbeat: telemetry(row.get(4)?),
+                        },
+                        row.get::<_, [u8; 32]>(5)?,
+                    ))
                 },
             )
             .optional()?
             .ok_or(AccessError::NotFound)?;
         let (token, hash, _) = credentials("lna_")?;
         transaction.execute(
+            "INSERT INTO retired_agent_tokens(token_hash,agent_id) VALUES(?1,?2)",
+            params![old_hash.as_slice(), id],
+        )?;
+        transaction.execute(
             "UPDATE agents SET token_hash=?1 WHERE id=?2",
             params![hash.as_slice(), id],
         )?;
         transaction.commit()?;
+        self.reload_tokens(&connection)?;
         Ok(CreatedAgent { agent, token })
     }
 
@@ -256,7 +285,7 @@ impl Access {
             "DELETE FROM heartbeats WHERE kind='relay' AND node_id=?1",
             [id],
         )?;
-        self.reload_relays(&connection)
+        self.reload_tokens(&connection)
     }
 
     pub fn delete_agent(&self, id: i64) -> Result<()> {
@@ -268,11 +297,19 @@ impl Access {
             "DELETE FROM heartbeats WHERE kind='agent' AND node_id=?1",
             [id],
         )?;
-        self.reload_relays(&connection)
+        self.reload_tokens(&connection)
     }
 
     pub fn relay_for_token(&self, hash: &[u8; 32]) -> Option<i64> {
         self.relays.read().unwrap().get(hash).copied()
+    }
+
+    pub fn agent_node(&self, hash: &crate::wire::AgentHash) -> Option<crate::model::Node> {
+        self.agent_nodes.read().unwrap().get(&hash.0).copied()
+    }
+
+    pub fn agent_relay(&self, hash: &crate::wire::AgentHash) -> Option<i64> {
+        self.agent_node(hash).map(|node| node.relay_id)
     }
 
     pub fn agent_hashes(&self, relay_id: i64) -> Result<Vec<String>> {

@@ -89,6 +89,18 @@ impl Journal {
 
     /// Blocking: вызывается вне async executor, после резервирования ingest slot.
     pub fn accept(&self, body: &[u8]) -> Result<Receipt, IngestError> {
+        self.accept_from_relay(body, None)
+    }
+
+    pub fn accept_for_relay(&self, body: &[u8], relay_id: i64) -> Result<Receipt, IngestError> {
+        self.accept_from_relay(body, Some(relay_id))
+    }
+
+    fn accept_from_relay(
+        &self,
+        body: &[u8],
+        relay_id: Option<i64>,
+    ) -> Result<Receipt, IngestError> {
         let start = Instant::now();
         if body.len() > self.config.max_body_bytes {
             return Err(IngestError::TooLarge);
@@ -100,6 +112,22 @@ impl Journal {
         let mut wal = self.wal.lock().unwrap();
         if !self.ready() {
             return Err(IngestError::Unavailable);
+        }
+        let batch = wire::decode_with_budget(
+            body,
+            self.config.max_decoded_bytes,
+            self.config.max_model_bytes,
+        )?;
+        if let Some(relay_id) = relay_id
+            && batch.groups.iter().any(|group| {
+                group
+                    .agent
+                    .as_ref()
+                    .and_then(|hash| self.access.agent_relay(hash))
+                    .is_some_and(|owner| owner != relay_id)
+            })
+        {
+            return Err(IngestError::Invalid(DecodeError::Invalid));
         }
         if let Some(receipt) = wal.find(&hash) {
             self.metrics
@@ -131,11 +159,6 @@ impl Journal {
         {
             return Err(IngestError::Unavailable);
         }
-        let batch = wire::decode_with_budget(
-            body,
-            self.config.max_decoded_bytes,
-            self.config.max_model_bytes,
-        )?;
         let count = batch.event_count() as u64;
         let agents_dropped = batch
             .groups

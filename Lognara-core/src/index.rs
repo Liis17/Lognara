@@ -28,6 +28,8 @@ pub const EXACT_FIELDS: &[&str] = &[
     "span_id",
     "parent_span_id",
     "request_id",
+    "relay_id",
+    "agent_id",
     "pattern_id",
     "fingerprint",
 ];
@@ -109,6 +111,12 @@ impl ActiveIndex {
         doc.add_u64(field("row_id"), row_id);
         doc.add_u64(field("level"), row.event.level.code() as u64);
         doc.add_text(field("id"), row.event.id.0.to_string());
+        if let Some(id) = row.relay_id {
+            doc.add_text(field("relay_id"), id.to_string());
+        }
+        if let Some(id) = row.agent_id {
+            doc.add_text(field("agent_id"), id.to_string());
+        }
         for (name, value) in [
             ("environment", row.source.environment.as_deref()),
             ("server", Some(row.source.server.as_str())),

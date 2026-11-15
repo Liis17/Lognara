@@ -115,6 +115,7 @@ fn batch(groups: Vec<(Source, Vec<Event>)>) -> Vec<u8> {
             source,
             dropped: 0,
             events,
+            agent: None,
         })
         .collect();
     zstd::encode_all(&rmp_serde::to_vec_named(&batch).unwrap()[..], 3).unwrap()
@@ -1012,6 +1013,8 @@ async fn imports_hundreds_of_rules_per_source_and_reopens_catalog() {
     let row = lognara_core::model::StoredEvent {
         sequence: 0,
         core_received_at: now_nanos(),
+        relay_id: None,
+        agent_id: None,
         source,
         event: event(1, now_nanos(), "done"),
     };

@@ -3,6 +3,7 @@ use lognara_core::{
     config::Config,
     model::format_timestamp,
     storage::Core,
+    summary::{self, SummaryRequest},
     wire,
 };
 use std::{
@@ -149,5 +150,94 @@ async fn empty_histogram_has_zeros_and_invalid_analytics_is_rejected() {
     };
     assert!(analytics::group_by(&core, invalid).await.is_err());
     assert!(serde_json::from_value::<HistogramRequest>(serde_json::json!({"from":"1970-01-01T00:00:00Z","to":"1970-01-01T00:00:01Z","text":{"query":"ignored?"}})).is_err());
+    core.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn node_filters_scope_histogram_group_by_and_summary() {
+    use sha2::{Digest, Sha256};
+
+    let dir = tempfile::tempdir().unwrap();
+    let core = Core::open(config(dir.path())).unwrap();
+    let relay_a = core.journal.access.create_relay("relay-a").unwrap();
+    let relay_b = core.journal.access.create_relay("relay-b").unwrap();
+    let agent_a = core
+        .journal
+        .access
+        .create_agent("agent", relay_a.relay.id)
+        .unwrap();
+    let agent_b = core
+        .journal
+        .access
+        .create_agent("agent", relay_b.relay.id)
+        .unwrap();
+    let hash_a = Sha256::digest(agent_a.token.as_bytes()).into();
+    let hash_b = Sha256::digest(agent_b.token.as_bytes()).into();
+    let mut batch = wire::decode(include_bytes!("fixtures/relay-batch.bin"), 1 << 20).unwrap();
+    let mut group_a = batch.groups[0].clone();
+    let mut group_b = group_a.clone();
+    group_a.agent = Some(wire::AgentHash(hash_a));
+    group_a.source.service = "api-a".into();
+    group_a.events[0].timestamp = 500_000_000;
+    group_b.agent = Some(wire::AgentHash(hash_b));
+    group_b.source.service = "api-b".into();
+    group_b.events[0].timestamp = 1_500_000_000;
+    batch.groups = vec![group_a, group_b];
+    let body = zstd::encode_all(&rmp_serde::to_vec_named(&batch).unwrap()[..], 3).unwrap();
+    core.journal.accept(&body).unwrap();
+    wait(&core, 2).await;
+
+    let from = format_timestamp(0);
+    let to = format_timestamp(2_000_000_000);
+    let filters = BTreeMap::from([("agent_id".into(), vec![agent_a.agent.id.to_string()])]);
+    let histogram = analytics::histogram(
+        &core,
+        HistogramRequest {
+            from: from.clone(),
+            to: to.clone(),
+            filters: filters.clone(),
+            interval_seconds: 1,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        histogram
+            .buckets
+            .iter()
+            .map(|bucket| bucket.count)
+            .sum::<u64>(),
+        1
+    );
+
+    let groups = analytics::group_by(
+        &core,
+        GroupRequest {
+            from: from.clone(),
+            to: to.clone(),
+            filters: filters.clone(),
+            group_by: vec!["service".into()],
+            limit: 10,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(groups.groups.len(), 1);
+    assert_eq!(groups.groups[0].values["service"].as_deref(), Some("api-a"));
+
+    let summary = summary::summary(
+        core.clone(),
+        SummaryRequest {
+            from,
+            to,
+            filters,
+            text: None,
+            interval_seconds: 1,
+            search_limit: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(summary.total, 1);
     core.shutdown().unwrap();
 }

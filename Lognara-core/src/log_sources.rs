@@ -3,7 +3,7 @@ use std::{collections::BTreeSet, fs::File, sync::Arc};
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use datafusion::arrow::{
-    array::{Array, StringArray, UInt64Array},
+    array::{Array, Int64Array, StringArray, UInt64Array},
     record_batch::RecordBatch,
 };
 use hmac::{Hmac, Mac};
@@ -47,6 +47,8 @@ pub struct SourceFilters {
     pub service: Option<String>,
     pub server: Option<String>,
     pub environment: Option<String>,
+    pub relay_id: Option<String>,
+    pub agent_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -93,7 +95,7 @@ fn default_limit() -> usize {
     DEFAULT_LIMIT
 }
 
-pub async fn list(core: Arc<Core>, request: SourceRequest) -> Result<SourcePage, QueryError> {
+pub async fn list(core: Arc<Core>, mut request: SourceRequest) -> Result<SourcePage, QueryError> {
     if !(1..=MAX_LIMIT).contains(&request.limit) {
         return Err(QueryError::Invalid(format!("limit must be 1..{MAX_LIMIT}")));
     }
@@ -109,6 +111,14 @@ pub async fn list(core: Arc<Core>, request: SourceRequest) -> Result<SourcePage,
             return Err(QueryError::Invalid(
                 "source filter exceeds 4096 bytes".into(),
             ));
+        }
+    }
+    for (field, value) in [
+        ("relay_id", &mut request.filters.relay_id),
+        ("agent_id", &mut request.filters.agent_id),
+    ] {
+        if let Some(value) = value {
+            crate::query::normalize_node_id(value, field)?;
         }
     }
 
@@ -216,7 +226,16 @@ fn scan(
             File::open(path).map_err(anyhow::Error::from)?,
         )
         .map_err(anyhow::Error::from)?;
-        let indices = ["server", "service", "environment", "sequence"]
+        let mut names = vec!["server", "service", "environment", "sequence"];
+        for (name, selected) in [
+            ("relay_id", filters.relay_id.is_some()),
+            ("agent_id", filters.agent_id.is_some()),
+        ] {
+            if selected && builder.schema().index_of(name).is_ok() {
+                names.push(name);
+            }
+        }
+        let indices = names
             .iter()
             .map(|name| builder.schema().index_of(name))
             .collect::<std::result::Result<Vec<_>, _>>()
@@ -278,6 +297,18 @@ fn add_batch(
     let service = strings(batch, "service")?;
     let environment = strings(batch, "environment")?;
     let selected = strings(batch, field.name())?;
+    let relay_id = int64(batch, "relay_id");
+    let agent_id = int64(batch, "agent_id");
+    let relay_filter = filters.relay_id.as_deref().map(|value| {
+        value
+            .parse::<i64>()
+            .expect("source node filters are validated before scanning")
+    });
+    let agent_filter = filters.agent_id.as_deref().map(|value| {
+        value
+            .parse::<i64>()
+            .expect("source node filters are validated before scanning")
+    });
     for row in 0..batch.num_rows() {
         if sequence.value(row) > watermark
             || filters
@@ -292,6 +323,12 @@ fn add_batch(
                 .environment
                 .as_deref()
                 .is_some_and(|v| environment.is_null(row) || environment.value(row) != v)
+            || relay_filter.is_some_and(|value| {
+                relay_id.is_none_or(|ids| ids.is_null(row) || ids.value(row) != value)
+            })
+            || agent_filter.is_some_and(|value| {
+                agent_id.is_none_or(|ids| ids.is_null(row) || ids.value(row) != value)
+            })
             || selected.is_null(row)
         {
             continue;
@@ -308,6 +345,12 @@ fn add_batch(
         }
     }
     Ok(())
+}
+
+fn int64<'a>(batch: &'a RecordBatch, name: &str) -> Option<&'a Int64Array> {
+    batch
+        .column_by_name(name)
+        .and_then(|array| array.as_any().downcast_ref())
 }
 
 fn strings<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a StringArray, QueryError> {

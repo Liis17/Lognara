@@ -143,6 +143,7 @@ fn batch(groups: Vec<(Source, Vec<Event>)>) -> Vec<u8> {
             source,
             dropped: 0,
             events,
+            agent: None,
         })
         .collect();
     zstd::encode_all(&rmp_serde::to_vec_named(&batch).unwrap()[..], 3).unwrap()

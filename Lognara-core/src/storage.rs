@@ -513,8 +513,11 @@ impl Materializer {
         };
         let mut chunk = Vec::new();
         let mut chunk_bytes = 0usize;
+        let access = self.core.journal.access.clone();
         for row in batch
-            .into_events(receipt.first_sequence, receipt.received_at)
+            .into_events_with(receipt.first_sequence, receipt.received_at, move |hash| {
+                access.agent_node(hash)
+            })
             .skip(skip)
         {
             chunk_bytes = chunk_bytes.saturating_add(estimated_bytes(&row));

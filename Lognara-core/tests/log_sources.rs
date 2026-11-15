@@ -6,7 +6,7 @@ use lognara_core::{
     api,
     config::Config,
     storage::Core,
-    wire::{CoreBatch, Event, Group, LogId, LogLevel, Source},
+    wire::{AgentHash, CoreBatch, Event, Group, LogId, LogLevel, Source},
 };
 use serde_json::{Value, json};
 use std::{collections::HashMap, path::Path, time::Duration};
@@ -66,6 +66,7 @@ fn group(id: u128, service: &str, server: &str, environment: Option<&str>) -> Gr
         },
         dropped: 0,
         events: vec![event(id)],
+        agent: None,
     }
 }
 
@@ -233,5 +234,65 @@ async fn source_lists_page_more_than_one_thousand_names_without_skipping() {
     assert_eq!(second["values"][0], "service-1000");
     assert_eq!(second["values"][4], "service-1004");
     assert!(second["next_cursor"].is_null());
+    core.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn source_registry_applies_agent_and_relay_filters() {
+    use sha2::{Digest, Sha256};
+
+    let dir = tempfile::tempdir().unwrap();
+    let core = Core::open(config(dir.path())).unwrap();
+    let relay_a = core.journal.access.create_relay("relay-a").unwrap();
+    let relay_b = core.journal.access.create_relay("relay-b").unwrap();
+    let agent_a = core
+        .journal
+        .access
+        .create_agent("agent", relay_a.relay.id)
+        .unwrap();
+    let agent_b = core
+        .journal
+        .access
+        .create_agent("agent", relay_b.relay.id)
+        .unwrap();
+    let mut group_a = group(1, "app-a", "server-a", Some("prod"));
+    let mut group_b = group(2, "app-b", "server-b", Some("prod"));
+    group_a.agent = Some(AgentHash(Sha256::digest(agent_a.token.as_bytes()).into()));
+    group_b.agent = Some(AgentHash(Sha256::digest(agent_b.token.as_bytes()).into()));
+    core.journal
+        .accept(&packed(vec![group_a, group_b]))
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while core.snapshot().watermark < 2 {
+        assert!(tokio::time::Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let router = api::router(core.clone());
+    let (status, agent) = send(
+        &router,
+        Some("query"),
+        json!({"field":"service","filters":{"agent_id":agent_a.agent.id.to_string()}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(agent["values"], json!(["app-a"]));
+
+    let (status, relay) = send(
+        &router,
+        Some("query"),
+        json!({"field":"server","filters":{"relay_id":relay_b.relay.id.to_string()}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(relay["values"], json!(["server-b"]));
+
+    let (status, _) = send(
+        &router,
+        Some("query"),
+        json!({"field":"service","filters":{"agent_id":"0"}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
     core.shutdown().unwrap();
 }

@@ -355,6 +355,135 @@ async fn issues_group_errors_and_report_statuses() {
     core.shutdown().unwrap();
 }
 
+#[tokio::test]
+async fn issue_search_details_and_recurrences_apply_node_filters() {
+    use sha2::{Digest, Sha256};
+
+    let dir = tempfile::tempdir().unwrap();
+    let core = Core::open(config(dir.path())).unwrap();
+    let relay_a = core.journal.access.create_relay("relay-a").unwrap();
+    let relay_b = core.journal.access.create_relay("relay-b").unwrap();
+    let agent_a = core
+        .journal
+        .access
+        .create_agent("agent", relay_a.relay.id)
+        .unwrap();
+    let agent_b = core
+        .journal
+        .access
+        .create_agent("agent", relay_b.relay.id)
+        .unwrap();
+    let mut batch = wire::decode(include_bytes!("fixtures/relay-batch.bin"), 1 << 20).unwrap();
+    let mut group_a = batch.groups[0].clone();
+    let mut group_b = group_a.clone();
+    let error_a = null_reference("server-a", 1, 80);
+    let error_b = timeout(2);
+    group_a.agent = Some(wire::AgentHash(
+        Sha256::digest(agent_a.token.as_bytes()).into(),
+    ));
+    group_a.source.service = "billing".into();
+    group_a.source.server = error_a.server.into();
+    let mut event_a = group_a.events[0].clone();
+    event_a.id = wire::LogId(uuid::Uuid::now_v7());
+    event_a.timestamp = TS + error_a.offset * SECOND;
+    event_a.level = error_a.level;
+    event_a.action = Some(error_a.action.into());
+    event_a.message = error_a.message;
+    event_a.attributes = serde_json::from_value(error_a.attributes).unwrap();
+    group_a.events = vec![event_a];
+
+    group_b.agent = Some(wire::AgentHash(
+        Sha256::digest(agent_b.token.as_bytes()).into(),
+    ));
+    group_b.source.service = "billing".into();
+    group_b.source.server = error_b.server.into();
+    let mut event_b = group_b.events[0].clone();
+    event_b.id = wire::LogId(uuid::Uuid::now_v7());
+    event_b.timestamp = TS + error_b.offset * SECOND;
+    event_b.level = error_b.level;
+    event_b.action = Some(error_b.action.into());
+    event_b.message = error_b.message;
+    event_b.attributes = serde_json::from_value(error_b.attributes).unwrap();
+    group_b.events = vec![event_b];
+    batch.groups = vec![group_a, group_b];
+    core.journal
+        .accept(&zstd::encode_all(&rmp_serde::to_vec_named(&batch).unwrap()[..], 3).unwrap())
+        .unwrap();
+    processed(&core, 2).await;
+
+    let all = issues::search(&core, request(Status::Open, &[], &[]))
+        .await
+        .unwrap();
+    assert_eq!(all.issues.len(), 2);
+    let id_a = all
+        .issues
+        .iter()
+        .find(|issue| issue.servers == 1 && issue.template.contains("Mapping failed"))
+        .unwrap()
+        .fingerprint
+        .clone();
+    let id_b = all
+        .issues
+        .iter()
+        .find(|issue| issue.template.contains("Timeout after"))
+        .unwrap()
+        .fingerprint
+        .clone();
+
+    let mut scoped = request(Status::Open, &[], &[]);
+    scoped
+        .filters
+        .insert("agent_id".into(), vec![agent_a.agent.id.to_string()]);
+    let found = issues::search(&core, scoped).await.unwrap();
+    assert_eq!(found.issues.len(), 1);
+    assert_eq!(found.issues[0].fingerprint, id_a);
+
+    let mut details_request = details(0);
+    details_request
+        .filters
+        .insert("relay_id".into(), vec![relay_b.relay.id.to_string()]);
+    let detail = issues::details(&core, &id_b, details_request)
+        .await
+        .unwrap();
+    assert_eq!(detail.issue.count, 1);
+    assert_eq!(detail.examples[0].relay_id, Some(relay_b.relay.id));
+    assert_eq!(detail.examples[0].agent_id, Some(agent_b.agent.id));
+    assert!(matches!(
+        issues::details(&core, &id_b, {
+            let mut request = details(0);
+            request
+                .filters
+                .insert("agent_id".into(), vec![agent_a.agent.id.to_string()]);
+            request
+        })
+        .await,
+        Err(QueryError::NotFound)
+    ));
+
+    let recurrence = issues::recurrences(
+        &core,
+        RecurrenceRequest {
+            after: 0,
+            issues: vec![
+                Watch {
+                    fingerprint: id_a.clone(),
+                    since: format_timestamp(TS),
+                },
+                Watch {
+                    fingerprint: id_b,
+                    since: format_timestamp(TS),
+                },
+            ],
+            filters: BTreeMap::from([("agent_id".into(), vec![agent_a.agent.id.to_string()])]),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(recurrence.recurrences.len(), 1);
+    assert_eq!(recurrence.recurrences[0].fingerprint, id_a);
+    core.shutdown().unwrap();
+}
+
 /// Проходит сегменты до текущего watermark и складывает совпадения по fingerprint.
 async fn drain(
     core: &Core,
@@ -375,6 +504,7 @@ async fn drain(
                         since: format_timestamp(TS + since * SECOND),
                     })
                     .collect(),
+                filters: Default::default(),
             },
         )
         .await
@@ -446,6 +576,7 @@ async fn recurrences_need_new_publication_and_time() {
                         since: format_timestamp(TS)
                     },
                 ],
+                filters: Default::default(),
             },
         )
         .await,

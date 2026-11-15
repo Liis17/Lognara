@@ -181,6 +181,56 @@ async fn http_auth_precedes_decode_and_ack_is_durable() {
     assert_eq!(restored.accept(FIXTURE).unwrap().batch_id, 1);
 }
 
+#[tokio::test]
+async fn ingest_rejects_an_agent_owned_by_another_relay_but_accepts_unknown_hashes() {
+    use sha2::{Digest, Sha256};
+
+    let dir = tempfile::tempdir().unwrap();
+    let journal = Journal::open(config(dir.path())).unwrap();
+    let owner = journal.access.create_relay("owner").unwrap();
+    let other = journal.access.create_relay("other").unwrap();
+    let agent = journal
+        .access
+        .create_agent("agent", owner.relay.id)
+        .unwrap();
+    let agent_hash: [u8; 32] = Sha256::digest(agent.token.as_bytes()).into();
+    journal.access.rotate_agent_token(agent.agent.id).unwrap();
+    let mut batch = lognara_core::wire::decode(FIXTURE, 1 << 20).unwrap();
+    batch.groups[0].agent = Some(lognara_core::wire::AgentHash(agent_hash));
+    let body = zstd::encode_all(&rmp_serde::to_vec_named(&batch).unwrap()[..], 3).unwrap();
+    let router = api::ingest_router(journal.clone());
+
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(request(&owner.token, Body::from(body.clone())))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(request(&other.token, Body::from(body)))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+
+    batch.groups[0].agent = Some(lognara_core::wire::AgentHash([0x77; 32]));
+    let unknown = zstd::encode_all(&rmp_serde::to_vec_named(&batch).unwrap()[..], 3).unwrap();
+    assert_eq!(
+        router
+            .oneshot(request(&other.token, Body::from(unknown)))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+}
+
 #[test]
 fn backpressure_never_acknowledges_unstored_data() {
     let dir = tempfile::tempdir().unwrap();

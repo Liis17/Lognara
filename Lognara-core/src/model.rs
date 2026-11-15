@@ -9,8 +9,16 @@ use crate::wire::{Event, Source};
 pub struct StoredEvent {
     pub sequence: u64,
     pub core_received_at: i64,
+    pub relay_id: Option<i64>,
+    pub agent_id: Option<i64>,
     pub source: Source,
     pub event: Event,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Node {
+    pub relay_id: i64,
+    pub agent_id: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -18,6 +26,10 @@ pub struct LogEvent {
     pub id: String,
     pub timestamp: String,
     pub ingested_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relay_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<i64>,
     #[serde(flatten)]
     pub source: Source,
     pub action: Option<String>,
@@ -37,6 +49,8 @@ impl From<StoredEvent> for LogEvent {
             id: event.id.0.to_string(),
             timestamp: format_timestamp(event.timestamp),
             ingested_at: format_timestamp(event.ingested_at),
+            relay_id: row.relay_id,
+            agent_id: row.agent_id,
             source: row.source,
             action: event.action,
             level: event.level,

@@ -161,6 +161,8 @@ mod tests {
         StoredEvent {
             sequence: 1,
             core_received_at: 0,
+            relay_id: None,
+            agent_id: None,
             source: Source {
                 environment: environment.map(Into::into),
                 server: "srv".into(),
@@ -342,6 +344,8 @@ mod tests {
         StoredEvent {
             sequence: 1,
             core_received_at: 0,
+            relay_id: None,
+            agent_id: None,
             source: Source {
                 environment: Some("prod".into()),
                 server: "srv".into(),

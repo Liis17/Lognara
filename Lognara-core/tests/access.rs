@@ -246,6 +246,15 @@ fn registry_survives_restart_and_stores_only_hashes() {
     let relay = access.create_relay(&"я".repeat(64)).unwrap();
     let hash: [u8; 32] = Sha256::digest(relay.token.as_bytes()).into();
     let agent = access.create_agent("agent", relay.relay.id).unwrap();
+    let agent_hash: [u8; 32] = Sha256::digest(agent.token.as_bytes()).into();
+    assert_eq!(
+        access.agent_node(&lognara_core::wire::AgentHash(agent_hash)),
+        Some(lognara_core::model::Node {
+            relay_id: relay.relay.id,
+            agent_id: agent.agent.id,
+        })
+    );
+    assert_eq!(access.relay_for_token(&hash), Some(1));
     assert!(matches!(
         access.create_relay("bad\0name"),
         Err(AccessError::InvalidName)
@@ -253,6 +262,13 @@ fn registry_survives_restart_and_stores_only_hashes() {
     drop(access);
     let access = Access::open(&path).unwrap();
     assert_eq!(access.relay_for_token(&hash), Some(relay.relay.id));
+    assert_eq!(
+        access.agent_node(&lognara_core::wire::AgentHash(agent_hash)),
+        Some(lognara_core::model::Node {
+            relay_id: relay.relay.id,
+            agent_id: agent.agent.id,
+        })
+    );
     assert_eq!(
         access.agent_hashes(relay.relay.id).unwrap(),
         vec![hex::encode(Sha256::digest(agent.token.as_bytes()))]
@@ -273,6 +289,40 @@ fn registry_survives_restart_and_stores_only_hashes() {
     assert_eq!(access.relay_for_token(&hash), None);
     let replacement = access.create_relay("replacement").unwrap();
     assert_ne!(replacement.relay.id, relay.relay.id);
+}
+
+#[test]
+fn migrates_access_schema_v1_and_retains_agent_identity_hashes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("access.sqlite3");
+    let agent_hash = [2_u8; 32];
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA foreign_keys=ON;
+             CREATE TABLE relays(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, token_hash BLOB NOT NULL UNIQUE, created_at TEXT NOT NULL);
+             CREATE TABLE agents(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, relay_id INTEGER NOT NULL REFERENCES relays(id), token_hash BLOB NOT NULL UNIQUE, created_at TEXT NOT NULL, UNIQUE(relay_id,name));
+             CREATE TABLE heartbeats(kind TEXT NOT NULL CHECK(kind IN ('relay','agent')), node_id INTEGER NOT NULL, received_at INTEGER NOT NULL, telemetry TEXT NOT NULL, PRIMARY KEY(kind,node_id));
+             INSERT INTO relays(name,token_hash,created_at) VALUES('relay',x'0101010101010101010101010101010101010101010101010101010101010101','now');
+             INSERT INTO agents(name,relay_id,token_hash,created_at) VALUES('agent',1,x'0202020202020202020202020202020202020202020202020202020202020202','now');
+             PRAGMA user_version=1;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let access = Access::open(&path).unwrap();
+    let version: u32 = rusqlite::Connection::open(&path)
+        .unwrap()
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 2);
+    assert_eq!(
+        access.agent_node(&lognara_core::wire::AgentHash(agent_hash)),
+        Some(lognara_core::model::Node {
+            relay_id: 1,
+            agent_id: 1,
+        })
+    );
 }
 
 #[test]
@@ -347,6 +397,16 @@ async fn rotating_agent_token_preserves_identity_and_revokes_old_hash_durably() 
     let hash =
         |token: &serde_json::Value| hex::encode(Sha256::digest(token.as_str().unwrap().as_bytes()));
     let old_hash = hash(&agent["token"]);
+    let old_hash_bytes: [u8; 32] =
+        Sha256::digest(agent["token"].as_str().unwrap().as_bytes()).into();
+    let agent_id = agent["agent"]["id"].as_i64().unwrap();
+    let node = lognara_core::model::Node { relay_id, agent_id };
+    assert_eq!(
+        core.journal
+            .access
+            .agent_node(&lognara_core::wire::AgentHash(old_hash_bytes)),
+        Some(node)
+    );
     let body = json!({"relay": relay_report(), "agents": [{"token_sha256": old_hash, "heartbeat_ms_ago": 0, "telemetry": agent_report("srv-1")}]});
     assert_eq!(
         call(&router, "POST", "/v1/heartbeat", relay_token, body)
@@ -388,6 +448,12 @@ async fn rotating_agent_token_preserves_identity_and_revokes_old_hash_durably() 
     let (status, rotated) = call(&router, "POST", &path, "admin", nil.clone()).await;
     assert_eq!(status, 200);
     assert_ne!(rotated["token"], agent["token"]);
+    assert_eq!(
+        core.journal
+            .access
+            .agent_node(&lognara_core::wire::AgentHash(old_hash_bytes)),
+        Some(node)
+    );
     assert!(rotated["token"].as_str().unwrap().starts_with("lna_"));
     assert_eq!(rotated["agent"], before["agents"][0]);
     let expected_hashes = {
@@ -398,6 +464,13 @@ async fn rotating_agent_token_preserves_identity_and_revokes_old_hash_durably() 
     let (_, hashes) = call(&router, "GET", "/v1/agents", relay_token, nil.clone()).await;
     assert_eq!(hashes["agents"], expected_hashes);
     assert!(!hashes.to_string().contains(&old_hash));
+    let new_hash: [u8; 32] = Sha256::digest(rotated["token"].as_str().unwrap().as_bytes()).into();
+    assert_eq!(
+        core.journal
+            .access
+            .agent_node(&lognara_core::wire::AgentHash(new_hash)),
+        Some(node)
+    );
     let (_, after) = call(&router, "GET", "/v1/admin/agents", "admin", nil.clone()).await;
     assert_eq!(before["agents"], after["agents"]);
     assert!(!after.to_string().contains("token"));
@@ -408,6 +481,12 @@ async fn rotating_agent_token_preserves_identity_and_revokes_old_hash_durably() 
     let router = api::router(core.clone());
     let (_, hashes) = call(&router, "GET", "/v1/agents", relay_token, nil.clone()).await;
     assert_eq!(hashes["agents"], expected_hashes);
+    assert_eq!(
+        core.journal
+            .access
+            .agent_node(&lognara_core::wire::AgentHash(old_hash_bytes)),
+        Some(node)
+    );
     let (_, persisted) = call(&router, "GET", "/v1/admin/agents", "admin", nil).await;
     assert_eq!(persisted["agents"], before["agents"]);
     core.shutdown().unwrap();

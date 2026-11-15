@@ -165,7 +165,7 @@ fn build(
                 if stopping() {
                     return Ok(false);
                 }
-                let batch = batch?;
+                let batch = columns::with_node_columns(&batch?)?;
                 rows += batch.num_rows();
                 writer.write(&batch)?;
             }
