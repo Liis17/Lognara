@@ -7,8 +7,8 @@ use std::{
 use anyhow::Result;
 use datafusion::arrow::{
     array::{
-        ArrayRef, FixedSizeBinaryBuilder, Float64Array, RecordBatch, StringArray,
-        TimestampNanosecondArray,
+        ArrayRef, FixedSizeBinaryBuilder, Float64Array, Int64Array, RecordBatch, StringArray,
+        TimestampNanosecondArray, new_null_array,
     },
     datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit},
 };
@@ -44,6 +44,8 @@ pub struct Point {
     pub labels: String,
     pub value: f64,
     pub event_id: Option<[u8; 16]>,
+    pub relay_id: Option<i64>,
+    pub agent_id: Option<i64>,
 }
 
 pub fn schema() -> SchemaRef {
@@ -67,6 +69,9 @@ pub fn schema() -> SchemaRef {
                 Field::new("labels", DataType::Utf8, false),
                 Field::new("value", DataType::Float64, false),
                 Field::new("event_id", DataType::FixedSizeBinary(16), true),
+                // Узел добавлен позже: старые файлы читаются с null.
+                Field::new("relay_id", DataType::Int64, true),
+                Field::new("agent_id", DataType::Int64, true),
             ]))
         })
         .clone()
@@ -116,8 +121,24 @@ pub fn encode(points: &[Point]) -> Result<RecordBatch> {
             points.iter().map(|p| p.value),
         )),
         Arc::new(event_ids.finish()),
+        Arc::new(Int64Array::from_iter(points.iter().map(|p| p.relay_id))),
+        Arc::new(Int64Array::from_iter(points.iter().map(|p| p.agent_id))),
     ];
     Ok(RecordBatch::try_new(schema(), arrays)?)
+}
+
+/// Батч файла серий по текущей схеме: колонки, которых в старом файле нет, заполняются null.
+pub fn conform(batch: &RecordBatch) -> Result<RecordBatch> {
+    let schema = schema();
+    let arrays = schema
+        .fields()
+        .iter()
+        .map(|field| match batch.column_by_name(field.name()) {
+            Some(array) => array.clone(),
+            None => new_null_array(field.data_type(), batch.num_rows()),
+        })
+        .collect();
+    Ok(RecordBatch::try_new(schema, arrays)?)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

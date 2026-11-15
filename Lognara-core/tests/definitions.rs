@@ -728,7 +728,7 @@ async fn server_scopes_isolate_rules_preview_listing_and_queries() {
     drop(core);
     let core = Core::open(config(dir.path(), 100)).unwrap();
     assert_eq!(
-        lognara_core::scoped_metrics::sources(core.clone())
+        lognara_core::scoped_metrics::sources(core.clone(), Default::default())
             .await
             .unwrap()
             .len(),

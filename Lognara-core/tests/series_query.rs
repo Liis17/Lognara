@@ -1860,3 +1860,394 @@ async fn effective_settings_include_unconfigured_servers_and_scoped_origins() {
     assert_eq!(reply["kind"], "gauge");
     core.shutdown().unwrap();
 }
+
+/// Пачка одной группы с хэшем агента: так события приходят через relay.
+fn agent_batch(agent: wire::AgentHash, source: Source, events: Vec<Event>) -> Vec<u8> {
+    let mut batch = wire::decode(FIXTURE, 1 << 20).unwrap();
+    batch.groups = vec![Group {
+        source,
+        dropped: 0,
+        events,
+        agent: Some(agent),
+    }];
+    zstd::encode_all(&rmp_serde::to_vec_named(&batch).unwrap()[..], 3).unwrap()
+}
+
+/// Подпись серии и сумма её непустых значений.
+fn totals(series: &Value) -> Vec<(String, f64)> {
+    series
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|line| {
+            let sum = line["values"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(Value::as_f64)
+                .sum();
+            (line["label"].as_str().unwrap().to_owned(), sum)
+        })
+        .collect()
+}
+
+/// Метрики списка в виде service/name, по алфавиту.
+fn metric_names(list: &Value) -> Vec<String> {
+    let mut names: Vec<String> = list["metrics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|metric| {
+            format!(
+                "{}/{}",
+                metric["service"].as_str().unwrap(),
+                metric["name"].as_str().unwrap()
+            )
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// Сервисы источников метрик, по алфавиту.
+fn source_services(reply: &Value) -> Vec<String> {
+    let mut services: Vec<String> = reply["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|source| source["service"].as_str().unwrap().to_owned())
+        .collect();
+    services.sort();
+    services
+}
+
+/// Фильтры узла в запросах, списках, источниках, lookup и алертах; ids - relay A, relay B, agent A, agent B.
+async fn assert_node_filters(router: &Router, from: &str, to: &str, ids: [i64; 4]) {
+    let [relay_a, relay_b, agent_a, agent_b] = ids;
+    let runs = |extra: Value| {
+        let mut body = query_with("runs", from, to, 600, extra);
+        body["service"] = json!("api");
+        body
+    };
+    let jobs = |extra: Value| {
+        let mut body = query_with("jobs", from, to, 600, extra);
+        body["service"] = json!("worker");
+        body
+    };
+    assert_eq!(
+        totals(&series_of(router, runs(json!({}))).await),
+        vec![(String::new(), 13.0)]
+    );
+    for (extra, expected) in [
+        (json!({"agent_id": agent_a}), 10.0),
+        (json!({"relay_id": relay_b}), 3.0),
+        (json!({"relay_id": relay_b, "agent_id": agent_b}), 3.0),
+    ] {
+        assert_eq!(
+            totals(&series_of(router, runs(extra)).await),
+            vec![(String::new(), expected)]
+        );
+    }
+    assert!(
+        series_of(
+            router,
+            runs(json!({"relay_id": relay_b, "agent_id": agent_a}))
+        )
+        .await
+        .as_array()
+        .unwrap()
+        .is_empty()
+    );
+    assert!(
+        series_of(router, jobs(json!({"relay_id": relay_a})))
+            .await
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        totals(&series_of(router, jobs(json!({"agent_id": agent_b}))).await),
+        vec![(String::new(), 7.0)]
+    );
+    let (status, _) = send(
+        router,
+        "POST",
+        QUERY,
+        Some("query"),
+        Some(runs(json!({"agent_id": 0}))),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    assert_eq!(
+        metric_names(&send_get(router, "/v1/series").await),
+        ["api/runs", "worker/jobs"]
+    );
+    let by_agent = send_get(router, &format!("/v1/series?agent_id={agent_a}")).await;
+    assert_eq!(metric_names(&by_agent), ["api/runs"]);
+    assert!(
+        metric_names(
+            &send_get(
+                router,
+                &format!("/v1/series?relay_id={relay_a}&agent_id={agent_b}")
+            )
+            .await
+        )
+        .is_empty()
+    );
+    assert_eq!(
+        source_services(&send_get(router, "/v1/series/sources").await),
+        ["api", "worker"]
+    );
+    assert_eq!(
+        source_services(&send_get(router, &format!("/v1/series/sources?relay_id={relay_a}")).await),
+        ["api"]
+    );
+    assert_eq!(
+        source_services(&send_get(router, &format!("/v1/series/sources?relay_id={relay_b}")).await),
+        ["api", "worker"]
+    );
+
+    let lookup = |agent: i64| {
+        json!({
+            "keys": [{"server": "eu-prod-01", "service": "worker", "name": "jobs", "origin": "counter"}],
+            "agent_id": agent
+        })
+    };
+    let (status, reply) = send(
+        router,
+        "POST",
+        "/v1/series/lookup",
+        Some("query"),
+        Some(lookup(agent_a)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(reply["metrics"].as_array().unwrap().is_empty());
+    let (status, reply) = send(
+        router,
+        "POST",
+        "/v1/series/lookup",
+        Some("query"),
+        Some(lookup(agent_b)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(metric_names(&reply), ["worker/jobs"]);
+
+    let alert = |extra: Value| {
+        let mut body = json!({
+            "server": "eu-prod-01",
+            "service": "api",
+            "name": "runs",
+            "origin": "counter",
+            "windows_seconds": [600]
+        });
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        body
+    };
+    for (extra, count, sum) in [
+        (json!({}), 2, 13.0),
+        (json!({"agent_id": agent_a}), 1, 10.0),
+    ] {
+        let (status, reply) = send(
+            router,
+            "POST",
+            ALERT_QUERY,
+            Some("query"),
+            Some(alert(extra)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(reply["windows"][0]["count"], count);
+        assert_eq!(reply["windows"][0]["sum"], sum);
+    }
+}
+
+#[tokio::test]
+async fn node_filters_scope_points_lists_sources_and_alerts_across_sealing() {
+    use sha2::{Digest, Sha256};
+
+    let dir = tempfile::tempdir().unwrap();
+    let core = Core::open(config(dir.path(), 1000)).unwrap();
+    let access = &core.journal.access;
+    let relay_a = access.create_relay("relay-a").unwrap().relay.id;
+    let relay_b = access.create_relay("relay-b").unwrap().relay.id;
+    let agent_a = access.create_agent("agent-a", relay_a).unwrap();
+    let agent_b = access.create_agent("agent-b", relay_b).unwrap();
+    let hash = |token: &str| wire::AgentHash(Sha256::digest(token.as_bytes()).into());
+    let now = OffsetDateTime::now_utc();
+    let ago = |seconds: i64| {
+        (now - time::Duration::seconds(seconds))
+            .format(&Rfc3339)
+            .unwrap()
+    };
+    core.journal
+        .accept(&agent_batch(
+            hash(&agent_a.token),
+            source("api", Some("a1")),
+            vec![report(1, &ago(120), json!({"runs": 10}), json!({}))],
+        ))
+        .unwrap();
+    core.journal
+        .accept(&agent_batch(
+            hash(&agent_b.token),
+            source("api", Some("b1")),
+            vec![report(2, &ago(90), json!({"runs": 3}), json!({}))],
+        ))
+        .unwrap();
+    core.journal
+        .accept(&agent_batch(
+            hash(&agent_b.token),
+            source("worker", Some("b1")),
+            vec![report(3, &ago(60), json!({"jobs": 7}), json!({}))],
+        ))
+        .unwrap();
+    wait(|| core.snapshot().watermark >= 3);
+    let ids = [relay_a, relay_b, agent_a.agent.id, agent_b.agent.id];
+    let (from, to) = (ago(600), ago(0));
+
+    // Открытый сегмент: точки и каталог узла.
+    let router = api::router(core.clone());
+    assert_node_filters(&router, &from, &to, ids).await;
+    drop(router);
+    core.shutdown().unwrap();
+    drop(core);
+
+    // Запечатанный файл точек и метаданные узла переживают перезапуск.
+    let core = Core::open(config(dir.path(), 1000)).unwrap();
+    assert_eq!(core.snapshot().series_files.len(), 1);
+    let router = api::router(core.clone());
+    assert_node_filters(&router, &from, &to, ids).await;
+    drop(router);
+    core.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn node_filters_read_rolled_up_days_per_node() {
+    use sha2::{Digest, Sha256};
+
+    let day = day_ago(10);
+    let dir = tempfile::tempdir().unwrap();
+    let core = Core::open(rollup_config(dir.path(), 1000)).unwrap();
+    let access = &core.journal.access;
+    let relay = access.create_relay("relay").unwrap().relay.id;
+    let agent_a = access.create_agent("agent-a", relay).unwrap();
+    let agent_b = access.create_agent("agent-b", relay).unwrap();
+    let hash = |token: &str| wire::AgentHash(Sha256::digest(token.as_bytes()).into());
+    core.journal
+        .accept(&agent_batch(
+            hash(&agent_a.token),
+            source("api", Some("a1")),
+            vec![report(
+                1,
+                &stamp(day, 14_400),
+                json!({"runs": 10}),
+                json!({}),
+            )],
+        ))
+        .unwrap();
+    core.journal
+        .accept(&agent_batch(
+            hash(&agent_b.token),
+            source("api", Some("b1")),
+            vec![report(
+                2,
+                &stamp(day, 18_000),
+                json!({"runs": 3}),
+                json!({}),
+            )],
+        ))
+        .unwrap();
+    wait(|| core.snapshot().watermark >= 2);
+    core.shutdown().unwrap();
+    drop(core);
+
+    let core = Core::open(rollup_config(dir.path(), 1000)).unwrap();
+    wait(|| rollup_id(&core, day, HOURLY).is_some());
+    // Сырые точки удалены: суточный запрос отвечает только агрегатом, фильтр узла работает и на нём.
+    fs::remove_file(&core.snapshot().series_files[0].path).unwrap();
+    let router = api::router(core.clone());
+    let day_query =
+        |extra: Value| query_with("runs", &stamp(day, 0), &stamp(day, 86_400), 86_400, extra);
+    assert_eq!(
+        totals(&series_of(&router, day_query(json!({}))).await),
+        vec![(String::new(), 13.0)]
+    );
+    assert_eq!(
+        totals(&series_of(&router, day_query(json!({"agent_id": agent_a.agent.id}))).await),
+        vec![(String::new(), 10.0)]
+    );
+    assert_eq!(
+        totals(&series_of(&router, day_query(json!({"relay_id": relay}))).await),
+        vec![(String::new(), 13.0)]
+    );
+    assert!(
+        series_of(&router, day_query(json!({"relay_id": relay + 1})))
+            .await
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    drop(router);
+    core.shutdown().unwrap();
+}
+
+/// Ответ GET с токеном query; статус проверяется.
+async fn send_get(router: &Router, uri: &str) -> Value {
+    let (status, reply) = send(router, "GET", uri, Some("query"), None).await;
+    assert_eq!(status, StatusCode::OK, "{uri}");
+    reply
+}
+
+#[tokio::test]
+async fn rollup_with_outdated_fingerprint_is_rebuilt_and_answers_stay_exact() {
+    let day = day_ago(10);
+    let dir = tempfile::tempdir().unwrap();
+    let core = Core::open(rollup_config(dir.path(), 1000)).unwrap();
+    core.journal
+        .accept(&runs_batch(
+            1,
+            &[(stamp(day, 14_400), 10), (stamp(day, 18_000), 3)],
+        ))
+        .unwrap();
+    wait(|| core.snapshot().watermark >= 2);
+    core.shutdown().unwrap();
+    drop(core);
+    let core = Core::open(rollup_config(dir.path(), 1000)).unwrap();
+    wait(|| rollup_id(&core, day, HOURLY).is_some());
+    let built = rollup_id(&core, day, HOURLY);
+    core.shutdown().unwrap();
+    drop(core);
+
+    // Агрегат, построенный форматом до версии схемы, отличается отпечатком и не читается.
+    let catalog = rusqlite::Connection::open(dir.path().join("catalog.sqlite")).unwrap();
+    catalog
+        .execute("UPDATE series_rollups SET fingerprint='outdated'", [])
+        .unwrap();
+    drop(catalog);
+
+    let core = Core::open(rollup_config(dir.path(), 1000)).unwrap();
+    let router = api::router(core.clone());
+    let day_query = query_with(
+        "runs",
+        &stamp(day, 0),
+        &stamp(day, 86_400),
+        86_400,
+        json!({}),
+    );
+    // Во время пересборки ответ идёт по сырым точкам, после неё - по новому агрегату; значения одни.
+    assert_eq!(
+        totals(&series_of(&router, day_query.clone()).await),
+        vec![(String::new(), 13.0)]
+    );
+    wait(|| rollup_id(&core, day, HOURLY).is_some_and(|id| Some(id) != built));
+    assert_eq!(
+        totals(&series_of(&router, day_query).await),
+        vec![(String::new(), 13.0)]
+    );
+    drop(router);
+    core.shutdown().unwrap();
+}

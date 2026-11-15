@@ -1,5 +1,6 @@
 //! Графики метрик: список серий и bucket-значения поверх Parquet серий и открытых точек.
 use std::{
+    borrow::Cow,
     collections::{BTreeMap, BTreeSet, HashMap},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -28,6 +29,7 @@ use crate::{
     model::format_timestamp,
     query::{Filters, PreparedFilter, QueryError},
     rollup::{self, DAY_NANOS, RollupFile},
+    scoped_metrics::{Metadata, NodeFilter, merge_active},
     series::{self, Origin},
     storage::{Core, Snapshot},
 };
@@ -41,6 +43,10 @@ pub struct AlertQueryRequest {
     pub origin: Origin,
     #[serde(default)]
     pub environment: Option<String>,
+    #[serde(default)]
+    pub relay_id: Option<i64>,
+    #[serde(default)]
+    pub agent_id: Option<i64>,
     pub windows_seconds: Vec<u64>,
     #[serde(default = "alert_query_need_increase")]
     pub need_increase: bool,
@@ -201,6 +207,7 @@ pub async fn alert_query(
 }
 
 fn validate_alert_request(request: &AlertQueryRequest) -> Result<(), QueryError> {
+    NodeFilter::new(request.relay_id, request.agent_id)?;
     if request.server.is_empty()
         || request.server.len() > 128
         || request.service.is_empty()
@@ -231,6 +238,17 @@ fn alert_scope(request: &AlertQueryRequest) -> Expr {
         .and(col("origin").eq(lit(request.origin.as_str())));
     if let Some(environment) = &request.environment {
         predicate = predicate.and(col("environment").eq(lit(environment.as_str())));
+    }
+    node_scope(predicate, request.relay_id, request.agent_id)
+}
+
+/// Условия узла. Строка без узла (старые данные) не совпадает ни с одним фильтром.
+fn node_scope(mut predicate: Expr, relay_id: Option<i64>, agent_id: Option<i64>) -> Expr {
+    if let Some(relay_id) = relay_id {
+        predicate = predicate.and(col("relay_id").eq(lit(relay_id)));
+    }
+    if let Some(agent_id) = agent_id {
+        predicate = predicate.and(col("agent_id").eq(lit(agent_id)));
     }
     predicate
 }
@@ -282,8 +300,15 @@ async fn metric_scope_has_points_before(
     request: &AlertQueryRequest,
     from: i64,
 ) -> Result<bool, QueryError> {
+    let node = NodeFilter::new(request.relay_id, request.agent_id)?;
     let active_has_prior = snapshot.active.as_ref().is_some_and(|active| {
-        active.scoped.names.iter().any(
+        // С фильтром узла проверяются только точки узла; иначе точки других узлов лишь заставят сканировать файлы.
+        let scoped: Cow<'_, Metadata> = if node.is_set() {
+            Cow::Owned(active.scoped.for_node(node))
+        } else {
+            Cow::Borrowed(&active.scoped)
+        };
+        scoped.names.iter().any(
             |((server, service, name, origin, environment), (first_seen, _))| {
                 server == &request.server
                     && service == &request.service
@@ -312,13 +337,33 @@ async fn metric_scope_has_points_before(
             .catalog
             .lock()
             .map_err(|_| anyhow::anyhow!("catalog lock poisoned"))?;
-        let exists = catalog.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM scoped_series
-             WHERE server=?1 AND service=?2 AND name=?3 AND origin=?4
-               AND (?5 IS NULL OR environment=?5) AND first_seen<?6)",
-            rusqlite::params![server, service, name, origin, environment, from],
-            |row| row.get::<_, bool>(0),
-        )?;
+        let exists = if node.is_set() {
+            catalog.connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM series_nodes
+                 WHERE server=?1 AND service=?2 AND name=?3 AND origin=?4
+                   AND (?5 IS NULL OR environment=?5) AND first_seen<?6
+                   AND (?7 IS NULL OR relay_id=?7) AND (?8 IS NULL OR agent_id=?8))",
+                rusqlite::params![
+                    server,
+                    service,
+                    name,
+                    origin,
+                    environment,
+                    from,
+                    node.relay_id,
+                    node.agent_id
+                ],
+                |row| row.get::<_, bool>(0),
+            )?
+        } else {
+            catalog.connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM scoped_series
+                 WHERE server=?1 AND service=?2 AND name=?3 AND origin=?4
+                   AND (?5 IS NULL OR environment=?5) AND first_seen<?6)",
+                rusqlite::params![server, service, name, origin, environment, from],
+                |row| row.get::<_, bool>(0),
+            )?
+        };
         anyhow::Result::<bool>::Ok(exists)
     })
     .await
@@ -716,6 +761,10 @@ pub struct QueryRequest {
     pub origin: Option<Origin>,
     #[serde(default)]
     pub environment: Option<String>,
+    #[serde(default)]
+    pub relay_id: Option<i64>,
+    #[serde(default)]
+    pub agent_id: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -822,14 +871,20 @@ type CatalogRows = (
 );
 
 /// Имена, окружения и определения из каталога; SQLite читается вне async-потока.
-async fn catalog(core: Arc<Core>) -> Result<CatalogRows, QueryError> {
+/// С фильтром узла метаданные берутся только по его точкам.
+async fn catalog(core: Arc<Core>, node: NodeFilter) -> Result<CatalogRows, QueryError> {
     tokio::task::spawn_blocking(move || -> Result<CatalogRows, QueryError> {
         let catalog = core.journal.catalog.lock().unwrap();
+        let metadata = if node.is_set() {
+            Metadata::load_nodes(&catalog, node)?
+        } else {
+            Metadata::load(&catalog)?
+        };
         Ok((
             catalog.series_names()?,
             catalog.series_environments()?,
             catalog.definitions()?,
-            crate::scoped_metrics::Metadata::load(&catalog)?,
+            metadata,
         ))
     })
     .await
@@ -845,24 +900,61 @@ fn default_origin(definition: &Definition) -> Origin {
     }
 }
 
-/// GET /v1/series: серии каталога и открытого сегмента, окружения, определения без точек и определения у серий.
-pub async fn list(core: Arc<Core>) -> Result<ListResponse, QueryError> {
-    let snapshot = core.snapshot();
-    let (names, catalog_environments, definitions, _) = catalog(core.clone()).await?;
-    let mut environments: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
-    let active_environments = snapshot
-        .active
-        .iter()
-        .flat_map(|active| active.environments.iter().cloned());
-    for (service, name, environment) in catalog_environments.into_iter().chain(active_environments)
-    {
-        environments
-            .entry((service, name))
-            .or_default()
-            .insert(environment);
+/// Диапазоны имён (service, name, origin) и окружения (service, name) списка серий.
+type NameRanges = BTreeMap<(String, String, String), (i64, i64)>;
+type NameEnvironments = BTreeMap<(String, String), BTreeSet<String>>;
+
+/// Диапазоны имён и окружения по метаданным узла.
+fn node_ranges(metadata: &Metadata) -> (NameRanges, NameEnvironments) {
+    let mut ranges = BTreeMap::new();
+    let mut environments: NameEnvironments = BTreeMap::new();
+    for ((_, service, name, origin, environment), (first, last)) in &metadata.names {
+        ranges
+            .entry((service.clone(), name.clone(), origin.clone()))
+            .and_modify(|range: &mut (i64, i64)| {
+                range.0 = range.0.min(*first);
+                range.1 = range.1.max(*last);
+            })
+            .or_insert((*first, *last));
+        if !environment.is_empty() {
+            environments
+                .entry((service.clone(), name.clone()))
+                .or_default()
+                .insert(environment.clone());
+        }
     }
+    (ranges, environments)
+}
+
+/// GET /v1/series: серии каталога и открытого сегмента, окружения, определения без точек и определения у серий.
+/// С фильтром узла выдаются только серии и окружения, у которых есть точки узла.
+pub async fn list(core: Arc<Core>, node: NodeFilter) -> Result<ListResponse, QueryError> {
+    let snapshot = core.snapshot();
+    let (names, catalog_environments, definitions, mut metadata) =
+        catalog(core.clone(), node).await?;
+    let (ranges, environments) = if node.is_set() {
+        if let Some(active) = &snapshot.active {
+            merge_active(&mut metadata, &active.scoped, node);
+        }
+        node_ranges(&metadata)
+    } else {
+        let mut environments: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
+        let active_environments = snapshot
+            .active
+            .iter()
+            .flat_map(|active| active.environments.iter().cloned());
+        for (service, name, environment) in
+            catalog_environments.into_iter().chain(active_environments)
+        {
+            environments
+                .entry((service, name))
+                .or_default()
+                .insert(environment);
+        }
+        (merged_names(&names, &snapshot), environments)
+    };
     let mut metrics: BTreeMap<(String, String, String), Metric> = BTreeMap::new();
-    for ((service, name, origin), (first, last)) in merged_names(&names, &snapshot) {
+    for ((service, name, origin), (first, last)) in ranges {
         metrics.insert(
             (service.clone(), name.clone(), origin.clone()),
             Metric {
@@ -877,7 +969,7 @@ pub async fn list(core: Arc<Core>) -> Result<ListResponse, QueryError> {
             },
         );
     }
-    for definition in &definitions {
+    for definition in definitions.iter().filter(|_| !node.is_set()) {
         let observed = metrics
             .keys()
             .any(|(service, name, _)| *service == definition.service && *name == definition.name);
@@ -933,10 +1025,11 @@ pub async fn query(core: Arc<Core>, request: QueryRequest) -> Result<QueryRespon
             "query exceeds 10000 buckets or timestamp range".into(),
         ));
     }
+    let node = NodeFilter::new(request.relay_id, request.agent_id)?;
     let snapshot = core.snapshot();
-    let (_, _, definitions, mut metadata) = catalog(core.clone()).await?;
+    let (_, _, definitions, mut metadata) = catalog(core.clone(), node).await?;
     if let Some(active) = &snapshot.active {
-        metadata.merge(&active.scoped);
+        merge_active(&mut metadata, &active.scoped, node);
     }
     if let Some(server) = &request.server {
         crate::definitions::validate_service(server).map_err(QueryError::Invalid)?;
@@ -955,16 +1048,19 @@ pub async fn query(core: Arc<Core>, request: QueryRequest) -> Result<QueryRespon
         })
         .map(|(server, _, _, _, _)| server.clone())
         .collect();
-    servers.extend(
-        candidates
-            .iter()
-            .filter(|d| {
-                request
-                    .origin
-                    .is_none_or(|origin| default_origin(d) == origin)
-            })
-            .map(|d| d.server.clone()),
-    );
+    // С фильтром узла сервер определения без точек узла не участвует.
+    if !node.is_set() {
+        servers.extend(
+            candidates
+                .iter()
+                .filter(|d| {
+                    request
+                        .origin
+                        .is_none_or(|origin| default_origin(d) == origin)
+                })
+                .map(|d| d.server.clone()),
+        );
+    }
     if let Some(server) = &request.server {
         servers = BTreeSet::from([server.clone()]);
     }
@@ -1247,7 +1343,7 @@ fn split_key(split: Split) -> Expr {
     }
 }
 
-/// Условия серии: сервис, имя и, если заданы, origin и окружение.
+/// Условия серии: сервис, имя и, если заданы, origin, окружение и узел.
 fn scope(request: &QueryRequest) -> Expr {
     let mut predicate = col("service")
         .eq(lit(request.service.as_str()))
@@ -1261,10 +1357,10 @@ fn scope(request: &QueryRequest) -> Expr {
     if let Some(environment) = &request.environment {
         predicate = predicate.and(col("environment").eq(lit(environment.as_str())));
     }
-    predicate
+    node_scope(predicate, request.relay_id, request.agent_id)
 }
 
-/// Повторно доставленные точки схлопываются: одна строка на серию, время и event_id, значение - максимум.
+/// Повторно доставленные точки схлопываются: одна строка на серию, узел, время и event_id, значение - максимум.
 pub(crate) fn dedup(frame: DataFrame) -> Result<DataFrame> {
     Ok(frame.aggregate(
         vec![
@@ -1277,6 +1373,8 @@ pub(crate) fn dedup(frame: DataFrame) -> Result<DataFrame> {
             col("origin"),
             col("rule_id"),
             col("labels"),
+            col("relay_id"),
+            col("agent_id"),
             col("timestamp"),
             col("event_id"),
         ],
@@ -1439,4 +1537,90 @@ pub(crate) fn timestamp(value: i64) -> Expr {
         Some(value),
         Some("UTC".into()),
     ))
+}
+
+#[cfg(test)]
+mod node_tests {
+    use super::*;
+    use crate::{columns, wire::Source};
+
+    /// Файл точек до колонок узла читается с null для relay_id и agent_id и не попадает под фильтр узла.
+    #[tokio::test]
+    async fn legacy_series_file_reads_null_nodes_and_matches_no_node_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = crate::config::Config::from_lookup(|key| match key {
+            "LOGNARA_ADMIN_TOKEN" => Some("ingest".into()),
+            "LOGNARA_QUERY_TOKEN" => Some("query".into()),
+            _ => None,
+        })
+        .unwrap();
+        config.data_dir = dir.path().into();
+        config.disk_reserve_bytes = 1;
+        let core = Core::open(config).unwrap();
+        let point = series::Point {
+            timestamp: 1,
+            source: Source {
+                environment: None,
+                server: "srv".into(),
+                backend: "be".into(),
+                service: "api".into(),
+                service_instance: None,
+            },
+            name: "runs".into(),
+            origin: Origin::Counter,
+            rule_id: None,
+            labels: String::new(),
+            value: 1.0,
+            event_id: None,
+            relay_id: None,
+            agent_id: None,
+        };
+        let current = series::encode(&[point]).unwrap();
+        // Колонки узла - последние две; старый файл их не содержит.
+        let legacy = current
+            .project(&(0..current.num_columns() - 2).collect::<Vec<_>>())
+            .unwrap();
+        let relative = "metrics/2026/10/13/legacy.parquet";
+        let path = dir.path().join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut writer = columns::ParquetWriter::create(&path, legacy.schema()).unwrap();
+        writer.write(&legacy).unwrap();
+        writer.finish().unwrap();
+        let snapshot = Snapshot {
+            series_files: vec![Arc::new(series::SeriesFile {
+                meta: series::SeriesFileMeta {
+                    version: 1,
+                    id: "legacy".into(),
+                    path: relative.into(),
+                    rows: 1,
+                    min_timestamp: 1,
+                    max_timestamp: 1,
+                    closed_at: 0,
+                },
+                path,
+            })],
+            ..Snapshot::default()
+        };
+
+        let rows: usize = frame(&core, &snapshot, 0, i64::MAX)
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap()
+            .iter()
+            .map(|batch| batch.num_rows())
+            .sum();
+        assert_eq!(rows, 1);
+        let node = frame(&core, &snapshot, 0, i64::MAX)
+            .await
+            .unwrap()
+            .filter(col("relay_id").eq(lit(5_i64)))
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        assert!(node.iter().all(|batch| batch.num_rows() == 0));
+        core.shutdown().unwrap();
+    }
 }

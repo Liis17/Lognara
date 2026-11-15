@@ -178,6 +178,7 @@ async fn main() -> Result<()> {
                 },
                 dropped: 0,
                 events,
+                agent: None,
             }],
         };
         let packed = rmp_serde::to_vec_named(&batch)?;

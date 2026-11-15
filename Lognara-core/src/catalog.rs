@@ -58,6 +58,8 @@ impl Catalog {
             CREATE TABLE IF NOT EXISTS series_files (id TEXT PRIMARY KEY, metadata TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('ready','deleting')));
             CREATE TABLE IF NOT EXISTS series_names (service TEXT NOT NULL, name TEXT NOT NULL, origin TEXT NOT NULL, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, PRIMARY KEY(service, name, origin));
             CREATE TABLE IF NOT EXISTS series_environments (service TEXT NOT NULL, name TEXT NOT NULL, environment TEXT NOT NULL, PRIMARY KEY(service, name, environment));
+            CREATE TABLE IF NOT EXISTS series_nodes (relay_id INTEGER NOT NULL, agent_id INTEGER NOT NULL, server TEXT NOT NULL, service TEXT NOT NULL, name TEXT NOT NULL, origin TEXT NOT NULL, environment TEXT NOT NULL, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, PRIMARY KEY(relay_id, agent_id, server, service, name, origin, environment));
+            CREATE INDEX IF NOT EXISTS series_nodes_agent ON series_nodes(agent_id);
             CREATE TABLE IF NOT EXISTS series_definitions (id TEXT PRIMARY KEY, service TEXT NOT NULL, name TEXT NOT NULL, body TEXT NOT NULL, UNIQUE(service, name));
             CREATE TABLE IF NOT EXISTS series_rollups (id TEXT PRIMARY KEY, day TEXT NOT NULL, resolution INTEGER NOT NULL, path TEXT NOT NULL, fingerprint TEXT NOT NULL, built_at INTEGER NOT NULL, state TEXT NOT NULL CHECK(state IN ('ready','deleting')));
             CREATE UNIQUE INDEX IF NOT EXISTS series_rollups_ready ON series_rollups(day, resolution) WHERE state='ready';
