@@ -66,6 +66,31 @@ impl Telemetry {
     }
 }
 
+/// Состояние очереди и доставки для встраивающего процесса.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TelemetrySnapshot {
+    pub spool_bytes: u64,
+    pub spool_records: u64,
+    pub last_record_ms_ago: Option<u64>,
+    pub last_delivery_ms_ago: Option<u64>,
+    pub last_failure_ms_ago: Option<u64>,
+    pub delivery_failures: u64,
+}
+
+impl TelemetrySnapshot {
+    pub(crate) fn of(buffer: &Buffer) -> Self {
+        let telemetry = &buffer.telemetry;
+        Self {
+            spool_bytes: buffer.bytes(),
+            spool_records: buffer.len(),
+            last_record_ms_ago: telemetry.ago(&telemetry.last_record),
+            last_delivery_ms_ago: telemetry.ago(&telemetry.last_delivery),
+            last_failure_ms_ago: telemetry.ago(&telemetry.last_failure),
+            delivery_failures: telemetry.failures.load(Ordering::Relaxed),
+        }
+    }
+}
+
 fn body(config: &Config, buffer: &Buffer) -> String {
     let telemetry = &buffer.telemetry;
     json!({
