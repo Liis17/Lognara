@@ -18,7 +18,7 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
 PrivateTmp=yes
-PrivateDevices=yes
+# /dev/nvidia* нужен nvidia-smi, поэтому PrivateDevices не используется.
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes

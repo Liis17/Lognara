@@ -24,6 +24,9 @@ const MAX_EVENTS_PER_SCAN: usize = 50;
 const MAX_KNOWN: usize = 20_000;
 const MAX_CMDLINE: usize = 1024;
 const SECRET_WORDS: &[&str] = &[
+    "authorization",
+    "bearer",
+    "cookie",
     "password",
     "passwd",
     "pass",
@@ -122,6 +125,10 @@ pub struct Scanner {
     tick_hz: f64,
     page: u64,
     last_top: Option<Instant>,
+    /// Процессы с событиями последнего опроса и добавленные ими исполняемые файлы.
+    pending: Vec<(Key, Option<String>)>,
+    /// Известные файлы изменились и ещё не сохранены.
+    dirty: bool,
 }
 
 impl Scanner {
@@ -156,6 +163,8 @@ impl Scanner {
             tick_hz: if tick_hz > 0 { tick_hz as f64 } else { 100.0 },
             page: if page > 0 { page as u64 } else { 4096 },
             last_top: None,
+            pending: Vec::new(),
+            dirty: false,
         }
     }
 
@@ -200,10 +209,12 @@ impl Scanner {
                                 "known executable limit reached; new executables are not reported"
                             );
                         } else {
-                            self.known.insert(executable);
+                            self.known.insert(executable.clone());
                             known_changed = true;
                         }
                     }
+                    let added = (new_executable && !self.known_full).then_some(executable);
+                    let events_before = events.len();
                     let suspicious = self.suspicious(&info);
                     if let Some(reason) = &suspicious {
                         push(
@@ -227,15 +238,16 @@ impl Scanner {
                             event(key, &info, "process.start", "info", "process started"),
                         );
                     }
+                    if events.len() > events_before {
+                        self.pending.push((key, added));
+                    }
                     info
                 }
             };
             next.insert(key, info);
         }
         self.processes = next;
-        if known_changed || self.baseline {
-            self.save_state();
-        }
+        self.dirty |= known_changed || self.baseline;
         self.baseline = false;
         if suppressed > 0 {
             events.push(json!({
@@ -412,6 +424,25 @@ impl Scanner {
         })
     }
 
+    /// События опроса сохранены в spool: известные файлы можно записать на диск.
+    pub fn commit(&mut self) {
+        self.pending.clear();
+        if std::mem::take(&mut self.dirty) {
+            self.save_state();
+        }
+    }
+
+    /// Запись в spool не удалась: процессы с событиями будут обнаружены и сообщены заново,
+    /// а их новые исполняемые файлы снова считаются неизвестными.
+    pub fn rollback(&mut self) {
+        for (key, executable) in self.pending.drain(..) {
+            self.processes.remove(&key);
+            if let Some(executable) = executable {
+                self.known.remove(&executable);
+            }
+        }
+    }
+
     fn save_state(&self) {
         let result = (|| -> std::io::Result<()> {
             let dir = self.state_path.parent().unwrap_or(Path::new("."));
@@ -471,11 +502,27 @@ pub fn mask_cmdline(bytes: &[u8]) -> String {
     };
     let mut masked = Vec::with_capacity(args.len());
     let mut hide_next = false;
+    let mut user_next = false;
     for arg in args {
         if std::mem::take(&mut hide_next) {
             masked.push("***".to_owned());
             continue;
         }
+        // `-u user:pass` и `--user user:pass` (curl, wget): пароль после двоеточия.
+        if std::mem::take(&mut user_next) {
+            masked.push(match arg.split_once(':') {
+                Some((user, _)) => format!("{user}:***"),
+                None => arg,
+            });
+            continue;
+        }
+        // Пароль слитно с ключом: `-pSECRET` (mysql).
+        if arg.len() > 2 && arg.starts_with("-p") && !arg.starts_with("--") {
+            masked.push("-p***".to_owned());
+            continue;
+        }
+        let arg = mask_url_password(arg);
+        user_next = arg == "-u" || arg == "--user";
         if let Some((name, _)) = arg.split_once(['=', ':'])
             && secret(name)
         {
@@ -497,6 +544,22 @@ pub fn mask_cmdline(bytes: &[u8]) -> String {
     text
 }
 
+/// `scheme://user:pass@host` → `scheme://user:***@host`.
+fn mask_url_password(arg: String) -> String {
+    let Some(start) = arg.find("://").map(|index| index + 3) else {
+        return arg;
+    };
+    let rest = &arg[start..];
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let Some(at) = rest[..end].rfind('@') else {
+        return arg;
+    };
+    let Some(colon) = rest[..at].find(':') else {
+        return arg;
+    };
+    format!("{}{}:***{}", &arg[..start], &rest[..colon], &rest[at..])
+}
+
 /// Первые 12 символов 64-hex ID контейнера Docker, containerd, Podman или Kubernetes.
 pub fn container_id(cgroup: &str) -> Option<String> {
     cgroup.lines().find_map(|line| {
@@ -516,13 +579,21 @@ pub async fn run(
     let mut ticker = tokio::time::interval(Duration::from_secs(settings.interval_seconds));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut scanner = Some(Scanner::open(&root, settings, state_path));
+    // Итог записи прошлого опроса применяется в blocking-работнике: state пишется с fsync.
+    let mut saved: Option<bool> = None;
     loop {
         tokio::select! {
             _ = stop.cancelled() => return,
             _ = ticker.tick() => {}
         }
         let mut owned = scanner.take().expect("scanner is returned after each scan");
+        let outcome = saved.take();
         let Ok((owned, records)) = tokio::task::spawn_blocking(move || {
+            match outcome {
+                Some(true) => owned.commit(),
+                Some(false) => owned.rollback(),
+                None => {}
+            }
             let records = owned.scan(Instant::now());
             (owned, records)
         })
@@ -532,10 +603,15 @@ pub async fn run(
             return;
         };
         scanner = Some(owned);
-        // Переполненная очередь не копит события в памяти: опрос продолжится со следующего тика.
-        if let Err(error) = collector.save(records).await {
-            warn!(%error, "process events skipped");
-        }
+        // Переполненная очередь не копит события в памяти: процессы с событиями будут
+        // обнаружены заново на следующем опросе, после восстановления доставки.
+        saved = Some(match collector.save(records).await {
+            Ok(()) => true,
+            Err(error) => {
+                warn!(%error, "process events not saved; they will be reported again");
+                false
+            }
+        });
     }
 }
 
@@ -594,6 +670,9 @@ mod tests {
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].0, "process.suspicious");
         assert_eq!(first[0].1["level"], "warn");
+        // Известные файлы сохраняются только после записи событий опроса в spool.
+        assert!(!state.exists());
+        scanner.commit();
         assert!(state.exists());
 
         let container = format!("0::/system.slice/docker-{}.scope\n", "ab".repeat(32));
@@ -629,6 +708,18 @@ mod tests {
         assert_eq!(top["top_cpu"][0]["pid"], 10);
         assert_eq!(top["Metrics"]["Gauges"]["proc.count"], 4);
 
+        // Очередь не приняла события: следующий опрос сообщает те же процессы снова.
+        scanner.rollback();
+        let retried = actions(&scanner.scan(start + Duration::from_secs(61)));
+        let retried: Vec<_> = retried
+            .iter()
+            .filter(|(action, _)| action == "process.new_executable")
+            .map(|(_, value)| value["pid"].as_u64().unwrap())
+            .collect();
+        assert_eq!(retried.len(), 2);
+        assert!(retried.contains(&12) && retried.contains(&13));
+        scanner.commit();
+
         // После рестарта известные файлы не повторяются; подозрительный процесс виден снова.
         process(root, 14, 300, 0, "/usr/bin/tor", "0::/\n");
         let mut restarted = Scanner::open(root, settings, state);
@@ -644,6 +735,13 @@ mod tests {
             mask_cmdline(b"mysql\0-u\0root\0--password=x\0--db-token\0t\0API_KEY:abc\0"),
             "mysql -u root --password=*** --db-token *** API_KEY:***"
         );
+        assert_eq!(
+            mask_cmdline(
+                b"curl\0-u\0admin:hunter2\0-H\0Authorization: Bearer abc\0https://bob:pw@example.com/x?a=1\0"
+            ),
+            "curl -u admin:*** -H Authorization:*** https://bob:***@example.com/x?a=1"
+        );
+        assert_eq!(mask_cmdline(b"mysql\0-pSECRET\0db\0"), "mysql -p*** db");
         assert_eq!(mask_cmdline(&vec![b'a'; 4000]).len(), MAX_CMDLINE);
         assert_eq!(container_id("0::/\n"), None);
     }

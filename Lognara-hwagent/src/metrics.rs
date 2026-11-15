@@ -271,7 +271,8 @@ impl Sampler {
                 continue;
             };
             let name = match mount.as_str() {
-                "/" => "root".to_owned(),
+                // Не "root": том, смонтированный в /root, дал бы то же имя.
+                "/" => "rootfs".to_owned(),
                 path => sanitize(path.trim_start_matches('/')),
             };
             report.gauge(format!("fs.{name}.free_bytes"), free);
@@ -618,7 +619,7 @@ mod tests {
         assert_eq!(first.gauges["pressure.cpu.some_avg10"], 1.5);
         assert_eq!(first.gauges["gpu.card0.util_percent"], 37.0);
         assert_eq!(first.gauges["gpu.card0.memory_used_percent"], 50.0);
-        assert!(first.gauges.contains_key("fs.root.used_percent"));
+        assert!(first.gauges.contains_key("fs.rootfs.used_percent"));
         assert!(
             first
                 .gauges
