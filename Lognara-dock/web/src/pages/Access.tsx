@@ -1,4 +1,4 @@
-import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { type FormEvent, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError, type Agent, errorText, type Relay } from "../api";
 import HostIcon from "../components/HostIcon";
 
@@ -58,6 +58,19 @@ function AddSlot({
       <button type="button" className="quiet" disabled={disabled} onClick={onCancel}>Отмена</button>
     </div>
   </form>;
+}
+
+function TokenDialog({ children }: { children: ReactNode }) {
+  const ref = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    const dialog = ref.current!;
+    dialog.showModal();
+    return () => dialog.close();
+  }, []);
+  // Esc не закрывает: токен показывается один раз, закрытие только кнопкой «Я сохранил токен».
+  return <dialog ref={ref} className="token token-dialog" aria-label="Выданный токен" onCancel={(event) => event.preventDefault()}>
+    {children}
+  </dialog>;
 }
 
 function NameEditor({
@@ -223,7 +236,7 @@ export default function Access({ onUnauthorized }: { onUnauthorized: () => void 
     </header>
     {error && <p className="error" role="alert">{error}</p>}
 
-    {issued && <div className="token" role="region" aria-label="Выданный токен">
+    {issued && <TokenDialog>
       <p><strong>{issued.rotated
         ? `Токен ${issued.kind === "host" ? "hwagent" : issued.kind === "agent" ? "агента" : "relay"} «${issued.name}» перевыпущен.`
         : `${issued.kind === "relay" ? "Relay" : issued.kind === "host" ? "hwagent" : "Агент"} «${issued.name}» создан.`}</strong>{" "}
@@ -237,7 +250,7 @@ export default function Access({ onUnauthorized }: { onUnauthorized: () => void 
         <button type="button" onClick={() => { setIssued(null); setCopyStatus(""); }}>Я сохранил токен</button>
       </div>
       <p className="access-copy-status" role="status">{copyStatus}</p>
-    </div>}
+    </TokenDialog>}
 
     <section className="access-tree" aria-label="Дерево подключений">
       <header className="access-dock-node">

@@ -109,15 +109,19 @@ test("creates a relay and agent inline and shows each issued token once", async 
   await page.getByRole("button", { name: "Добавить relay" }).click();
   await page.getByLabel("Имя relay").fill("new-relay");
   await page.getByRole("form", { name: "Создать relay" }).getByRole("button", { name: "Создать" }).click();
+  await expect(page.getByRole("dialog", { name: "Выданный токен" })).toBeVisible();
   await expect(page.getByLabel("Строка для .env")).toHaveValue(`LOGNARA_RELAY_CORE_TOKEN=${relayToken}`);
-  await expect(page.getByRole("region", { name: "Relay new-relay" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Добавить relay" })).toBeDisabled();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog", { name: "Выданный токен" })).toBeVisible();
   await page.getByRole("button", { name: "Я сохранил токен" }).click();
+  await expect(page.getByRole("dialog", { name: "Выданный токен" })).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "Relay new-relay" })).toBeVisible();
   const relay = page.getByRole("region", { name: "Relay new-relay" });
   await relay.getByRole("button", { name: "Добавить агента" }).click();
   await page.getByLabel("Имя агента").fill("new-agent");
   await relay.getByRole("form", { name: "Создать агента" }).getByRole("button", { name: "Создать" }).click();
   await expect(page.getByLabel("Строка для .env")).toHaveValue(`LOGNARA_AGENT_TOKEN=${token}`);
+  await page.getByRole("button", { name: "Я сохранил токен" }).click();
   await expect(relay.getByRole("article", { name: "Агент new-agent" })).toBeVisible();
   expect(state.writes.map(({ method, path, body }) => [method, path, body])).toEqual([
     ["POST", "/api/relays", { name: "new-relay" }],
@@ -163,7 +167,7 @@ test("confirms deletion and token rotation while retaining the one-time secret p
   page.on("dialog", (dialog) => dialog.accept());
   const host = page.getByRole("article", { name: "Хост mail-01" });
   await host.getByRole("button", { name: "Сменить токен" }).click();
-  await expect(page.getByRole("region", { name: "Выданный токен" })).toContainText("Токен hwagent «mail-01» перевыпущен");
+  await expect(page.getByRole("dialog", { name: "Выданный токен" })).toContainText("Токен hwagent «mail-01» перевыпущен");
   await expect(page.getByLabel("Строка для .env")).toHaveValue(`LOGNARA_HOST_TOKEN=${hostToken}`);
   await page.getByRole("button", { name: "Я сохранил токен" }).click();
   const agent = page.getByRole("region", { name: "Relay relay-eu" }).getByRole("article", { name: "Агент worker" });
@@ -180,5 +184,6 @@ test("host creation uses the Dock branch and returns its token", async ({ page }
   await page.getByLabel("Имя hwagent").fill("mail-new");
   await page.getByRole("form", { name: "Создать hwagent" }).getByRole("button", { name: "Создать" }).click();
   await expect(page.getByLabel("Строка для .env")).toHaveValue(`LOGNARA_HOST_TOKEN=${hostToken}`);
+  await page.getByRole("button", { name: "Я сохранил токен" }).click();
   await expect(page.getByRole("article", { name: "Хост mail-new" })).toContainText("hwagent");
 });
