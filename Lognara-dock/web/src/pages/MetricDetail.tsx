@@ -224,7 +224,8 @@ export default function MetricDetail({
             (chart.series.some((line) =>
               line.values.some((value) => value !== null),
             ) ? (
-              <LineChart buckets={chart.buckets} series={chart.series} unit={chart.unit}
+              <LineChart buckets={chart.buckets} unit={chart.unit}
+                series={chart.series.map((line) => line.label ? line : { ...line, label: metric.definition?.title || metric.name })}
                 visibleSeries={visibleSeries} onToggleSeries={toggleSeries} onSelectRange={openLogs} onZoom={() => {}} />
             ) : (
               <p className="muted">За выбранный период точек нет</p>
