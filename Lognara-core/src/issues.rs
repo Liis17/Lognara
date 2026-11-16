@@ -32,6 +32,7 @@ const MAX_STATUSES: usize = 10_000;
 const PROJECTION: &[&str] = &[
     "environment",
     "service",
+    "backend",
     "action",
     "level",
     "message",

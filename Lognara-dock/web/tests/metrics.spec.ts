@@ -415,7 +415,9 @@ test("JSON import resolves conflicts and sends checked revision", async ({
     revision: "revision-1",
     actions: [{ action: "rename", name: "requests.v2" }],
   });
-  await expect(page.getByRole("status")).toContainText("Создано: 1");
+  await expect(
+    page.getByRole("status").filter({ hasText: "Создано: 1" }),
+  ).toContainText("Создано: 1");
 });
 test("nginx templates allow preview without matches", async ({ page }) => {
   await fixture(page);
