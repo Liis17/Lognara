@@ -6,6 +6,7 @@ export const LOG_LEVELS = ["trace", "debug", "info", "warn", "error", "fatal", "
 const EXACT_FIELDS = new Set([
   "id", "environment", "server", "backend", "service", "service_instance", "action",
   "trace_id", "span_id", "parent_span_id", "request_id", "level", "pattern_id", "fingerprint",
+  "relay_id", "agent_id",
 ]);
 
 export interface ParsedQuery {
@@ -254,6 +255,7 @@ export function withFilter(query: string, field: "pattern_id" | "fingerprint", i
 /** Поля алерта на логи; id и trace_id описывают одно событие, а не условие. */
 export const LOG_ALERT_FIELDS = [
   "environment", "server", "backend", "service", "service_instance", "action", "request_id", "level",
+  "relay_id", "agent_id",
 ] as const;
 
 export interface LogAlertForm {

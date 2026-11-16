@@ -31,6 +31,17 @@ export default function LogAlerts({ onUnauthorized }: { onUnauthorized: () => vo
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
+  const inputFromForm = () => {
+    const input = logAlertInput(form);
+    if (!editing) {
+      for (const field of ["relay_id", "agent_id"] as const) {
+        const values = params.getAll(field);
+        if (values.length) input.filters[field] = values;
+      }
+    }
+    return input;
+  };
+
   const load = () => Promise.all([
     api<LogAlertList>("GET", "/api/log-alerts"),
     api<MetricAlertSettings>("GET", "/api/alerts"),
@@ -55,7 +66,7 @@ export default function LogAlerts({ onUnauthorized }: { onUnauthorized: () => vo
   const submit = (event: FormEvent) => {
     event.preventDefault();
     run(async () => {
-      const input = logAlertInput(form);
+      const input = inputFromForm();
       if (editing) await api("PUT", `/api/log-alerts/${editing}`, input);
       else await api("POST", "/api/log-alerts", input);
       setForm(emptyForm());
@@ -67,7 +78,7 @@ export default function LogAlerts({ onUnauthorized }: { onUnauthorized: () => vo
   const check = () => {
     setPreview("");
     run(async () => {
-      const input = logAlertInput(form);
+      const input = inputFromForm();
       const to = new Date();
       const from = new Date(to.getTime() - 3_600_000);
       const summary = await api<SummaryResponse>("POST", "/api/stats/summary", {

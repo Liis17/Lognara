@@ -41,8 +41,12 @@ function rightsText(item: McpRights): string {
   const rights = [
     item.logs && "логи",
     item.metrics && "метрики",
-    item.alerts_write && "запись алертов",
   ].filter(Boolean);
+  if (item.alerts_write) {
+    if (item.logs && item.metrics) rights.push("алерты логов и метрик");
+    else if (item.logs) rights.push("алерты логов");
+    else if (item.metrics) rights.push("алерты метрик");
+  }
   return rights.length ? rights.join(", ") : "нет прав";
 }
 

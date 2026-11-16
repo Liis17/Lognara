@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 pub const READ_SCOPE: &str = "lognara.read";
 pub const WRITE_SCOPE: &str = "lognara.write";
 
-/// Что токен может делать. Запись алертов требует чтения метрик.
+/// Что токен может делать. Запись алертов требует чтения соответствующих логов или метрик.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Rights {
     pub logs: bool,
@@ -25,9 +25,9 @@ impl Default for Rights {
 }
 
 impl Rights {
-    /// Нужно хотя бы чтение логов или метрик; запись без метрик запрещена.
+    /// Нужно хотя бы чтение логов или метрик; право записи без чтения данных запрещено.
     pub fn is_valid(self) -> bool {
-        (self.logs || self.metrics) && (!self.alerts_write || self.metrics)
+        self.logs || self.metrics
     }
 
     /// OAuth scope, который выдаётся вместе с этими правами.
@@ -116,9 +116,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn writes_require_metrics_and_reads_must_remain() {
+    fn alert_writers_need_at_least_one_data_read_right() {
         let read_all = Rights::default();
         assert!(read_all.is_valid());
+        assert!(
+            Rights {
+                logs: true,
+                metrics: false,
+                alerts_write: true
+            }
+            .is_valid()
+        );
         assert!(
             Rights {
                 logs: false,
@@ -129,9 +137,9 @@ mod tests {
         );
         assert!(
             !Rights {
-                logs: true,
+                logs: false,
                 metrics: false,
-                alerts_write: true
+                alerts_write: false
             }
             .is_valid()
         );
@@ -139,7 +147,7 @@ mod tests {
             !Rights {
                 logs: false,
                 metrics: false,
-                alerts_write: false
+                alerts_write: true
             }
             .is_valid()
         );
