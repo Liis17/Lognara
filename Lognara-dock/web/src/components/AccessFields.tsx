@@ -20,7 +20,7 @@ export const defaultAccessDraft: AccessDraft = {
   agentId: null,
 };
 
-/** Тело прав для API или null, если логи и метрики сняты либо узел не выбран. */
+/** Тело прав для API или null, если нет доступа к данным либо узел не выбран. */
 export function accessBody(draft: AccessDraft) {
   let nodeScope: NodeScope | null = { kind: "all" };
   if (draft.kind === "relay") nodeScope = draft.relayId === null ? null : { kind: "relay", id: draft.relayId };
@@ -29,7 +29,7 @@ export function accessBody(draft: AccessDraft) {
   return {
     logs: draft.logs,
     metrics: draft.metrics,
-    alerts_write: draft.metrics && draft.alertsWrite,
+    alerts_write: (draft.logs || draft.metrics) && draft.alertsWrite,
     node_scope: nodeScope,
   };
 }
@@ -72,14 +72,24 @@ export function AccessFields({
       <fieldset className="access-fields">
         <legend>Права</legend>
         <label>
-          <input type="checkbox" checked={draft.logs} onChange={(event) => update({ logs: event.target.checked })} />
+          <input
+            type="checkbox"
+            checked={draft.logs}
+            onChange={(event) => {
+              const logs = event.target.checked;
+              update({ logs, alertsWrite: (logs || draft.metrics) && draft.alertsWrite });
+            }}
+          />
           Логи
         </label>
         <label>
           <input
             type="checkbox"
             checked={draft.metrics}
-            onChange={(event) => update({ metrics: event.target.checked, alertsWrite: event.target.checked && draft.alertsWrite })}
+            onChange={(event) => {
+              const metrics = event.target.checked;
+              update({ metrics, alertsWrite: (metrics || draft.logs) && draft.alertsWrite });
+            }}
           />
           Метрики
         </label>
@@ -87,13 +97,13 @@ export function AccessFields({
           <input
             type="checkbox"
             checked={draft.alertsWrite}
-            disabled={!draft.metrics}
+            disabled={!draft.logs && !draft.metrics}
             onChange={(event) => update({ alertsWrite: event.target.checked })}
           />
-          Создание и изменение алертов
+          Управление алертами логов и метрик
         </label>
-        {!draft.logs && !draft.metrics && <p className="muted">Выберите логи или метрики.</p>}
-        {!draft.metrics && <p className="muted">Алерты требуют доступа к метрикам.</p>}
+        <p className="muted">Логовые алерты доступны при чтении логов, алерты метрик — при чтении метрик.</p>
+        {!draft.logs && !draft.metrics && <p className="muted">Выберите доступ к логам или метрикам, чтобы включить управление алертами.</p>}
       </fieldset>
       <fieldset className="access-fields">
         <legend>Доступ к данным</legend>

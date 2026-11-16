@@ -115,27 +115,32 @@ test("OAuth consent names the read scope and returns only to the validated ChatG
 test("token with alerts write scoped to a relay is listed with its rights and node", async ({ page }) => {
   const state = await accessFixture(page);
   await page.getByLabel("Название", { exact: true }).fill("Alert bot");
-  const alerts = page.getByRole("checkbox", { name: "Создание и изменение алертов", exact: true });
+  const alerts = page.getByRole("checkbox", { name: "Управление алертами логов и метрик", exact: true });
   await alerts.check();
   await page.getByRole("radio", { name: "Relay и его агенты", exact: true }).check();
   await page.getByLabel("Relay", { exact: true }).selectOption({ label: "Edge" });
   await page.getByRole("button", { name: "Выпустить токен", exact: true }).click();
   await expect(page.getByRole("region", { name: "Выданный токен" })).toBeVisible();
   expect(state.bodies).toEqual([{ name: "Alert bot", logs: true, metrics: true, alerts_write: true, node_scope: { kind: "relay", id: 4 } }]);
-  await expect(page.getByText("Права: логи, метрики, запись алертов · Узлы: Edge", { exact: true })).toBeVisible();
+  await expect(page.getByText("Права: логи, метрики, алерты логов и метрик · Узлы: Edge", { exact: true })).toBeVisible();
 });
 
-test("metrics gate alert rights and an agent is chosen only inside its relay", async ({ page }) => {
+test("alert rights require data access and an agent is chosen only inside its relay", async ({ page }) => {
   const state = await accessFixture(page);
   const metrics = page.getByRole("checkbox", { name: "Метрики", exact: true });
-  const alerts = page.getByRole("checkbox", { name: "Создание и изменение алертов", exact: true });
+  const logs = page.getByRole("checkbox", { name: "Логи", exact: true });
+  const alerts = page.getByRole("checkbox", { name: "Управление алертами логов и метрик", exact: true });
   await alerts.check();
   await metrics.uncheck();
+  await expect(alerts).toBeEnabled();
+  await expect(alerts).toBeChecked();
+  await logs.uncheck();
   await expect(alerts).toBeDisabled();
   await expect(alerts).not.toBeChecked();
   await metrics.check();
   await expect(alerts).toBeEnabled();
   await expect(alerts).not.toBeChecked();
+  await logs.check();
 
   await page.getByLabel("Название", { exact: true }).fill("Agent token");
   await page.getByRole("radio", { name: "Конкретный агент", exact: true }).check();
@@ -148,6 +153,18 @@ test("metrics gate alert rights and an agent is chosen only inside its relay", a
   await expect(page.getByRole("region", { name: "Выданный токен" })).toBeVisible();
   expect(state.bodies).toEqual([{ name: "Agent token", logs: true, metrics: true, alerts_write: false, node_scope: { kind: "agent", id: 9 } }]);
   await expect(page.getByText("Права: логи, метрики · Узлы: агент #9", { exact: true })).toBeVisible();
+});
+
+test("issues a log-only writer without granting metric alert tools", async ({ page }) => {
+  const state = await accessFixture(page);
+  await expect(page.getByText("Логовые алерты доступны при чтении логов, алерты метрик — при чтении метрик.", { exact: true })).toBeVisible();
+  await page.getByLabel("Название", { exact: true }).fill("Log alert bot");
+  await page.getByRole("checkbox", { name: "Метрики", exact: true }).uncheck();
+  await page.getByRole("checkbox", { name: "Управление алертами логов и метрик", exact: true }).check();
+  await page.getByRole("button", { name: "Выпустить токен", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Выданный токен" })).toBeVisible();
+  expect(state.bodies).toEqual([{ name: "Log alert bot", logs: true, metrics: false, alerts_write: true, node_scope: { kind: "all" } }]);
+  await expect(page.getByText("Права: логи, алерты логов · Узлы: все узлы", { exact: true })).toBeVisible();
 });
 
 test("changing the relay drops an agent chosen under the previous relay", async ({ page }) => {
@@ -184,7 +201,8 @@ test("consent offers write only when the client asked for it and posts the chose
   await page.route("https://chatgpt.com/connector_platform_oauth_redirect?**", (route) => route.fulfill({ contentType: "text/html", body: "ChatGPT callback" }));
   await page.goto("/oauth/consent?request=pending-2");
   await expect(page.getByText("Клиент просит доступ на запись", { exact: false })).toBeVisible();
-  const alerts = page.getByRole("checkbox", { name: "Создание и изменение алертов", exact: true });
+  await expect(page.getByText(/логовые алерты при чтении логов и алерты метрик при чтении метрик/u)).toBeVisible();
+  const alerts = page.getByRole("checkbox", { name: "Управление алертами логов и метрик", exact: true });
   await expect(alerts).not.toBeChecked();
   await alerts.check();
   await page.getByRole("radio", { name: "Конкретный агент", exact: true }).check();

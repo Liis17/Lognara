@@ -1,6 +1,6 @@
-//! Stateless, bearer-authenticated read-only MCP endpoint.
+//! Stateless, bearer-authenticated MCP endpoint with token-gated tools.
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     sync::{Arc, Mutex},
     time::Instant,
 };
@@ -70,14 +70,27 @@ const LOG_TOOLS: &[&str] = &[
     "summarize_logs",
 ];
 const METRIC_TOOLS: &[&str] = &["list_metrics", "query_metrics"];
-const ALERT_TOOLS: &[&str] = &[
-    "list_alert_groups",
+const ALERT_GROUP_TOOLS: &[&str] = &["list_alert_groups"];
+const METRIC_ALERT_TOOLS: &[&str] = &[
     "list_alerts",
     "create_alert",
     "update_alert",
     "delete_alert",
 ];
-const ALERT_WRITE_TOOLS: &[&str] = &["create_alert", "update_alert", "delete_alert"];
+const LOG_ALERT_TOOLS: &[&str] = &[
+    "list_log_alerts",
+    "create_log_alert",
+    "update_log_alert",
+    "delete_log_alert",
+];
+const ALERT_WRITE_TOOLS: &[&str] = &[
+    "create_alert",
+    "update_alert",
+    "delete_alert",
+    "create_log_alert",
+    "update_log_alert",
+    "delete_log_alert",
+];
 type HmacSha256 = Hmac<Sha256>;
 
 pub struct McpLimiter {
@@ -451,7 +464,9 @@ fn tool_allowed(name: &str, access: &TokenAccess) -> bool {
     name == "get_versions"
         || (rights.logs && LOG_TOOLS.contains(&name))
         || (rights.metrics && METRIC_TOOLS.contains(&name))
-        || (rights.alerts_write && ALERT_TOOLS.contains(&name))
+        || (rights.alerts_write && ALERT_GROUP_TOOLS.contains(&name))
+        || (rights.alerts_write && rights.metrics && METRIC_ALERT_TOOLS.contains(&name))
+        || (rights.alerts_write && rights.logs && LOG_ALERT_TOOLS.contains(&name))
 }
 
 fn access_from(context: &RequestContext<RoleServer>) -> Option<TokenAccess> {
@@ -502,6 +517,65 @@ struct UpdateAlertInput {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct DeleteAlertInput {
+    id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct McpLogAlertText {
+    query: String,
+    #[serde(default = "default_log_alert_mode")]
+    mode: String,
+}
+
+fn default_log_alert_mode() -> String {
+    "all".into()
+}
+
+/// Log alert settings follow the existing Dock log alert API schema.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct McpLogAlertInput {
+    name: String,
+    enabled: bool,
+    query: String,
+    #[serde(default)]
+    filters: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    text: Option<McpLogAlertText>,
+    threshold: u32,
+    cooldown_seconds: u32,
+    group_ids: Vec<String>,
+}
+
+impl From<McpLogAlertInput> for crate::log_alerts::LogAlertInput {
+    fn from(input: McpLogAlertInput) -> Self {
+        Self {
+            name: input.name,
+            enabled: input.enabled,
+            query: input.query,
+            filters: input.filters,
+            text: input.text.map(|text| crate::log_alerts::LogAlertText {
+                query: text.query,
+                mode: text.mode,
+            }),
+            threshold: input.threshold,
+            cooldown_seconds: input.cooldown_seconds,
+            group_ids: input.group_ids,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct UpdateLogAlertInput {
+    id: String,
+    alert: McpLogAlertInput,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct DeleteLogAlertInput {
     id: String,
 }
 
@@ -941,7 +1015,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "List metric alert recipient groups. Groups are created only in the Dock UI; only id, kind and name are returned, never chat IDs or bot tokens.",
+        description = "List recipient groups for metric and log alerts. Groups are created only in the Dock UI; only id, kind and name are returned, never chat IDs or bot tokens.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -1042,6 +1116,98 @@ impl McpServer {
         match crate::alerts::mcp_delete_alert(&self.app, &access, input.id).await {
             Ok(()) => success_result(json!({ "deleted": true })),
             Err(error) => failure_result(alert_failure(error)),
+        }
+    }
+
+    #[tool(
+        description = "List log alerts visible to this token. A relay token sees rules scoped to that relay and its agents; an agent token sees only rules scoped to that agent.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn list_log_alerts(&self) -> CallToolResult {
+        let access = match self.access() {
+            Ok(access) => access,
+            Err(error) => return failure_result(error),
+        };
+        match crate::log_alerts::mcp_log_alerts(&self.app, &access).await {
+            Ok(alerts) => success_result(json!({ "alerts": alerts })),
+            Err(error) => failure_result(log_alert_failure(error)),
+        }
+    }
+
+    #[tool(
+        description = "Create a log alert using the Dock log alert schema. Recipients must be existing group IDs from list_alert_groups. For a relay or agent token, Dock adds its node filter; a different value for that node is rejected.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn create_log_alert(
+        &self,
+        Parameters(input): Parameters<McpLogAlertInput>,
+    ) -> CallToolResult {
+        let access = match self.access() {
+            Ok(access) => access,
+            Err(error) => return failure_result(error),
+        };
+        match crate::log_alerts::mcp_save_log_alert(&self.app, &access, None, input.into()).await {
+            Ok(alert) => success_result(json!({ "alert": alert })),
+            Err(error) => failure_result(log_alert_failure(error)),
+        }
+    }
+
+    #[tool(
+        description = "Replace the settings of a log alert visible to this token. Existing relay_id and agent_id filters remain fixed: omitted filters are restored, changing or adding them is rejected. Concurrent browser or MCP changes return conflict. Recipients must be existing group IDs.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            open_world_hint = false
+        )
+    )]
+    async fn update_log_alert(
+        &self,
+        Parameters(input): Parameters<UpdateLogAlertInput>,
+    ) -> CallToolResult {
+        let access = match self.access() {
+            Ok(access) => access,
+            Err(error) => return failure_result(error),
+        };
+        match crate::log_alerts::mcp_save_log_alert(
+            &self.app,
+            &access,
+            Some(input.id),
+            input.alert.into(),
+        )
+        .await
+        {
+            Ok(alert) => success_result(json!({ "alert": alert })),
+            Err(error) => failure_result(log_alert_failure(error)),
+        }
+    }
+
+    #[tool(
+        description = "Delete a log alert visible to this token. Pending notifications for the alert are removed.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn delete_log_alert(
+        &self,
+        Parameters(input): Parameters<DeleteLogAlertInput>,
+    ) -> CallToolResult {
+        let access = match self.access() {
+            Ok(access) => access,
+            Err(error) => return failure_result(error),
+        };
+        match crate::log_alerts::mcp_delete_log_alert(&self.app, &access, input.id).await {
+            Ok(()) => success_result(json!({ "deleted": true })),
+            Err(error) => failure_result(log_alert_failure(error)),
         }
     }
 
@@ -1494,6 +1660,30 @@ fn alert_failure(error: AlertToolError) -> ToolFailure {
     }
 }
 
+fn log_alert_failure(error: crate::log_alerts::LogAlertToolError) -> ToolFailure {
+    use crate::log_alerts::LogAlertToolError;
+
+    match error {
+        LogAlertToolError::Invalid(message) => ToolFailure::new("invalid_argument", message),
+        LogAlertToolError::Conflict("group_not_found") => ToolFailure::new(
+            "group_not_found",
+            "Recipient group does not exist; choose an existing group from list_alert_groups",
+        ),
+        LogAlertToolError::Conflict("log_alert_limit") => ToolFailure::new(
+            "alerts_unavailable",
+            "The enabled log alert limit has been reached",
+        ),
+        LogAlertToolError::Conflict(_) => ToolFailure::new(
+            "conflict",
+            "The log alert change conflicts with current settings",
+        ),
+        LogAlertToolError::NotFound => ToolFailure::new("not_found", "Log alert was not found"),
+        LogAlertToolError::Unavailable => {
+            ToolFailure::new("unavailable", "Log alert storage or Core is unavailable")
+        }
+    }
+}
+
 fn source_limit(limit: Option<usize>) -> Result<usize, ToolFailure> {
     let limit = limit.unwrap_or(100);
     if (1..=1000).contains(&limit) {
@@ -1720,19 +1910,21 @@ mod tests {
             .into_iter()
             .chain(LOG_TOOLS.iter().copied())
             .chain(METRIC_TOOLS.iter().copied())
-            .chain(ALERT_TOOLS.iter().copied())
+            .chain(ALERT_GROUP_TOOLS.iter().copied())
+            .chain(METRIC_ALERT_TOOLS.iter().copied())
+            .chain(LOG_ALERT_TOOLS.iter().copied())
             .map(str::to_owned)
             .collect();
         expected.sort();
         assert_eq!(names, expected);
-        assert_eq!(expected.len(), 14);
+        assert_eq!(expected.len(), 18);
         for tool in McpServer::tool_router().list_all() {
             let annotations = tool.annotations.unwrap();
             let write = ALERT_WRITE_TOOLS.contains(&&*tool.name);
             assert_eq!(annotations.read_only_hint, Some(!write), "{}", tool.name);
             assert_eq!(
                 annotations.destructive_hint,
-                Some(&*tool.name == "delete_alert"),
+                Some(matches!(&*tool.name, "delete_alert" | "delete_log_alert")),
                 "{}",
                 tool.name
             );
@@ -1755,7 +1947,26 @@ mod tests {
         assert!(tool_allowed("get_versions", &read_logs));
         assert!(!tool_allowed("query_metrics", &read_logs));
         assert!(!tool_allowed("create_alert", &read_logs));
+        assert!(!tool_allowed("create_log_alert", &read_logs));
         let writer = TokenAccess {
+            rights: Rights {
+                logs: true,
+                metrics: false,
+                alerts_write: true,
+            },
+            ..read_logs
+        };
+        assert!(tool_allowed("create_log_alert", &writer));
+        assert!(tool_allowed("list_log_alerts", &writer));
+        assert!(tool_allowed("update_log_alert", &writer));
+        assert!(tool_allowed("delete_log_alert", &writer));
+        assert!(tool_allowed("list_alert_groups", &writer));
+        assert!(tool_allowed("search_logs", &writer));
+        assert!(!tool_allowed("list_alerts", &writer));
+        assert!(!tool_allowed("create_alert", &writer));
+        assert!(!tool_allowed("delete_alert", &writer));
+
+        let metric_writer = TokenAccess {
             rights: Rights {
                 logs: false,
                 metrics: true,
@@ -1763,9 +1974,14 @@ mod tests {
             },
             ..read_logs
         };
-        assert!(tool_allowed("create_alert", &writer));
-        assert!(tool_allowed("list_alert_groups", &writer));
-        assert!(!tool_allowed("search_logs", &writer));
+        assert!(tool_allowed("create_alert", &metric_writer));
+        assert!(tool_allowed("list_alerts", &metric_writer));
+        assert!(tool_allowed("update_alert", &metric_writer));
+        assert!(tool_allowed("delete_alert", &metric_writer));
+        assert!(!tool_allowed("list_log_alerts", &metric_writer));
+        assert!(!tool_allowed("create_log_alert", &metric_writer));
+        assert!(!tool_allowed("update_log_alert", &metric_writer));
+        assert!(!tool_allowed("delete_log_alert", &metric_writer));
     }
 
     #[test]

@@ -78,7 +78,7 @@ export default function OAuthConsent() {
               <dt>Сервер</dt>
               <dd><code>{details.resource}</code></dd>
             </dl>
-            {askedWrite && <p className="page-note" role="status">Клиент просит доступ на запись. По умолчанию запись выключена; включите «Создание и изменение алертов», только если это нужно.</p>}
+            {askedWrite && <p className="page-note" role="status">Клиент просит доступ на запись. Оно открывает логовые алерты при чтении логов и алерты метрик при чтении метрик. По умолчанию запись выключена.</p>}
             <AccessFields draft={access} onChange={setAccess} nodes={nodes} />
             <p className="page-note">Подключение сможет искать логи, читать trace и просматривать метрики. Текст логов не маскируется.</p>
             <div className="oauth-actions">

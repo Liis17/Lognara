@@ -58,6 +58,23 @@ test("Logs query becomes a log alert with preview and groups", async ({ page }) 
   });
 });
 
+test("notification link node filters remain in preview and saved alert", async ({ page }) => {
+  const state = await fixture(page);
+  const params = new URLSearchParams({ q: "service:host", relay_id: "4", agent_id: "9" });
+  await page.goto(`/log-alerts?${params}`);
+  await page.getByLabel("Имя").fill("Scoped alert");
+  await page.getByRole("button", { name: "Проверить за час" }).click();
+  await expect.poll(() => state.writes.find((write) => write.path === "/api/stats/summary")?.body).toMatchObject({
+    filters: { service: ["host"], relay_id: ["4"], agent_id: ["9"] },
+  });
+  await page.getByRole("button", { name: "Создать алерт" }).click();
+  const created = state.writes.find((write) => write.method === "POST" && write.path === "/api/log-alerts");
+  expect(created?.body).toMatchObject({
+    query: "service:host",
+    filters: { service: ["host"], relay_id: ["4"], agent_id: ["9"] },
+  });
+});
+
 test("single-event fields are rejected before saving", async ({ page }) => {
   const state = await fixture(page);
   await page.goto("/log-alerts");

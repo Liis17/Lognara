@@ -37,7 +37,7 @@ pub struct Config {
     pub password_min_length: usize,
     pub live_poll: Duration,
     pub live_lookback: Duration,
-    /// Remote read-only MCP and OAuth endpoints; disabled unless explicitly enabled.
+    /// Remote MCP and OAuth endpoints; disabled unless explicitly enabled.
     pub mcp_enabled: bool,
 }
 

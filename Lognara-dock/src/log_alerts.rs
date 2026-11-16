@@ -25,6 +25,7 @@ use crate::{
     api::{ApiError, AppState},
     core_client::{AlertSeriesStatus, LogAlertReply, LogAlertRule},
     store::{Store, StoreError, now_ms},
+    token_access::{Scope, TokenAccess},
 };
 
 /// Совпадает с лимитом правил одного запроса Core.
@@ -106,6 +107,35 @@ pub(crate) enum LogAlertError {
     NotFound,
 }
 
+#[derive(Debug)]
+pub enum LogAlertToolError {
+    Invalid(&'static str),
+    Conflict(&'static str),
+    NotFound,
+    Unavailable,
+}
+
+impl From<LogAlertError> for LogAlertToolError {
+    fn from(error: LogAlertError) -> Self {
+        match error {
+            LogAlertError::Store(error) => {
+                tracing::error!(%error, "log alert storage failed");
+                Self::Unavailable
+            }
+            LogAlertError::Invalid(message) => Self::Invalid(message),
+            LogAlertError::Conflict(code) => Self::Conflict(code),
+            LogAlertError::NotFound => Self::NotFound,
+        }
+    }
+}
+
+impl From<StoreError> for LogAlertToolError {
+    fn from(error: StoreError) -> Self {
+        tracing::error!(%error, "log alert storage failed");
+        Self::Unavailable
+    }
+}
+
 impl From<LogAlertError> for ApiError {
     fn from(error: LogAlertError) -> Self {
         match error {
@@ -119,6 +149,81 @@ impl From<LogAlertError> for ApiError {
 
 fn printable(value: &str) -> bool {
     !value.chars().any(char::is_control)
+}
+
+fn apply_log_alert_scope(input: &mut LogAlertInput, scope: Scope) -> Result<(), LogAlertToolError> {
+    if let Some((field, id)) = scope.core_param() {
+        let expected = id.to_string();
+        if input
+            .filters
+            .get(field)
+            .is_some_and(|values| values.len() != 1 || values[0] != expected)
+        {
+            return Err(LogAlertToolError::Invalid(
+                "filters cannot set a different node than this token",
+            ));
+        }
+        input.filters.insert(field.to_owned(), vec![expected]);
+    }
+    Ok(())
+}
+
+fn preserve_log_alert_node_filters(
+    input: &mut LogAlertInput,
+    current: &LogAlert,
+) -> Result<(), LogAlertToolError> {
+    for field in ["relay_id", "agent_id"] {
+        match (
+            current.filters.get(field).cloned(),
+            input.filters.get(field).cloned(),
+        ) {
+            (Some(current), Some(provided)) if current != provided => {
+                return Err(LogAlertToolError::Invalid(
+                    "updates cannot change a rule's node filters",
+                ));
+            }
+            (Some(current), None) => {
+                input.filters.insert(field.to_owned(), current);
+            }
+            (None, Some(_)) => {
+                return Err(LogAlertToolError::Invalid(
+                    "updates cannot add node filters to a rule",
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn exactly_node_filter(filters: &BTreeMap<String, Vec<String>>, field: &str, id: i64) -> bool {
+    filters
+        .get(field)
+        .is_some_and(|values| values.len() == 1 && values[0] == id.to_string())
+}
+
+fn log_alert_filters_visible(
+    filters: &BTreeMap<String, Vec<String>>,
+    scope: Scope,
+    agent_relays: &BTreeMap<i64, i64>,
+) -> bool {
+    match scope {
+        Scope::All => true,
+        Scope::Agent { id } => exactly_node_filter(filters, "agent_id", id),
+        Scope::Relay { id } => {
+            exactly_node_filter(filters, "relay_id", id)
+                || filters.get("agent_id").is_some_and(|agents| {
+                    !agents.is_empty()
+                        && agents.iter().all(|agent| {
+                            agent
+                                .parse::<i64>()
+                                .ok()
+                                .and_then(|agent| agent_relays.get(&agent))
+                                == Some(&id)
+                        })
+                })
+        }
+    }
 }
 
 /// Проверка до Core: одна ошибочная строка иначе отклонила бы запрос всех правил.
@@ -265,21 +370,30 @@ impl Store {
         id: Option<String>,
         input: LogAlertInput,
     ) -> Result<String, LogAlertError> {
+        self.save_log_alert_at_revision(id, input, None).await
+    }
+
+    pub(crate) async fn save_log_alert_checked(
+        &self,
+        id: String,
+        input: LogAlertInput,
+        expected_revision: i64,
+    ) -> Result<String, LogAlertError> {
+        self.save_log_alert_at_revision(Some(id), input, Some(expected_revision))
+            .await
+    }
+
+    async fn save_log_alert_at_revision(
+        &self,
+        id: Option<String>,
+        input: LogAlertInput,
+        expected_revision: Option<i64>,
+    ) -> Result<String, LogAlertError> {
         validate(&input)?;
         let filters = serde_json::to_string(&input.filters)
             .map_err(|_| LogAlertError::Invalid("invalid filters"))?;
         self.call(move |conn| {
             let tx = conn.transaction()?;
-            for group_id in &input.group_ids {
-                let exists: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM metric_alert_groups WHERE id=?1)",
-                    [group_id],
-                    |row| row.get(0),
-                )?;
-                if !exists {
-                    return Ok(Err(LogAlertError::Conflict("group_not_found")));
-                }
-            }
             let old: Option<(i64, i64)> = match &id {
                 Some(id) => tx
                     .query_row(
@@ -290,8 +404,23 @@ impl Store {
                     .optional()?,
                 None => None,
             };
+            if expected_revision.is_some_and(|expected| {
+                old.as_ref().map(|(revision, _)| *revision) != Some(expected)
+            }) {
+                return Ok(Err(LogAlertError::Conflict("log_alert_changed")));
+            }
             if id.is_some() && old.is_none() {
                 return Ok(Err(LogAlertError::NotFound));
+            }
+            for group_id in &input.group_ids {
+                let exists: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM metric_alert_groups WHERE id=?1)",
+                    [group_id],
+                    |row| row.get(0),
+                )?;
+                if !exists {
+                    return Ok(Err(LogAlertError::Conflict("group_not_found")));
+                }
             }
             let enabled: i64 = tx.query_row(
                 "SELECT count(*) FROM log_alerts WHERE enabled=1",
@@ -357,8 +486,41 @@ impl Store {
     }
 
     pub(crate) async fn delete_log_alert(&self, id: String) -> Result<bool, StoreError> {
+        Ok(self
+            .delete_log_alert_at_revision(id, None)
+            .await?
+            .expect("unconditional log-alert delete cannot conflict"))
+    }
+
+    pub(crate) async fn delete_log_alert_checked(
+        &self,
+        id: String,
+        expected_revision: i64,
+    ) -> Result<bool, LogAlertError> {
+        self.delete_log_alert_at_revision(id, Some(expected_revision))
+            .await?
+            .ok_or(LogAlertError::Conflict("log_alert_changed"))
+    }
+
+    async fn delete_log_alert_at_revision(
+        &self,
+        id: String,
+        expected_revision: Option<i64>,
+    ) -> Result<Option<bool>, StoreError> {
         self.call(move |conn| {
             let tx = conn.transaction()?;
+            if let Some(expected_revision) = expected_revision {
+                let current_revision: Option<i64> = tx
+                    .query_row(
+                        "SELECT revision FROM log_alerts WHERE id=?1",
+                        [&id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if current_revision != Some(expected_revision) {
+                    return Ok(None);
+                }
+            }
             let changed = tx.execute("DELETE FROM log_alerts WHERE id=?1", [&id])?;
             if changed > 0 {
                 tx.execute(
@@ -367,7 +529,7 @@ impl Store {
                 )?;
             }
             tx.commit()?;
-            Ok(changed > 0)
+            Ok(Some(changed > 0))
         })
         .await
     }
@@ -471,6 +633,83 @@ impl Store {
     }
 }
 
+pub async fn mcp_log_alerts(
+    app: &AppState,
+    access: &TokenAccess,
+) -> Result<Vec<LogAlert>, LogAlertToolError> {
+    let alerts = app.store.log_alerts().await?;
+    let agent_relays = match access.node_scope {
+        Scope::Relay { .. } => Some(
+            crate::alerts::agent_relays(app)
+                .await
+                .map_err(|_| LogAlertToolError::Unavailable)?,
+        ),
+        Scope::All | Scope::Agent { .. } => None,
+    };
+    let empty_relays = BTreeMap::new();
+    let agent_relays = agent_relays.as_ref().unwrap_or(&empty_relays);
+    Ok(alerts
+        .into_iter()
+        .filter(|alert| log_alert_filters_visible(&alert.filters, access.node_scope, agent_relays))
+        .collect())
+}
+
+pub async fn mcp_save_log_alert(
+    app: &AppState,
+    access: &TokenAccess,
+    id: Option<String>,
+    mut input: LogAlertInput,
+) -> Result<LogAlert, LogAlertToolError> {
+    let expected_revision = if let Some(id) = &id {
+        let current = mcp_log_alerts(app, access)
+            .await?
+            .into_iter()
+            .find(|alert| alert.id == *id)
+            .ok_or(LogAlertToolError::NotFound)?;
+        preserve_log_alert_node_filters(&mut input, &current)?;
+        Some(current.revision)
+    } else {
+        validate(&input)?;
+        apply_log_alert_scope(&mut input, access.node_scope)?;
+        None
+    };
+    let saved = match (id, expected_revision) {
+        (Some(id), Some(expected_revision)) => {
+            app.store
+                .save_log_alert_checked(id, input, expected_revision)
+                .await?
+        }
+        (None, None) => app.store.save_log_alert(None, input).await?,
+        _ => unreachable!("MCP log-alert updates always carry a captured revision"),
+    };
+    mcp_log_alerts(app, access)
+        .await?
+        .into_iter()
+        .find(|alert| alert.id == saved)
+        .ok_or(LogAlertToolError::NotFound)
+}
+
+pub async fn mcp_delete_log_alert(
+    app: &AppState,
+    access: &TokenAccess,
+    id: String,
+) -> Result<(), LogAlertToolError> {
+    let current = mcp_log_alerts(app, access)
+        .await?
+        .into_iter()
+        .find(|alert| alert.id == id)
+        .ok_or(LogAlertToolError::NotFound)?;
+    if app
+        .store
+        .delete_log_alert_checked(id, current.revision)
+        .await?
+    {
+        Ok(())
+    } else {
+        Err(LogAlertToolError::NotFound)
+    }
+}
+
 fn enqueue_log_event(
     tx: &rusqlite::Transaction<'_>,
     alert: &LogAlert,
@@ -551,16 +790,25 @@ pub fn log_alert_message(
     if !samples.is_empty() {
         body.push('\n');
     }
-    append_message_link(body, logs_link(public_url, &alert.query))
+    append_message_link(body, logs_link(public_url, alert))
 }
 
-fn logs_link(public_url: &Url, query: &str) -> String {
+fn logs_link(public_url: &Url, alert: &LogAlert) -> String {
     let mut url = public_url
         .join("logs")
         .unwrap_or_else(|_| public_url.clone());
-    url.query_pairs_mut()
-        .append_pair("q", query)
+    let mut query = url.query_pairs_mut();
+    query
+        .append_pair("q", &alert.query)
         .append_pair("range", "1h");
+    for field in ["relay_id", "agent_id"] {
+        if let Some(values) = alert.filters.get(field) {
+            for value in values {
+                query.append_pair(field, value);
+            }
+        }
+    }
+    drop(query);
     url.to_string()
 }
 
@@ -669,5 +917,50 @@ pub async fn delete(
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::NotFound)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn notification_log_link_includes_actual_node_filters() {
+        let alert = LogAlert {
+            id: "alert".into(),
+            name: "node rule".into(),
+            enabled: true,
+            query: "service:api".into(),
+            filters: BTreeMap::from([
+                ("agent_id".into(), vec!["9".into()]),
+                ("relay_id".into(), vec!["4".into()]),
+                ("service".into(), vec!["api".into()]),
+            ]),
+            text: None,
+            threshold: 1,
+            cooldown_seconds: 0,
+            group_ids: vec![],
+            revision: 1,
+            no_recipients: false,
+            last_count: 0,
+            last_match_at: None,
+            last_checked_at: None,
+            last_sent_at: None,
+        };
+        let public_url = Url::parse("https://dock.example/").unwrap();
+        let link = Url::parse(&logs_link(&public_url, &alert)).unwrap();
+        let pairs: Vec<_> = link
+            .query_pairs()
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("q".to_owned(), "service:api".to_owned()),
+                ("range".to_owned(), "1h".to_owned()),
+                ("relay_id".to_owned(), "4".to_owned()),
+                ("agent_id".to_owned(), "9".to_owned()),
+            ]
+        );
     }
 }

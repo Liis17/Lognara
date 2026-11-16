@@ -26,6 +26,14 @@ function eventTime(timestamp: string): string {
   return `${clock.format(new Date(timestamp))}.${fraction}`;
 }
 
+function logAlertParams(query: string, nodeFilters: { relay_id: string[]; agent_id: string[] }): URLSearchParams {
+  const params = new URLSearchParams({ q: query });
+  for (const field of ["relay_id", "agent_id"] as const) {
+    for (const value of nodeFilters[field]) params.append(field, value);
+  }
+  return params;
+}
+
 function EventDetails({ event, onContext, onTrace, onCopy }: {
   event: LogEvent;
   onContext: (event: LogEvent) => void;
@@ -64,9 +72,10 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
       traceId: params.get("trace_id") ?? "", selected: params.get("selected"),
       selectedTimestamp: params.get("selected_timestamp"),
       occurrence: /^\d{1,6}$/.test(params.get("selected_occurrence") ?? "") ? Number(params.get("selected_occurrence")) : 0,
+      nodeFilters: { relay_id: params.getAll("relay_id"), agent_id: params.getAll("agent_id") },
     };
   }, [paramsKey]);
-  const queryKey = JSON.stringify([location.view, location.q, location.range, location.from, location.to, location.traceId]);
+  const queryKey = JSON.stringify([location.view, location.q, location.range, location.from, location.to, location.traceId, location.nodeFilters]);
   const parsed = useMemo((): { query: ParsedQuery; error: string } => {
     if (!(Number.isFinite(Date.parse(location.from)) && Number.isFinite(Date.parse(location.to))) ||
         Date.parse(location.from) >= Date.parse(location.to)) {
@@ -78,7 +87,14 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
     if (location.view === "trace") return TRACE_ID.test(location.traceId) ?
       { query: { filters: { trace_id: [location.traceId.toLowerCase()] } }, error: "" } :
       { query: { filters: {} }, error: "Введите Trace ID: 32 шестнадцатеричных символа." };
-    try { return { query: parseQuery(location.q), error: "" }; }
+    try {
+      const query = parseQuery(location.q);
+      for (const field of ["relay_id", "agent_id"] as const) {
+        const values = location.nodeFilters[field];
+        if (values.length) query.filters[field] = values;
+      }
+      return { query, error: "" };
+    }
     catch (error) { return { query: { filters: {} }, error: error instanceof Error ? error.message : String(error) }; }
   }, [queryKey]);
   const coreOnly = !!(parsed.query.filters.pattern_id || parsed.query.filters.fingerprint);
@@ -342,6 +358,9 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
     query.set("selected_timestamp", event.timestamp);
     query.set("selected_occurrence", String(location.occurrence));
     if (location.view === "trace") query.set("trace_id", location.traceId);
+    for (const field of ["relay_id", "agent_id"] as const) {
+      for (const value of location.nodeFilters[field]) query.append(field, value);
+    }
     if (liveEnabled) for (const [key, value] of Object.entries(contextBounds(event.timestamp))) query.set(key, value);
     try { await navigator.clipboard.writeText(`${window.location.origin}/logs?${query}`); setCopyNote("Ссылка скопирована."); }
     catch { setCopyNote("Не удалось скопировать ссылку. Проверьте доступ к буферу обмена."); }
@@ -400,7 +419,7 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
         <button type="button" className="button" aria-expanded={exportsOpen} disabled={!rows.length}
           onClick={() => setExportsOpen((current) => !current)}>Экспорт</button>
         {location.view === "events" && location.q.trim() && !parsed.error && (
-          <Link className="button" to={`/log-alerts?${new URLSearchParams({ q: location.q })}`}>Создать алерт</Link>
+          <Link className="button" to={`/log-alerts?${logAlertParams(location.q, location.nodeFilters)}`}>Создать алерт</Link>
         )}
       </>}
     </div>

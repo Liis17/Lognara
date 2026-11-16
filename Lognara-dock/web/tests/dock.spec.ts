@@ -139,6 +139,14 @@ test('logout asks for confirmation and cancel keeps the session', async ({ page 
   expect(calls.filter(call => call.path === '/api/auth/logout')).toHaveLength(1);
 });
 
+test('node filters on a log notification link reach the history query API', async ({ page }) => {
+  const calls = await fixture(page);
+  await page.goto('/logs?q=service%3Abilling&relay_id=4&agent_id=9');
+  await expect.poll(() => calls.filter(call => call.path === '/api/stats/summary').at(-1)?.body.filters).toEqual({
+    service: ['billing'], relay_id: ['4'], agent_id: ['9'],
+  });
+});
+
 test('dragging over the events chart narrows the range and reset restores the preset', async ({ page }) => {
   const calls = await fixture(page);
   await page.goto('/logs');

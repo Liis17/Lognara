@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { appendHistory, contextBounds, eventBounds, eventsToCsv, matchesQuery, parseQuery, prependLive, sourceQuery,
-  withFilter, withPatternFilter } from "./logs.ts";
+  logAlertInput, withFilter, withPatternFilter } from "./logs.ts";
 import type { LogEvent } from "./types.ts";
 
 const event = (overrides: Partial<LogEvent> = {}): LogEvent => ({
@@ -19,6 +19,14 @@ test("template query maps AND fields and OR levels to core's exact filters", () 
   assert.deepEqual(parseQuery('server:"prod eu" level:FATAL'), {
     filters: { server: ["prod eu"], level: ["fatal"] },
   });
+});
+
+test("node filters from notification links remain usable in log alert queries", () => {
+  const input = logAlertInput({
+    name: "Node alert", query: "service:api relay_id:4 agent_id:9", enabled: true,
+    threshold: 1, cooldownMinutes: 5, groupIds: [],
+  });
+  assert.deepEqual(input.filters, { service: ["api"], relay_id: ["4"], agent_id: ["9"] });
 });
 
 test("message all/phrase retain their different token semantics", () => {

@@ -1160,7 +1160,7 @@ impl From<AlertStoreError> for AlertToolError {
 }
 
 /// Relay каждого агента из core. Ошибка или неполный ответ не раскрывает данные: запрос отказывает.
-async fn agent_relays(app: &AppState) -> Result<BTreeMap<i64, i64>, AlertToolError> {
+pub(crate) async fn agent_relays(app: &AppState) -> Result<BTreeMap<i64, i64>, AlertToolError> {
     let reply = app
         .core
         .list_agents()
@@ -4402,5 +4402,347 @@ mod tests {
         assert_eq!(settings.groups[0].log_alerts, ["sudo"]);
         assert!(store.delete_log_alert(id).await.unwrap());
         assert!(store.log_alerts().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn mcp_log_alert_crud_injects_scope_and_hides_unscoped_or_other_node_rules() {
+        use crate::log_alerts::{
+            LogAlertInput, LogAlertToolError, mcp_delete_log_alert, mcp_log_alerts,
+            mcp_save_log_alert,
+        };
+
+        fn input(name: &str, filters: BTreeMap<String, Vec<String>>) -> LogAlertInput {
+            LogAlertInput {
+                name: name.into(),
+                enabled: false,
+                query: name.into(),
+                filters,
+                text: None,
+                threshold: 1,
+                cooldown_seconds: 0,
+                group_ids: vec![],
+            }
+        }
+
+        let core_router = Router::new().route(
+            "/v1/admin/agents",
+            get(|| async {
+                Json(json!({"agents":[{"id":9,"relay_id":4},{"id":10,"relay_id":5}]}))
+            }),
+        );
+        let (core_url, core_server) = serve(core_router).await;
+        let directory = tempfile::tempdir().unwrap();
+        let app = test_app(directory.path(), &core_url);
+        let relay_rule = app
+            .store
+            .save_log_alert(
+                None,
+                input(
+                    "relay rule",
+                    BTreeMap::from([("relay_id".into(), vec!["4".into()])]),
+                ),
+            )
+            .await
+            .unwrap();
+        let agent_rule = app
+            .store
+            .save_log_alert(
+                None,
+                input(
+                    "agent rule",
+                    BTreeMap::from([("agent_id".into(), vec!["9".into()])]),
+                ),
+            )
+            .await
+            .unwrap();
+        let other_agent_rule = app
+            .store
+            .save_log_alert(
+                None,
+                input(
+                    "other agent",
+                    BTreeMap::from([("agent_id".into(), vec!["10".into()])]),
+                ),
+            )
+            .await
+            .unwrap();
+        let global_rule = app
+            .store
+            .save_log_alert(
+                None,
+                input(
+                    "global rule",
+                    BTreeMap::from([("service".into(), vec!["api".into()])]),
+                ),
+            )
+            .await
+            .unwrap();
+        let mixed_relays = app
+            .store
+            .save_log_alert(
+                None,
+                input(
+                    "mixed relays",
+                    BTreeMap::from([("relay_id".into(), vec!["4".into(), "5".into()])]),
+                ),
+            )
+            .await
+            .unwrap();
+        let relay_access = TokenAccess {
+            username: "alice".into(),
+            rights: crate::token_access::Rights {
+                logs: true,
+                metrics: false,
+                alerts_write: true,
+            },
+            node_scope: Scope::Relay { id: 4 },
+        };
+
+        let visible = mcp_log_alerts(&app, &relay_access).await.unwrap();
+        assert!(visible.iter().any(|alert| alert.id == relay_rule));
+        assert!(visible.iter().any(|alert| alert.id == agent_rule));
+        assert!(!visible.iter().any(|alert| alert.id == other_agent_rule));
+        assert!(!visible.iter().any(|alert| alert.id == global_rule));
+        assert!(!visible.iter().any(|alert| alert.id == mixed_relays));
+
+        let agent_access = TokenAccess {
+            node_scope: Scope::Agent { id: 9 },
+            ..relay_access.clone()
+        };
+        let visible = mcp_log_alerts(&app, &agent_access).await.unwrap();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].id, agent_rule);
+
+        let created_agent = mcp_save_log_alert(
+            &app,
+            &agent_access,
+            None,
+            input(
+                "created by agent",
+                BTreeMap::from([("service".into(), vec!["api".into()])]),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            created_agent.filters.get("agent_id"),
+            Some(&vec!["9".into()])
+        );
+        assert!(matches!(
+            mcp_save_log_alert(
+                &app,
+                &agent_access,
+                None,
+                input(
+                    "agent override",
+                    BTreeMap::from([("agent_id".into(), vec!["10".into()])]),
+                ),
+            )
+            .await,
+            Err(LogAlertToolError::Invalid(_))
+        ));
+
+        let created = mcp_save_log_alert(
+            &app,
+            &relay_access,
+            None,
+            input(
+                "created by relay",
+                BTreeMap::from([("service".into(), vec!["api".into()])]),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(created.filters.get("relay_id"), Some(&vec!["4".into()]));
+
+        let invalid_scope = mcp_save_log_alert(
+            &app,
+            &relay_access,
+            None,
+            input(
+                "override",
+                BTreeMap::from([("relay_id".into(), vec!["5".into()])]),
+            ),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(invalid_scope, LogAlertToolError::Invalid(_)));
+        let invalid_rule = mcp_save_log_alert(
+            &app,
+            &relay_access,
+            None,
+            input("missing filter", BTreeMap::new()),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(invalid_rule, LogAlertToolError::Invalid(_)));
+
+        let updated = mcp_save_log_alert(
+            &app,
+            &relay_access,
+            Some(agent_rule.clone()),
+            input("updated agent rule", BTreeMap::new()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.name, "updated agent rule");
+        assert_eq!(updated.revision, 2);
+        assert_eq!(updated.filters.get("agent_id"), Some(&vec!["9".into()]));
+        assert!(!updated.filters.contains_key("relay_id"));
+
+        let all_access = TokenAccess {
+            node_scope: Scope::All,
+            ..relay_access.clone()
+        };
+        let updated_relay = mcp_save_log_alert(
+            &app,
+            &all_access,
+            Some(relay_rule.clone()),
+            input("updated relay rule", BTreeMap::new()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            updated_relay.filters.get("relay_id"),
+            Some(&vec!["4".into()])
+        );
+        assert!(!updated_relay.filters.contains_key("agent_id"));
+        assert!(matches!(
+            mcp_save_log_alert(
+                &app,
+                &all_access,
+                Some(relay_rule.clone()),
+                input(
+                    "change node restriction",
+                    BTreeMap::from([("relay_id".into(), vec!["5".into()])]),
+                ),
+            )
+            .await,
+            Err(LogAlertToolError::Invalid(_))
+        ));
+        assert!(matches!(
+            mcp_save_log_alert(
+                &app,
+                &all_access,
+                Some(global_rule.clone()),
+                input(
+                    "add node restriction",
+                    BTreeMap::from([("relay_id".into(), vec!["4".into()])]),
+                ),
+            )
+            .await,
+            Err(LogAlertToolError::Invalid(_))
+        ));
+        assert!(matches!(
+            mcp_save_log_alert(
+                &app,
+                &relay_access,
+                Some(global_rule.clone()),
+                input("must not update", BTreeMap::new()),
+            )
+            .await,
+            Err(LogAlertToolError::NotFound)
+        ));
+        assert!(matches!(
+            mcp_delete_log_alert(&app, &relay_access, other_agent_rule.clone()).await,
+            Err(LogAlertToolError::NotFound)
+        ));
+        mcp_delete_log_alert(&app, &relay_access, created.id.clone())
+            .await
+            .unwrap();
+        assert!(
+            app.store
+                .log_alerts()
+                .await
+                .unwrap()
+                .iter()
+                .all(|alert| alert.id != created.id)
+        );
+        core_server.abort();
+    }
+
+    #[tokio::test]
+    async fn stale_log_alert_revisions_conflict_after_browser_updates() {
+        use crate::log_alerts::{LogAlertError, LogAlertInput};
+
+        fn input(name: &str) -> LogAlertInput {
+            LogAlertInput {
+                name: name.into(),
+                enabled: false,
+                query: "service:api".into(),
+                filters: BTreeMap::from([("service".into(), vec!["api".into()])]),
+                text: None,
+                threshold: 1,
+                cooldown_seconds: 0,
+                group_ids: vec![],
+            }
+        }
+
+        async fn global_revision(store: &crate::store::Store) -> i64 {
+            store
+                .call(|conn| {
+                    conn.query_row(
+                        "SELECT revision FROM metric_alert_global WHERE singleton=1",
+                        [],
+                        |row| row.get(0),
+                    )
+                })
+                .await
+                .unwrap()
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let app = test_app(directory.path(), "http://127.0.0.1:1");
+        let id = app
+            .store
+            .save_log_alert(None, input("initial"))
+            .await
+            .unwrap();
+
+        let before_save = app.store.log_alerts().await.unwrap().remove(0);
+        app.store
+            .save_log_alert(Some(id.clone()), input("browser save"))
+            .await
+            .unwrap();
+        let after_browser_save = app.store.log_alerts().await.unwrap().remove(0);
+        let revision_before_stale_save = global_revision(&app.store).await;
+        assert!(matches!(
+            app.store
+                .save_log_alert_checked(id.clone(), input("stale MCP save"), before_save.revision,)
+                .await,
+            Err(LogAlertError::Conflict("log_alert_changed"))
+        ));
+        let after_stale_save = app.store.log_alerts().await.unwrap().remove(0);
+        assert_eq!(after_stale_save.name, "browser save");
+        assert_eq!(after_stale_save.revision, after_browser_save.revision);
+        assert_eq!(
+            global_revision(&app.store).await,
+            revision_before_stale_save
+        );
+
+        app.store
+            .save_log_alert(Some(id.clone()), input("browser update before delete"))
+            .await
+            .unwrap();
+        let before_browser_delete = app.store.log_alerts().await.unwrap().remove(0);
+        app.store
+            .save_log_alert(Some(id.clone()), input("browser update"))
+            .await
+            .unwrap();
+        let after_browser_update = app.store.log_alerts().await.unwrap().remove(0);
+        let revision_before_stale_delete = global_revision(&app.store).await;
+        assert!(matches!(
+            app.store
+                .delete_log_alert_checked(id.clone(), before_browser_delete.revision)
+                .await,
+            Err(LogAlertError::Conflict("log_alert_changed"))
+        ));
+        let after_stale_delete = app.store.log_alerts().await.unwrap().remove(0);
+        assert_eq!(after_stale_delete.name, "browser update");
+        assert_eq!(after_stale_delete.revision, after_browser_update.revision);
+        assert_eq!(
+            global_revision(&app.store).await,
+            revision_before_stale_delete
+        );
     }
 }
