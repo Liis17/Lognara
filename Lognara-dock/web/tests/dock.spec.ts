@@ -153,7 +153,10 @@ test('dragging over the events chart narrows the range and reset restores the pr
   const plot = page.getByRole('group', { name: /График событий/ });
   await expect(plot).toBeVisible();
   const before = new URL(page.url()).searchParams;
-  const box = (await plot.boundingBox())!;
+  const box = (await page.locator('.line-chart-plot').boundingBox())!;
+  await page.mouse.move(box.x + box.width * 0.5, box.y + 100);
+  await expect(page.locator('.line-chart-tooltip')).toBeVisible();
+  await expect(page.locator('.line-chart-points circle')).toHaveCount(7);
   await page.mouse.move(box.x + box.width * 0.2, box.y + box.height * 0.5);
   await page.mouse.down();
   await page.mouse.move(box.x + box.width * 0.5, box.y + box.height * 0.8, { steps: 5 });
@@ -167,6 +170,36 @@ test('dragging over the events chart narrows the range and reset restores the pr
   await page.getByRole('button', { name: 'Сбросить выбор и масштаб', exact: true }).click();
   await expect(page.getByLabel('Период', { exact: true })).toHaveValue('1h');
   await expect(page.getByText(/^Выбрано: /)).toHaveCount(0);
+});
+
+test('calendar selection updates the exact range in the displayed timezone', async ({ page }) => {
+  const calls = await fixture(page);
+  await page.goto('/logs');
+  await page.locator('.date-range-trigger').click();
+  const dialog = page.getByRole('dialog', { name: 'Выбор диапазона времени' });
+  const days = await dialog.locator('.date-range-calendar button:not(.outside-month)').evaluateAll(buttons =>
+    buttons.map(button => button.getAttribute('aria-label')!).filter(Boolean));
+  expect(days.length).toBeGreaterThan(1);
+  await dialog.getByRole('button', { name: days[0], exact: true }).click();
+  await dialog.getByRole('button', { name: days[1], exact: true }).click();
+  const selected = new URL(page.url()).searchParams;
+  const timezone = await dialog.locator('.date-range-zone').textContent();
+  const localDate = (value: string) => page.evaluate(({ value, timezone }) =>
+    new Intl.DateTimeFormat('en-CA', { timeZone: timezone! }).format(new Date(value)), { value, timezone });
+  expect(await localDate(selected.get('from')!)).toBe(days[0]);
+  expect(await localDate(selected.get('to')!)).toBe(days[1]);
+  await expect.poll(() => calls.filter(call => call.path === '/api/stats/summary').at(-1)?.body.from)
+    .toBe(selected.get('from'));
+});
+
+test('empty Trace input is neutral and invalid IDs are errors', async ({ page }) => {
+  await fixture(page);
+  await page.goto('/logs?view=trace');
+  await expect(page.getByText('Введите Trace ID, чтобы показать связанные логи.', { exact: true })).toBeVisible();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await page.getByLabel('Trace ID', { exact: true }).fill('invalid');
+  await page.getByRole('button', { name: 'Найти', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('32 шестнадцатеричных символа');
 });
 
 test('failed auto-load does not retry by itself and the button retries once', async ({ page }) => {
@@ -218,7 +251,7 @@ test('patterns list shows share, growth tone and the selected sort', async ({ pa
   await expect(rows).toHaveCount(2);
   await expect(rows.first().locator('.pattern-growth')).toHaveClass(/growth-up/);
   await expect(rows.nth(1).locator('.pattern-growth')).toHaveClass(/growth-down/);
-  await expect(page.getByText(/Показано 2 из 2 видимых паттернов/)).toBeVisible();
+  await expect(page.getByText(/Показано 2 из 2\./)).toBeVisible();
   await expect(page.getByRole('button', { name: /^Live/ })).toHaveCount(0);
   await page.screenshot({ path: test.info().outputPath('patterns-desktop.png'), fullPage: true });
   await page.getByLabel('Сортировка', { exact: true }).selectOption('growth');
@@ -232,7 +265,7 @@ test('history filter uses typed core query, cursor and text-scoped counts', asyn
   await page.getByLabel('Поисковый запрос', { exact: true }).fill('service:billing AND level:(ERROR OR WARN)');
   await page.getByRole('button', { name: 'Найти', exact: true }).click();
   await expect.poll(() => calls.filter((call) => call.path === '/api/stats/summary').at(-1)?.body.filters)
-    .toEqual({ service: ['billing'], level: ['error', 'warn'] });
+    .toEqual({ service: ['billing'], level: ['warn', 'error'] });
   await loadNextPage(page);
   await expect.poll(() => calls.filter((call) => call.path === '/api/logs/search').at(-1)?.body.cursor).toBe('page-2');
   await expect(page.getByRole('button', { name: /Payment retry 69/ })).toBeVisible();
@@ -498,19 +531,63 @@ test('history beyond the UTC bucket cap keeps cursor search without inventing to
 });
 
 
-test('chart level toggles filter log rows and restore them', async ({ page }) => {
-  await fixture(page, true, events.slice(0, 4));
+test('legend levels filter server counts and rows, intersect query levels and persist in the URL', async ({ page }) => {
+  const calls = await fixture(page, true, events.slice(0, 4));
   await page.goto('/logs');
-  const warn = page.getByRole('group', { name: 'Уровни графика и ленты', exact: true }).getByRole('button', { name: 'WARN', exact: true });
+  const legend = page.getByRole('group', { name: 'Уровни графика и ленты', exact: true });
+  const warn = legend.getByRole('button', { name: 'WARN', exact: true });
   await expect(page.locator('.event-row')).toHaveCount(4);
   await warn.click();
   await expect(warn).toHaveAttribute('aria-pressed', 'false');
+  await expect.poll(() => calls.filter(call => call.path === '/api/stats/summary').at(-1)?.body.filters.level)
+    .toEqual(['trace', 'debug', 'info', 'error', 'fatal', 'unknown']);
+  await expect(page).toHaveURL(/levels=/);
   await expect(page.locator('.event-row')).toHaveCount(1);
   await expect(page.locator('.event-row .level-warn')).toHaveCount(0);
   await warn.click();
   await expect(page.locator('.event-row')).toHaveCount(4);
+  await expect(page).not.toHaveURL(/levels=/);
+  await page.getByLabel('Поисковый запрос', { exact: true }).fill('level:(ERROR OR WARN)');
+  await page.getByRole('button', { name: 'Найти', exact: true }).click();
+  await expect.poll(() => calls.filter(call => call.path === '/api/stats/summary').at(-1)?.body.filters.level)
+    .toEqual(['warn', 'error']);
   await warn.click();
-  await page.getByRole('button', { name: 'ERROR', exact: true }).click();
+  await expect.poll(() => calls.filter(call => call.path === '/api/stats/summary').at(-1)?.body.filters.level)
+    .toEqual(['error']);
+  await expect(page.locator('.event-row')).toHaveCount(1);
+  const requestsBeforeEmpty = calls.filter(call => call.path === '/api/stats/summary').length;
+  await legend.getByRole('button', { name: 'ERROR', exact: true }).click();
   await expect(page.locator('.event-row')).toHaveCount(0);
-  await expect(page.getByText('Все загруженные события скрыты фильтром уровней.', { exact: true })).toBeVisible();
+  await expect(page.getByText('Включите хотя бы один уровень в легенде.', { exact: true })).toBeVisible();
+  expect(calls.filter(call => call.path === '/api/stats/summary')).toHaveLength(requestsBeforeEmpty);
+});
+
+test('Live applies the visible level selection', async ({ page }) => {
+  await fixture(page, true, events.slice(0, 4));
+  await page.addInitScript(() => {
+    class Stream extends EventTarget {
+      static CLOSED = 2;
+      readyState = 1;
+      onerror = null;
+      constructor() {
+        super();
+        (window as any).__streamCount = ((window as any).__streamCount ?? 0) + 1;
+        (window as any).__testStream = this;
+      }
+      close() { this.readyState = 2; }
+    }
+    (window as any).EventSource = Stream;
+  });
+  await page.goto('/logs');
+  const legend = page.getByRole('group', { name: 'Уровни графика и ленты', exact: true });
+  const warn = legend.getByRole('button', { name: 'WARN', exact: true });
+  await warn.click();
+  await expect(page).toHaveURL(/levels=/);
+  await expect(page.locator('.event-row')).toHaveCount(1);
+  await page.getByRole('button', { name: 'Live выкл', exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).__streamCount)).toBe(1);
+  await page.evaluate((batch) => (window as any).__testStream.dispatchEvent(new MessageEvent('logs', { data: JSON.stringify(batch) })), events.slice(0, 4));
+  await expect(page.locator('.event-row')).toHaveCount(1);
+  await expect(page.getByText('ERROR 1', { exact: true })).toBeVisible();
+  await expect(page.getByText(/^WARN /)).toHaveCount(0);
 });

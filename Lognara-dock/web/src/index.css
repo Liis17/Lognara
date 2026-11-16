@@ -309,11 +309,6 @@ pre.json, .event-details pre, tr.details pre { margin: 0; padding: 12px; backgro
 .level-toggles button { height: 28px; padding: 0 10px; border-radius: 999px; font-size: 12px; font-weight: 400; gap: 6px; }
 .level-toggles button i { width: 8px; height: 8px; border-radius: 50%; background: var(--lvl); }
 .level-toggles button[aria-pressed='false'] { opacity: .4; }
-.events-chart-plot { position: relative; height: 130px; display: flex; align-items: flex-end; gap: 4px; border-bottom: 1px solid rgba(229,223,215,.1); cursor: crosshair; user-select: none; touch-action: pan-y; }
-.events-chart-column { flex: 1; min-width: 0; display: flex; flex-direction: column-reverse; }
-.events-chart-column i { flex: 0 1 0; min-height: 0; background: var(--lvl); }
-.events-chart-box { position: absolute; z-index: 1; pointer-events: none; border: 1px solid var(--accent); background: rgba(192,122,82,.16); border-radius: 4px; }
-.events-chart-axis { display: flex; justify-content: space-between; margin-top: -6px; color: var(--ink3); font: 11px var(--mono); }
 .events-chart .histogram-data { margin-top: 0; }
 .export-menu { display: inline-flex; gap: 5px; flex-wrap: wrap; }
 .histogram { padding: 0 16px 12px; }
@@ -569,8 +564,10 @@ pre.json, .event-details pre, tr.details pre { margin: 0; padding: 12px; backgro
 .pattern-toolbar .button { color: var(--ink); }
 .pattern-toolbar input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--accent); }
 .pattern-intro { margin: -4px 0 12px; font-size: 13px; line-height: 1.6; }
-.pattern-coverage { font-size: 12px; color: var(--ink3); margin-bottom: 12px; }
-.pattern-coverage p { margin: 2px 0; }
+.pattern-coverage { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 12px; font-size: 12px; color: var(--ink3); }
+.pattern-index-chip, .issue-index-status { display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: 999px; padding: 5px 10px; background: var(--panel); }
+.pattern-index-chip.complete, .issue-index-status.complete { color: var(--ok); }
+.pattern-index-chip.partial, .issue-index-status.partial { color: var(--warn); }
 .patterns-table { table-layout: auto; }
 .patterns-table th { padding: 10px 8px; letter-spacing: .08em; background: rgba(229,223,215,.02); border-bottom: 0; }
 .patterns-table td { vertical-align: middle; padding: 12px 8px; border-bottom: 0; border-top: 1px solid var(--line-soft); }
@@ -599,11 +596,14 @@ pre.json, .event-details pre, tr.details pre { margin: 0; padding: 12px; backgro
 .pattern-spark { display: block; width: 120px; height: 28px; stroke: var(--lvl, var(--info)); fill: var(--lvl, var(--info)); }
 .pattern-row.open td, .pattern-details td { background: var(--raised); }
 .pattern-details td { padding: 4px 14px 18px 38px; }
-.pattern-metadata { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 10px 22px; margin: 12px 0; }
+.pattern-metadata { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; margin: 12px 0; }
+.pattern-metadata > div { min-width: 0; padding: 10px 12px; border: 1px solid var(--line-soft); border-radius: 9px; background: var(--panel); }
 .pattern-metadata dt, .pattern-detail-grid h3 { color: var(--ink3); font-size: 11px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase; margin: 0 0 8px; }
 .pattern-metadata dt { margin: 0; }
 .pattern-metadata dd { margin: 2px 0 0; font: 12px var(--mono); color: var(--ink); overflow-wrap: anywhere; }
-.pattern-detail-grid { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1.4fr) auto; gap: 24px; align-items: start; margin: 12px 0; }
+.pattern-detail-grid { display: grid; grid-template-columns: minmax(0,.9fr) minmax(0,1.1fr); gap: 12px; align-items: start; margin: 12px 0; }
+.pattern-detail-grid > div:not(.actions) { min-width: 0; padding: 14px; border: 1px solid var(--line-soft); border-radius: 10px; background: var(--panel); }
+.pattern-detail-grid > .actions { grid-column: 1 / -1; }
 .pattern-values h4 { margin: 0 0 6px; font: 500 12px var(--mono); color: var(--accent); }
 .pattern-values ul { list-style: none; padding: 0; margin: 0 0 6px; }
 .pattern-values li { display: grid; grid-template-columns: minmax(0,140px) minmax(40px,1fr) auto; gap: 6px 10px; align-items: center; margin: 4px 0; font: 12px var(--mono); color: var(--ink2); }
@@ -614,6 +614,11 @@ pre.json, .event-details pre, tr.details pre { margin: 0; padding: 12px; backgro
 .pattern-examples summary time { flex: none; color: var(--ink3); }
 .pattern-examples pre { margin-top: 6px; }
 .issue-toolbar { gap: 10px; }
+.issue-behavior { margin: -4px 0 10px; color: var(--ink3); font-size: 12px; }
+.issue-behavior summary { width: fit-content; cursor: pointer; }
+.issue-behavior p { max-width: 900px; margin: 8px 0 0; line-height: 1.55; }
+.issue-index-status { width: fit-content; margin: 0 0 12px; font-size: 12px; }
+.issue-index-status time { color: var(--ink2); font-family: var(--mono); }
 .issue-count { font: 11.5px var(--mono); margin-left: 5px; opacity: .9; }
 .issue-summary h1 { font-size: 26px; letter-spacing: -.015em; }
 .issue-summary h1 em { font-style: normal; color: var(--accent); }
@@ -622,7 +627,7 @@ pre.json, .event-details pre, tr.details pre { margin: 0; padding: 12px; backgro
 .issues-table .pattern-message { min-width: 300px; }
 .issue-title { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .issue-title small { font: 11.5px var(--mono); color: var(--ink3); }
-.issue-status { font-size: 11px; font-weight: 600; border: 1px solid currentColor; border-radius: 999px; padding: 2px 9px; white-space: nowrap; }
+.issue-status { display: inline-flex; font-size: 11px; font-weight: 600; border: 1px solid currentColor; border-radius: 999px; padding: 3px 9px; white-space: nowrap; background: rgba(229,223,215,.035); }
 .issue-status.new { color: var(--accent); }
 .issue-status.open { color: var(--warn); }
 .issue-status.back { color: var(--err); }
@@ -714,7 +719,6 @@ pre.json, .event-details pre, tr.details pre { margin: 0; padding: 12px; backgro
   .source { display: none; }
   .logs-table th:nth-child(3) { display: none; }
   .logs-table td { padding: 10px 9px; }
-  .events-chart-plot { gap: 1px; }
   .logs-table th { padding: 11px 9px; }
   .pattern-secondary { display: none; }
   .pipe { grid-template-columns: minmax(0,1fr); }

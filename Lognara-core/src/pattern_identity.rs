@@ -103,6 +103,11 @@ pub fn identify(environment: Option<&str>, service: &str, level: &str, message: 
     }
 }
 
+/// Встроенные ServiceMetrics v1/v2 остаются логами, но не становятся паттернами.
+pub(crate) fn is_pattern_eligible(message: &str) -> bool {
+    !message.starts_with("ServiceMetrics {")
+}
+
 pub fn valid_id(id: &str) -> bool {
     id.len() == 67
         && id.starts_with("p1_")
@@ -798,6 +803,20 @@ mod tests {
             .variables
             .is_empty()
         );
+    }
+
+    #[test]
+    fn service_metrics_v1_and_v2_are_not_pattern_eligible() {
+        assert!(!is_pattern_eligible(
+            r#"ServiceMetrics { ServiceName: "api", Metrics: [], Timestamp: 10/23/2026 12:14:47 }"#
+        ));
+        assert!(!is_pattern_eligible(
+            r#"ServiceMetrics { SchemaVersion: 2, ServiceName: "api", Counters: [], Gauges: [], Timestamp: 11/15/2026 20:37:51 }"#
+        ));
+        assert!(is_pattern_eligible(
+            "ServiceMetrics are temporarily unavailable"
+        ));
+        assert!(is_pattern_eligible("payment failed"));
     }
 
     #[test]

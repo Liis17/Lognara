@@ -38,7 +38,7 @@ function badge(issue: Issue): { label: string; tone: string; line: string } {
 function Title({ issue }: { issue: Pick<Issue, "exception_type" | "parts" | "service" | "action" | "fingerprint"> }) {
   return <span className="issue-title">
     {issue.exception_type ? <code className="pattern-template">{issue.exception_type}</code> : <Template parts={issue.parts} />}
-    <small>{issue.service}{issue.action ? ` · ${issue.action}` : ""} · fp {issue.fingerprint.slice(3, 9)}</small>
+    <small>{issue.service}{issue.action ? ` · ${issue.action}` : ""} · ID {issue.fingerprint.slice(3, 9)}</small>
   </span>;
 }
 
@@ -47,7 +47,7 @@ function StackTrace({ details }: { details: IssueDetailsResponse }) {
   const latest = details.examples[0];
   const stack = latest?.attributes["exception.stacktrace"];
   const lines = typeof stack === "string" ? stack.split("\n") : [];
-  if (!details.issue.exception_type) return <p className="muted">Проблема сгруппирована по шаблону сообщения: события не содержат атрибут exception.type.</p>;
+  if (!details.issue.exception_type) return <p className="muted">Группировка по сообщению: приложение не передало тип исключения.</p>;
   if (!latest) return <p className="muted">В выбранном периоде событий нет, stack trace последнего случая недоступен.</p>;
   if (!lines.length) return <p className="muted">Приложение не передало exception.stacktrace.</p>;
   return <>
@@ -60,7 +60,7 @@ function StackTrace({ details }: { details: IssueDetailsResponse }) {
 function History({ details }: { details: IssueDetailsResponse }) {
   const actor = (name: string | null) => name ?? "система";
   return <ul className="issue-history">
-    <li><b><time dateTime={details.issue.first_seen} title={details.issue.first_seen}>{stamp(details.issue.first_seen)}</time></b>впервые в известной истории</li>
+    <li><b><time dateTime={details.issue.first_seen} title={details.issue.first_seen}>{stamp(details.issue.first_seen)}</time></b>первое событие</li>
     {[...details.history].reverse().map((item, index) => <li key={index}>
       <b><time dateTime={item.at} title={item.at}>{stamp(item.at)}</time></b>
       {item.action === "resolved" ? `отмечена решённой · ${actor(item.actor)}` : item.action === "reopened" ? `открыта снова · ${actor(item.actor)}` :
@@ -162,16 +162,22 @@ export default function Errors({ onUnauthorized }: { onUnauthorized: () => void 
     </div>
     <div className="summary issue-summary">
       <h1>{response && count !== null ? <>{plural(response.status_events, ["ошибка", "ошибки", "ошибок"])} → <em>{plural(count, ["проблема", "проблемы", "проблем"])}</em></> : "Ошибки"}</h1>
-      <p className="muted">error и fatal сгруппированы по fingerprint: тип исключения и фреймы, без исключения — шаблон сообщения.</p>
+      <p className="muted">Повторяющиеся ERROR и FATAL события сгруппированы по причине.</p>
     </div>
-    <p className="page-note">Статус общий для всех пользователей Dock. Решённая проблема возвращается, когда после решения поступает событие со временем не раньше момента решения; опоздавшие события со старым временем её не открывают.</p>
-    {response && <p className="page-note" role="status">Обработано до <time dateTime={response.as_of}>{response.as_of}</time> · watermark {number.format(response.watermark)} / {number.format(response.core_watermark)}
-      {response.history_complete ? "" : " · история неполна: новизна не установлена"}.</p>}
+    <details className="issue-behavior"><summary>Как работают статусы</summary>
+      <p>Статус общий для пользователей Dock. Решённая проблема возвращается, если после решения поступило событие с более поздним временем. Опоздавшие события со старым временем её не открывают.</p>
+    </details>
+    {response && <div className={`issue-index-status ${response.history_complete ? "complete" : "partial"}`} role="status"
+      title={`Обработано до ${response.as_of}; watermark ${number.format(response.watermark)} / ${number.format(response.core_watermark)}; известная история с ${response.history_from ?? "не определена"}`}>
+      <span>{response.history_complete ? "История обработана" : "История ещё обновляется"}</span>
+      <time dateTime={response.as_of}>до {stamp(response.as_of)}</time>
+      {!response.history_complete && <span>Новизна может быть неизвестна</span>}
+    </div>}
     {listError && <p className="error" role="alert">{listError}</p>}
     {actionError && <p className="error" role="alert">Не удалось изменить статус: {actionError}</p>}
     <section className="panel table-scroll" aria-label="Проблемы">
-      <table className="issues-table"><thead><tr><th>Проблема</th><th>Статус</th><th className="issue-number">Повторов</th>
-        <th className="pattern-secondary">Серверы</th><th className="pattern-secondary">Последняя</th><th className="pattern-secondary">{PERIODS[period].label}</th></tr></thead>
+      <table className="issues-table"><thead><tr><th>Проблема</th><th>Статус</th><th className="issue-number">События</th>
+        <th className="pattern-secondary">Узлы</th><th className="pattern-secondary">Последний раз</th><th className="pattern-secondary">Динамика · {PERIODS[period].label}</th></tr></thead>
         <tbody>{response?.issues.map((issue) => {
           const mark = badge(issue);
           const open = selected === issue.fingerprint;
@@ -191,16 +197,16 @@ export default function Errors({ onUnauthorized }: { onUnauthorized: () => void 
               {!details && !detailsError && <p role="status">Загружаем детали проблемы…</p>}
               {detailsError && <p className="error" role="alert">{detailsError}</p>}
               {details && <div className="issue-detail-grid">
-                <div><h3>Stack trace последнего случая</h3>
+                <div><h3>Последний сбой</h3>
                   {details.examples[0] && <code className="issue-message">{details.examples[0].message}</code>}
                   <StackTrace details={details} />
                   {details.issue.frames.length > 0 && <details className="issue-frames"><summary>Фреймы fingerprint · {details.issue.frames.length}</summary>
                     <ol>{details.issue.frames.map((frame, index) => <li key={index}><code>{frame}</code></li>)}</ol></details>}
                 </div>
-                <div><h3>Серверы · {number.format(details.issue.servers)}</h3>
+                <div><h3>Узлы · {number.format(details.issue.servers)}</h3>
                   {details.servers.length ? <ul className="issue-servers">{details.servers.map((server) => <li key={server.value}><code>{server.value}</code><span>{number.format(server.count)}</span></li>)}
                     {details.other_servers > 0 && <li><span className="muted">остальные</span><span>{number.format(details.other_servers)}</span></li>}</ul> : <p className="muted">В периоде событий нет.</p>}
-                  <h3>История</h3><History details={details} />
+                  <h3>История статуса</h3><History details={details} />
                 </div>
                 <div className="actions issue-actions">
                   <Link className="button solid" to={eventsLink(issue)}>Все {plural(details.issue.count, ["событие", "события", "событий"])}</Link>

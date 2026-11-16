@@ -4,7 +4,7 @@ use crate::{
     columns,
     model::{LogEvent, StoredEvent, format_timestamp},
     pattern_catalog::{State, column, optional_string, string},
-    pattern_identity::{Identity, Part, VariableType, identify, valid_id},
+    pattern_identity::{Identity, Part, VariableType, identify, is_pattern_eligible, valid_id},
     query::{self, Filters, PreparedFilter, PreparedText, QueryError, TextQuery},
     storage::Core,
     wire::LogLevel,
@@ -298,6 +298,9 @@ pub(crate) async fn scan(
         query::check_deadline(deadline)?;
         for row in 0..batch.num_rows() {
             let message = string(&batch, "message", row)?;
+            if !is_pattern_eligible(message) {
+                continue;
+            }
             if window
                 .text
                 .as_ref()

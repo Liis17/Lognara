@@ -3,7 +3,7 @@ use crate::{
     analytics::raw_frame,
     config::Config,
     issue_identity::{Exception, fingerprint, is_error},
-    pattern_identity::{Part, identify},
+    pattern_identity::{Part, identify, is_pattern_eligible},
     query::{self, QueryError},
     storage::{Core, Snapshot},
     wire::LogLevel,
@@ -366,24 +366,26 @@ impl DiskCatalog {
                         },
                     )?;
                 }
-                observe(
-                    &mut known,
-                    &mut changed,
-                    &mut next.bytes,
-                    timestamp,
-                    identity.id.clone(),
-                    || Known {
-                        id: identity.id,
-                        environment: environment.map(str::to_owned),
-                        service: service.into(),
-                        level: level.as_str().into(),
-                        template: identity.template,
-                        parts: identity.parts,
-                        exact: identity.exact,
-                        first: timestamp,
-                        last: timestamp,
-                    },
-                )?;
+                if is_pattern_eligible(message) {
+                    observe(
+                        &mut known,
+                        &mut changed,
+                        &mut next.bytes,
+                        timestamp,
+                        identity.id.clone(),
+                        || Known {
+                            id: identity.id,
+                            environment: environment.map(str::to_owned),
+                            service: service.into(),
+                            level: level.as_str().into(),
+                            template: identity.template,
+                            parts: identity.parts,
+                            exact: identity.exact,
+                            first: timestamp,
+                            last: timestamp,
+                        },
+                    )?;
+                }
                 if known.len() + issues.len() > config.pattern_max_entries
                     || next.bytes > config.pattern_catalog_bytes
                 {

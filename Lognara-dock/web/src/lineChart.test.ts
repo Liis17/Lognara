@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { chartColorToken, chartData, selectedChartRange, zoomChartRange } from "./components/lineChart.ts";
+import { chartColorToken, chartData, selectedChartRange, zoomChartRange } from "./components/lineChartUtils.ts";
 
 test("chart data shares timestamp positions and keeps gaps as null", () => {
   assert.deepEqual(chartData(["2026-01-01T00:00:00Z", "2026-01-01T00:01:00Z"], [

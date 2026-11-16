@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import uPlot from "uplot";
 import "uplot/dist/uPlot.min.css";
 import type { SeriesLine } from "../api";
-import { chartColorToken, chartData, selectedChartRange, zoomChartRange } from "./lineChart";
+import { chartColorToken, chartData, selectedChartRange, zoomChartRange } from "./lineChartUtils";
 
 export interface LineChartProps {
   buckets: string[];
@@ -12,13 +12,17 @@ export interface LineChartProps {
   onToggleSeries: (index: number) => void;
   onSelectRange: (from: number, to: number) => void;
   onZoom: (from: number, to: number) => void;
+  onSelectBucket?: (index: number) => void;
+  showLegend?: boolean;
+  legendLabel?: string;
 }
 
 interface Hover { index: number; left: number; tooltipLeft: number }
 const HEIGHT = 320;
 const number = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 4 });
 
-export default function LineChart({ buckets, series, unit = "", visibleSeries, onToggleSeries, onSelectRange, onZoom }: LineChartProps) {
+export default function LineChart({ buckets, series, unit = "", visibleSeries, onToggleSeries, onSelectRange, onZoom,
+  onSelectBucket, showLegend = true, legendLabel = "Серии диаграммы" }: LineChartProps) {
   const container = useRef<HTMLDivElement>(null);
   const plotRef = useRef<uPlot | null>(null);
   const callbacks = useRef({ onSelectRange, onZoom });
@@ -112,7 +116,7 @@ export default function LineChart({ buckets, series, unit = "", visibleSeries, o
       );
       if (!next) return;
       event.preventDefault();
-      plot.setScale("x", next);
+      plot.setScale("x", { min: next.from, max: next.to });
       const range = selectedChartRange(next.from, next.to);
       if (range) callbacks.current.onZoom(range.from, range.to);
     };
@@ -123,7 +127,7 @@ export default function LineChart({ buckets, series, unit = "", visibleSeries, o
   const hoveredTimestamp = hover ? buckets[hover.index] : undefined;
   return <section className="line-chart" aria-label="Линейная диаграмма">
     {unit && <div className="line-chart-unit">{unit}</div>}
-    {series.length > 0 && <div className="line-chart-legend" role="group" aria-label="Серии диаграммы">
+    {showLegend && series.length > 0 && <div className="line-chart-legend" role="group" aria-label={legendLabel}>
       {series.map((line, index) => <button key={`${index}/${line.label}`} type="button" aria-pressed={visibleSeries.has(index)}
         onClick={() => onToggleSeries(index)}>
         <i aria-hidden="true" style={{ backgroundColor: `var(${chartColorToken(index)})` }} />{line.label || `Серия ${index + 1}`}
@@ -142,7 +146,7 @@ export default function LineChart({ buckets, series, unit = "", visibleSeries, o
         </svg>
         <div className="line-chart-tooltip" style={{ left: `${hover.tooltipLeft}px` }} role="status">
           {hoveredTimestamp && <time dateTime={hoveredTimestamp}>{tooltipTime.format(new Date(hoveredTimestamp))}</time>}
-          {series.map((line, index) => <div key={`${index}/${line.label}`}><i style={{ backgroundColor: `var(${chartColorToken(index)})` }} />
+          {series.map((line, index) => visibleSeries.has(index) && <div key={`${index}/${line.label}`}><i style={{ backgroundColor: `var(${chartColorToken(index)})` }} />
             {line.label || `Серия ${index + 1}`}: {line.values[hover.index] == null ? "—" : `${number.format(line.values[hover.index]!)}${unit ? ` ${unit}` : ""}`}
           </div>)}
         </div>
@@ -153,7 +157,9 @@ export default function LineChart({ buckets, series, unit = "", visibleSeries, o
       <div className="table-scroll"><table>
         <thead><tr><th scope="col">Время</th>{series.map((line, index) => <th scope="col" key={`${index}/${line.label}`}>{line.label || `Серия ${index + 1}`}</th>)}</tr></thead>
         <tbody>{buckets.map((bucket, row) => <tr key={`${bucket}/${row}`}>
-          <td><time dateTime={bucket}>{tooltipTime.format(new Date(bucket))}</time></td>
+          <td>{onSelectBucket
+            ? <button type="button" className="link-button" onClick={() => onSelectBucket(row)}>{tooltipTime.format(new Date(bucket))}</button>
+            : <time dateTime={bucket}>{tooltipTime.format(new Date(bucket))}</time>}</td>
           {series.map((line, index) => <td key={`${index}/${line.label}`}>{line.values[row] == null ? "—" : number.format(line.values[row]!)}</td>)}
         </tr>)}</tbody>
       </table></div>
