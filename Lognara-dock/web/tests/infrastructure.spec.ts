@@ -7,7 +7,7 @@ const source = (server: string) => ({ environment: 'prod', server, backend: 'api
 function node(kind: 'relay' | 'agent', id: number, name: string, status: string, extra: Record<string, unknown> = {}) {
   return {
     kind, id, name, relay_id: kind === 'agent' ? 1 : null, relay: kind === 'agent' ? 'relay-eu-1' : null, status, reason: null,
-    heartbeat_at: ago(2), last_event_at: ago(1), version: '0.1.0',
+    heartbeat_at: ago(2), last_event_at: ago(1), version: '0.1.0', ...(kind === 'relay' ? { release_version: 'dev-c999c12' } : {}),
     spool: { used_bytes: 4, limit_bytes: 100, records: 1 }, delivery_failures: 0,
     events_per_second: kind === 'relay' ? 2100 : null, source: kind === 'agent' ? source(name) : null, ...extra,
   };
@@ -16,10 +16,10 @@ function node(kind: 'relay' | 'agent', id: number, name: string, status: string,
 const response = {
   as_of: asOf,
   thresholds: { heartbeat_ttl_seconds: 60, idle_seconds: 300, spool_warn_percent: 80 },
-  core: { status: 'online', version: '0.3.0', visibility_lag_ms: 600, wal_bytes: 2 * 1024 ** 3, wal_limit_bytes: 4 * 1024 ** 3 },
+  core: { status: 'online', version: '0.3.0', release_version: 'dev-c999c12', git_commit: 'c999c12abcdef', visibility_lag_ms: 600, wal_bytes: 2 * 1024 ** 3, wal_limit_bytes: 4 * 1024 ** 3 },
   storage: { segments: 12, parquet_bytes: 412 * 1024 ** 3, index_bytes: 38 * 1024 ** 3, oldest_event_at: '2026-09-13T08:00:00Z',
     retention_seconds: 604_800, disk_total_bytes: 1000 * 1024 ** 3, disk_free_bytes: 310 * 1024 ** 3 },
-  dock: { version: '0.1.0', sse_clients: 3, sessions: 4 },
+  dock: { version: '0.1.0', release_version: 'dev-c999c12', git_commit: 'c999c12abcdef', sse_clients: 3, sessions: 4 },
   registry: true,
   nodes: [
     node('agent', 1, 'srv-eu-12', 'offline', { heartbeat_at: ago(2460), last_event_at: ago(2460), spool: null }),
@@ -50,6 +50,7 @@ test('infrastructure shows pipeline, problem nodes first and storage', async ({ 
   await expect(pipe).toContainText(/2\s100событий\/с/);
   await expect(pipe).toContainText('спул макс. 82% · srv-eu-19');
   await expect(pipe).toContainText('3SSE-клиента');
+  await expect(pipe).toContainText('vdev-c999c12');
   const rows = page.locator('.nodes-table tbody tr');
   await expect(rows).toHaveCount(5);
   await expect(rows.nth(0)).toContainText('agent srv-eu-12');
@@ -60,8 +61,15 @@ test('infrastructure shows pipeline, problem nodes first and storage', async ({ 
   await expect(rows.nth(3)).toContainText('Нет новых логов');
   await expect(rows.nth(3)).toContainText('14 мин');
   await expect(rows.nth(4)).toContainText('heartbeat ещё не приходил');
-  const logs = rows.nth(0).getByRole('link', { name: 'фильтр srv-eu-12' });
-  expect(decodeURIComponent(await logs.getAttribute('href') ?? '')).toContain('server:"srv-eu-12"');
+  const serviceLogs = rows.nth(0).getByRole('link', { name: 'сервис billing' });
+  const serviceUrl = new URL(await serviceLogs.getAttribute('href') ?? '', 'http://dock');
+  expect(serviceUrl.searchParams.get('q')).toBe('service:"billing"');
+  expect(serviceUrl.searchParams.get('relay_id')).toBe('1');
+  expect(serviceUrl.searchParams.get('agent_id')).toBe('1');
+  const nodeLogs = rows.nth(4).getByRole('link', { name: 'agent srv-new' });
+  const nodeUrl = new URL(await nodeLogs.getAttribute('href') ?? '', 'http://dock');
+  expect(nodeUrl.searchParams.get('relay_id')).toBe('1');
+  expect(nodeUrl.searchParams.get('agent_id')).toBe('4');
   const storage = page.getByRole('region', { name: 'Хранилище' });
   await expect(storage).toContainText('retention 7 дн');
   await expect(storage).toContainText('412 ГБ');
@@ -157,6 +165,44 @@ test('tree relay cards show failures since start and keep null as no data', asyn
   await page.goto('/infrastructure/tree');
   await expect(page.locator('[data-infra-node-key="relay-1"]')).toContainText('сбоев доставки с запуска 17');
   await expect(page.locator('[data-infra-node-key="relay-2"]')).toContainText('сбоев доставки с запуска нет данных');
+});
+
+test('host is one hwagent node with a direct core edge and its release version', async ({ page }) => {
+  const host = {
+    kind: 'host', id: 3, name: 'mail-01', relay_id: 3, agent_id: 8, relay: null,
+    status: 'online', reason: null, heartbeat_at: ago(2), last_event_at: ago(1), version: '0.3.0', release_version: 'dev-c999c12',
+    spool: { used_bytes: 1, limit_bytes: 100, records: 1 }, delivery_failures: 0, events_per_second: 0,
+    source: source('mail-01'),
+  };
+  await fixture(page, { ...response, nodes: [host] });
+  await page.goto('/infrastructure/tree');
+  const hostCard = page.locator('[data-infra-node-key="host-3"]');
+  await expect(hostCard).toContainText('hwagent');
+  await expect(hostCard).toContainText('vdev-c999c12');
+  await expect(page.locator('[data-infra-card-key^="relay-"]')).toHaveCount(0);
+  await expect(page.locator('[data-infra-card-key^="agent-"]')).toHaveCount(0);
+  await expect(page.locator('[data-infra-edge-key="host-3:core"]')).toHaveCount(1);
+  await expect(page.locator('[data-infra-edge-key="relay-3:core"]')).toHaveCount(0);
+  await page.locator('[data-infra-node-key="host-3"]').dblclick();
+  const params = new URL(page.url()).searchParams;
+  expect(params.get('relay_id')).toBe('3');
+  expect(params.get('agent_id')).toBe('8');
+  expect(params.get('q')).toContain('server:"mail-01"');
+});
+
+test('mouse wheel over the graph scrolls the page vertically', async ({ page }) => {
+  // Низкое окно: страница должна быть выше viewport независимо от высоты карточек.
+  await page.setViewportSize({ width: 1280, height: 520 });
+  await fixture(page, response);
+  await page.goto('/infrastructure/tree');
+  const graph = page.locator('.infra-tree-scroll');
+  const box = await graph.boundingBox();
+  expect(box).not.toBeNull();
+  await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+  const before = await page.evaluate(() => window.scrollY);
+  await page.mouse.wheel(0, 500);
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(before);
+  await expect(graph).toHaveJSProperty('scrollTop', 0);
 });
 
 test('tree cards select paths with pointer and keyboard; Escape remains available to logout dialog', async ({ page }) => {
@@ -284,7 +330,7 @@ test('tree distinguishes initial loading, registry failure, empty registry, and 
 
   snapshot = 'empty';
   await page.getByRole('button', { name: /^Обновлено/ }).click();
-  await expect(page.getByText('Нет зарегистрированных relay и агентов.')).toBeVisible();
+  await expect(page.getByText('Нет зарегистрированных узлов.')).toBeVisible();
   await expect(page.locator('[data-infra-node-key="core"]')).toContainText('Онлайн');
   await expect(page.getByRole('link', { name: 'Подключениях' })).toHaveAttribute('href', '/access');
 });

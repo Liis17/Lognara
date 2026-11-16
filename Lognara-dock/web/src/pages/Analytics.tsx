@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router";
-import { api, ApiError, errorText } from "../api";
-import Histogram from "../components/Histogram";
+import { api, ApiError, errorText, type SeriesLine } from "../api";
+import LineChart from "../components/LineChart";
+import ServiceCombobox from "../components/ServiceCombobox";
 import type { Duration, GroupResponse, LogLevel, QueryFilters, SummaryResponse } from "../types";
 
 const periods = [
@@ -12,6 +13,7 @@ const periods = [
 const levels: LogLevel[] = ["info", "warn", "error", "fatal", "debug", "trace", "unknown"];
 const integer = new Intl.NumberFormat("ru-RU");
 const decimal = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 1 });
+const errorColorTokens = ["--lvl-error", "--lvl-fatal"] as const;
 const date = new Intl.DateTimeFormat("ru-RU", {
   day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit",
 });
@@ -47,6 +49,71 @@ function Snapshot({ value }: { value?: string }) {
   return value ? <span className="snapshot">Снимок: <time dateTime={value} title={value}>{date.format(new Date(value))}</time></span> : null;
 }
 
+function volumeLines(summary: SummaryResponse | undefined, previous: SummaryResponse | undefined): SeriesLine[] {
+  if (!summary) return [];
+  const lines: SeriesLine[] = levels.map((level) => ({
+    label: level.toUpperCase(),
+    values: summary.buckets.map((bucket) => bucket.levels[level]),
+  }));
+  if (previous) lines.push({
+    label: "Предыдущее окно · всего",
+    values: summary.buckets.map((_bucket, index) => {
+      const old = previous.buckets[index];
+      return old ? levels.reduce((sum, level) => sum + old.levels[level], 0) : null;
+    }),
+  });
+  return lines;
+}
+
+function speedLines(summary: SummaryResponse | undefined, previous: SummaryResponse | undefined, intervalSeconds: number): SeriesLine[] {
+  if (!summary) return [];
+  const rate = (count: number) => count / (intervalSeconds / 60);
+  const lines: SeriesLine[] = [{ label: "Текущее окно", values: summary.buckets.map((bucket) => rate(bucket.count)) }];
+  if (previous) lines.push({
+    label: "Предыдущее окно",
+    values: summary.buckets.map((_bucket, index) => {
+      const old = previous.buckets[index];
+      return old ? rate(old.count) : null;
+    }),
+  });
+  return lines;
+}
+
+function errorShareLines(summary: SummaryResponse | undefined): SeriesLine[] {
+  if (!summary) return [];
+  return (["error", "fatal"] as const).map((level) => ({
+    label: level.toUpperCase(),
+    values: summary.buckets.map((bucket) => bucket.count === 0 ? null : bucket.levels[level] / bucket.count * 100),
+  }));
+}
+
+function AnalyticsLine({ title, subtitle, buckets, series, unit, onSelectRange, onSelectBucket, colorTokens, hint }: {
+  title: string;
+  subtitle?: string;
+  buckets: string[];
+  series: SeriesLine[];
+  unit: string;
+  onSelectRange: (from: number, to: number) => void;
+  onSelectBucket: (index: number) => void;
+  colorTokens?: readonly string[];
+  hint: string;
+}) {
+  const [visible, setVisible] = useState<ReadonlySet<number>>(() => new Set(series.map((_line, index) => index)));
+  useEffect(() => setVisible(new Set(series.map((_line, index) => index))), [series]);
+  const toggle = (index: number) => setVisible((current) => {
+    const next = new Set(current);
+    if (next.has(index)) next.delete(index); else next.add(index);
+    return next;
+  });
+  return <section className="panel analytics-chart-panel">
+    <div className="panel-head"><h2>{title}</h2>{subtitle && <span className="muted">{subtitle}</span>}</div>
+    {buckets.length > 0 && series.length > 0 ? <LineChart buckets={buckets} series={series} unit={unit}
+      visibleSeries={visible} onToggleSeries={toggle} onSelectRange={onSelectRange} onZoom={() => {}}
+      onSelectBucket={onSelectBucket} colorTokens={colorTokens} /> : <p className="muted">За выбранный период данных нет.</p>}
+    <p className="muted analytics-chart-hint">{hint}</p>
+  </section>;
+}
+
 export default function Analytics({ onUnauthorized }: { onUnauthorized: () => void }) {
   const navigate = useNavigate();
   const [period, setPeriod] = useState(1);
@@ -67,6 +134,10 @@ export default function Analytics({ onUnauthorized }: { onUnauthorized: () => vo
     from: new Date(Date.parse(range.from) - duration).toISOString(),
     to: range.from,
   };
+  const chartBuckets = useMemo(() => data.summary?.buckets.map((bucket) => bucket.timestamp) ?? [], [data.summary]);
+  const volume = useMemo(() => volumeLines(data.summary, data.previous), [data.summary, data.previous]);
+  const speed = useMemo(() => speedLines(data.summary, data.previous, intervalSeconds), [data.summary, data.previous, intervalSeconds]);
+  const errorShares = useMemo(() => errorShareLines(data.summary), [data.summary]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -143,12 +214,7 @@ export default function Analytics({ onUnauthorized }: { onUnauthorized: () => vo
           {periods.map((item, index) => <button key={item.label} type="button" aria-pressed={period === index}
             onClick={() => { setPeriod(index); setRange(rangeFor(item.milliseconds)); }}>{item.label}</button>)}
         </div>
-        <label className="inline-label"><span>Сервис</span><select value={service === null ? "" : JSON.stringify(service)}
-          onChange={(event) => setService(event.target.value === "" ? null : JSON.parse(event.target.value) as string)}>
-          <option value="">Все сервисы</option>
-          {service !== null && !serviceOptions.includes(service) && <option value={JSON.stringify(service)}>{service || "Пустое имя"}</option>}
-          {serviceOptions.map((value) => <option key={value} value={JSON.stringify(value)}>{value || "Пустое имя"}</option>)}
-        </select></label>
+        <ServiceCombobox label="Сервис" value={service} inline options={serviceOptions.map((value) => ({ value }))} onChange={setService} />
         <button type="button" aria-pressed={compare} onClick={() => setCompare((value) => !value)}>Сравнить с прошлым окном</button>
         <button type="button" onClick={() => setRange(rangeFor(periods[period].milliseconds))}>Обновить</button>
         {loading && <span className="muted" role="status">Обновление…</span>}
@@ -180,22 +246,44 @@ export default function Analytics({ onUnauthorized }: { onUnauthorized: () => vo
       </section>
 
       <Snapshot value={data.summary?.as_of} />
-      <section className="panel" aria-labelledby="analytics-volume">
-        <div className="panel-head"><h2 id="analytics-volume">Объём событий</h2><span className="muted">Шаг {decimal.format(intervalSeconds / 60)} мин</span></div>
-        {data.previous && <div className="legend"><span><i className="legend-previous" />Предыдущее окно</span></div>}
-        <Histogram label="Объём событий за выбранный период" buckets={data.summary?.buckets ?? []}
-          loading={loading} intervalSeconds={intervalSeconds}
-          comparisonBuckets={data.previous?.buckets}
-          caption="Нажмите на интервал, чтобы открыть его логи. Время указано в вашем часовом поясе; крайние интервалы учитывают только события внутри выбранного диапазона."
-          onBucket={(timestamp) => {
+      <AnalyticsLine title="Объём событий" subtitle={`Шаг ${decimal.format(intervalSeconds / 60)} мин`}
+        buckets={chartBuckets} series={volume} unit="событий за интервал"
+        onSelectRange={(from, to) => openLogs(new Date(from).toISOString(), new Date(to).toISOString())}
+        onSelectBucket={(index) => {
+          const timestamp = chartBuckets[index];
+          if (!timestamp) return;
+          const start = Math.max(Date.parse(timestamp), Date.parse(range.from));
+          const end = Math.min(Date.parse(timestamp) + intervalSeconds * 1000, Date.parse(range.to));
+          openLogs(new Date(start).toISOString(), new Date(end).toISOString());
+        }}
+        hint="Отдельная линия для каждого уровня. Выделите участок мышью или выберите время в таблице, чтобы открыть логи за диапазон." />
+      {compare && <p className="muted comparison-note">Прошлое окно: {date.format(new Date(previousRange.from))} → {date.format(new Date(previousRange.to))}.
+        {" "}<Snapshot value={data.previous?.as_of} />
+      </p>}
+
+      <div className="analytics-grid">
+        <AnalyticsLine title="Скорость логов" buckets={chartBuckets} series={speed} unit="событий/мин"
+          onSelectRange={(from, to) => openLogs(new Date(from).toISOString(), new Date(to).toISOString())}
+          onSelectBucket={(index) => {
+            const timestamp = chartBuckets[index];
+            if (!timestamp) return;
             const start = Math.max(Date.parse(timestamp), Date.parse(range.from));
             const end = Math.min(Date.parse(timestamp) + intervalSeconds * 1000, Date.parse(range.to));
             openLogs(new Date(start).toISOString(), new Date(end).toISOString());
-          }} />
-        {compare && <p className="muted comparison-note">Прошлое окно: {date.format(new Date(previousRange.from))} → {date.format(new Date(previousRange.to))}.
-          {" "}<Snapshot value={data.previous?.as_of} />
-        </p>}
-      </section>
+          }}
+          hint={`Среднее число событий в минуту по корзинам ${decimal.format(intervalSeconds / 60)} мин. ${compare ? "Предыдущее окно сдвинуто к текущему периоду." : ""}`} />
+        <AnalyticsLine title="Доля ошибок" buckets={chartBuckets} series={errorShares} unit="%"
+          colorTokens={errorColorTokens}
+          onSelectRange={(from, to) => openLogs(new Date(from).toISOString(), new Date(to).toISOString())}
+          onSelectBucket={(index) => {
+            const timestamp = chartBuckets[index];
+            if (!timestamp) return;
+            const start = Math.max(Date.parse(timestamp), Date.parse(range.from));
+            const end = Math.min(Date.parse(timestamp) + intervalSeconds * 1000, Date.parse(range.to));
+            openLogs(new Date(start).toISOString(), new Date(end).toISOString());
+          }}
+          hint="ERROR и FATAL показаны отдельными долями от всех событий в каждом интервале." />
+      </div>
 
       <div className="analytics-grid">
         <section className="panel" aria-labelledby="analytics-levels">
@@ -247,7 +335,7 @@ export default function Analytics({ onUnauthorized }: { onUnauthorized: () => vo
         {data.summary?.actions.length === 0 && <p className="muted">В этом окне событий нет.</p>}
         <p className="muted">Число событий с каждым action, включая повторы; это не число вызовов. p95 приблизительный, метод t-digest; покрытие по числовому атрибуту duration_ms.</p>
       </section>
-      <p className="muted snapshot-note">Показатели, график и таблицы используют один снимок сводки. Прошлое окно и каталог сервисов запрашиваются отдельно. Паттерны появятся следующим этапом.</p>
+      <p className="muted snapshot-note">Показатели и графики используют одну сводку. Прошлое окно и каталог сервисов запрашиваются отдельно. Скорость и доли уровней считаются по интервалам сводки.</p>
     </section>
   );
 }

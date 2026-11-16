@@ -1,56 +1,135 @@
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError, type Agent, errorText, type Relay } from "../api";
+import HostIcon from "../components/HostIcon";
+
+type NodeKind = "relay" | "agent" | "host";
+type AddTarget = { kind: "relay" } | { kind: "host" } | { kind: "agent"; relayId: number };
+type Editing = { kind: NodeKind; id: number; name: string };
 
 /** Токен, который core показывает один раз. */
 interface Issued {
-  kind: "relay" | "agent" | "host";
+  kind: NodeKind;
   name: string;
   token: string;
   envLine: string;
   rotated?: boolean;
 }
 
+function kindName(kind: NodeKind) {
+  return kind === "relay" ? "relay" : kind === "host" ? "хост" : "агент";
+}
+
+function nodePath(kind: NodeKind, id: number) {
+  const resource = kind === "host" ? "hosts" : `${kind}s`;
+  return `/api/${resource}/${id}`;
+}
+
+function statusFor(receivedAt: string | undefined, now: number) {
+  if (!receivedAt || !Number.isFinite(Date.parse(receivedAt))) return { text: "Нет heartbeat", tone: "mute" };
+  return now - Date.parse(receivedAt) <= 60_000
+    ? { text: "Онлайн", tone: "ok" }
+    : { text: "Отключён", tone: "off" };
+}
+
+function NodeStatus({ receivedAt, now }: { receivedAt: string | undefined; now: number }) {
+  const status = statusFor(receivedAt, now);
+  return <span className={`node-status ${status.tone}`}>{status.text}</span>;
+}
+
+function AddSlot({
+  label, active, name, disabled, onName, onOpen, onSubmit, onCancel,
+}: {
+  label: string;
+  active: boolean;
+  name: string;
+  disabled: boolean;
+  onName: (value: string) => void;
+  onOpen: () => void;
+  onSubmit: (event: FormEvent) => void;
+  onCancel: () => void;
+}) {
+  if (!active) return <button type="button" className="access-add-slot" disabled={disabled} onClick={onOpen}>
+    <span className="access-add-mark" aria-hidden="true">+</span><span>Добавить {label}</span>
+  </button>;
+  return <form className="access-add-form" aria-label={`Создать ${label}`} onSubmit={onSubmit}>
+    <label>Имя {label}<input autoFocus maxLength={64} value={name} onChange={(event) => onName(event.target.value)} /></label>
+    <div className="access-actions">
+      <button type="submit" disabled={disabled || !name.trim()}>Создать</button>
+      <button type="button" className="quiet" disabled={disabled} onClick={onCancel}>Отмена</button>
+    </div>
+  </form>;
+}
+
+function NameEditor({
+  value, disabled, onChange, onSubmit, onCancel,
+}: {
+  value: string;
+  disabled: boolean;
+  onChange: (value: string) => void;
+  onSubmit: (event: FormEvent) => void;
+  onCancel: () => void;
+}) {
+  return <form className="access-name-edit" onSubmit={onSubmit}>
+    <label className="sr-only">Новое имя<input autoFocus maxLength={64} value={value} onChange={(event) => onChange(event.target.value)} /></label>
+    <button type="submit" disabled={disabled || !value.trim()}>Сохранить</button>
+    <button type="button" className="quiet" disabled={disabled} onClick={onCancel}>Отмена</button>
+  </form>;
+}
+
 export default function Access({ onUnauthorized }: { onUnauthorized: () => void }) {
   const [relays, setRelays] = useState<Relay[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
-  const [relayName, setRelayName] = useState("");
-  const [hostName, setHostName] = useState("");
-  const [agentName, setAgentName] = useState("");
-  const [relayId, setRelayId] = useState("");
+  const [adding, setAdding] = useState<AddTarget | null>(null);
+  const [nameDraft, setNameDraft] = useState("");
+  const [editing, setEditing] = useState<Editing | null>(null);
   const [issued, setIssued] = useState<Issued | null>(null);
   const [copyStatus, setCopyStatus] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
+  const busyRef = useRef(false);
+  const unauthorized = useRef(onUnauthorized);
+  unauthorized.current = onUnauthorized;
 
-  const load = () =>
-    Promise.all([
-      api<{ relays: Relay[] }>("GET", "/api/relays"),
-      api<{ agents: Agent[] }>("GET", "/api/agents"),
-    ]).then(([relayReply, agentReply]) => {
+  const refresh = useCallback(async (duringAction = false) => {
+    if (busyRef.current && !duringAction) return;
+    try {
+      const [relayReply, agentReply] = await Promise.all([
+        api<{ relays: Relay[] }>("GET", "/api/relays"),
+        api<{ agents: Agent[] }>("GET", "/api/agents"),
+      ]);
       setRelays(relayReply.relays);
       setAgents(agentReply.agents);
-    });
+      setError("");
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 401) unauthorized.current();
+      else setError(errorText(cause));
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+    const poll = window.setInterval(() => { void refresh(); }, 10_000);
+    const clock = window.setInterval(() => setNow(Date.now()), 10_000);
+    return () => { window.clearInterval(poll); window.clearInterval(clock); };
+  }, [refresh]);
 
   const run = async (action: () => Promise<void>) => {
+    busyRef.current = true;
     setBusy(true);
     setError("");
     try {
       await action();
-      await load();
-    } catch (e) {
-      if (e instanceof ApiError && e.status === 401) {
-        onUnauthorized();
-      } else {
-        setError(errorText(e));
-      }
+      await refresh(true);
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 401) unauthorized.current();
+      else if (cause instanceof ApiError && cause.code === "core_upgrade_required") setError("Для переименования обновите Core");
+      else setError(errorText(cause));
     } finally {
+      busyRef.current = false;
       setBusy(false);
     }
   };
-
-  useEffect(() => {
-    run(async () => undefined);
-  }, []);
 
   const agentsByRelay = new Map<number, Agent[]>();
   for (const agent of agents) {
@@ -58,95 +137,75 @@ export default function Access({ onUnauthorized }: { onUnauthorized: () => void 
     group.push(agent);
     agentsByRelay.set(agent.relay_id, group);
   }
-  // Хост - relay вида host со встроенным агентом; агентов к нему не подключают.
   const hosts = relays.filter((relay) => relay.kind === "host");
   const plainRelays = relays.filter((relay) => relay.kind !== "host");
-  const plainAgents = agents.filter((agent) => plainRelays.some((relay) => relay.id === agent.relay_id));
-  // Пока relay не выбран явно, предлагается первый из списка.
-  const selectedRelay = plainRelays.some((relay) => String(relay.id) === relayId)
-    ? relayId
-    : String(plainRelays[0]?.id ?? "");
 
-  const addHost = (event: FormEvent) => {
+  const openAdd = (target: AddTarget) => {
+    setAdding(target);
+    setNameDraft("");
+  };
+  const isAdding = (target: AddTarget) => adding?.kind === target.kind &&
+    (target.kind !== "agent" || (adding.kind === "agent" && adding.relayId === target.relayId));
+
+  const submitAdd = (event: FormEvent) => {
     event.preventDefault();
+    if (!adding) return;
+    const target = adding;
+    const name = nameDraft.trim();
+    if (!name) return;
     run(async () => {
-      const reply = await api<{ relay: Relay; token: string }>("POST", "/api/hosts", { name: hostName });
-      setIssued({
-        kind: "host",
-        name: reply.relay.name,
-        token: reply.token,
-        envLine: `LOGNARA_HOST_TOKEN=${reply.token}`,
-      });
+      if (target.kind === "relay") {
+        const reply = await api<{ relay: Relay; token: string }>("POST", "/api/relays", { name });
+        setIssued({ kind: "relay", name: reply.relay.name, token: reply.token, envLine: `LOGNARA_RELAY_CORE_TOKEN=${reply.token}` });
+      } else if (target.kind === "host") {
+        const reply = await api<{ relay: Relay; token: string }>("POST", "/api/hosts", { name });
+        setIssued({ kind: "host", name: reply.relay.name, token: reply.token, envLine: `LOGNARA_HOST_TOKEN=${reply.token}` });
+      } else {
+        const reply = await api<{ agent: Agent; token: string }>("POST", "/api/agents", { name, relay_id: target.relayId });
+        setIssued({ kind: "agent", name: reply.agent.name, token: reply.token, envLine: `LOGNARA_AGENT_TOKEN=${reply.token}` });
+      }
+      setAdding(null);
+      setNameDraft("");
       setCopyStatus("");
-      setHostName("");
     });
   };
 
-  const rotateHost = (host: Relay) => {
-    if (!window.confirm(`Сменить токен хоста «${host.name}»? Старый токен перестанет работать сразу. История и привязки алертов сохранятся.`)) return;
+  const saveRename = (event: FormEvent) => {
+    event.preventDefault();
+    if (!editing || !editing.name.trim()) return;
+    const target = editing;
     run(async () => {
-      const reply = await api<{ relay: Relay; token: string }>("POST", `/api/hosts/${host.id}/rotate-token`);
+      await api("PATCH", nodePath(target.kind, target.id), { name: target.name.trim() });
+      setEditing(null);
+    });
+  };
+
+  const rotate = (kind: "agent" | "host", id: number, name: string) => {
+    const message = kind === "host"
+      ? `Сменить токен хоста «${name}»? Старый токен перестанет работать сразу. История и привязки алертов сохранятся.`
+      : `Перевыпустить токен агента «${name}»? Старый токен перестанет работать после синхронизации relay. Новый токен нужно установить в конфигурации агента.`;
+    if (!window.confirm(message)) return;
+    run(async () => {
+      const reply = await api<{ relay?: Relay; agent?: Agent; token: string }>("POST", `/api/${kind === "host" ? "hosts" : "agents"}/${id}/rotate-token`);
       setIssued({
-        kind: "host",
-        name: reply.relay.name,
+        kind,
+        name: reply.relay?.name ?? reply.agent?.name ?? name,
         token: reply.token,
-        envLine: `LOGNARA_HOST_TOKEN=${reply.token}`,
+        envLine: `LOGNARA_${kind === "host" ? "HOST" : "AGENT"}_TOKEN=${reply.token}`,
         rotated: true,
       });
       setCopyStatus("");
     });
   };
 
-  const addRelay = (event: FormEvent) => {
-    event.preventDefault();
-    run(async () => {
-      const reply = await api<{ relay: Relay; token: string }>("POST", "/api/relays", {
-        name: relayName,
-      });
-      setIssued({
-        kind: "relay",
-        name: reply.relay.name,
-        token: reply.token,
-        envLine: `LOGNARA_RELAY_CORE_TOKEN=${reply.token}`,
-      });
-      setCopyStatus("");
-      setRelayId(String(reply.relay.id));
-      setRelayName("");
-    });
+  const remove = (kind: NodeKind, id: number, name: string) => {
+    if (!window.confirm(`Удалить ${kindName(kind)} «${name}»? Его токен перестанет работать.`)) return;
+    run(async () => { await api("DELETE", nodePath(kind, id)); });
   };
 
-  const addAgent = (event: FormEvent) => {
-    event.preventDefault();
-    run(async () => {
-      const reply = await api<{ agent: Agent; token: string }>("POST", "/api/agents", {
-        name: agentName,
-        relay_id: Number(selectedRelay),
-      });
-      setIssued({
-        kind: "agent",
-        name: reply.agent.name,
-        token: reply.token,
-        envLine: `LOGNARA_AGENT_TOKEN=${reply.token}`,
-      });
-      setCopyStatus("");
-      setAgentName("");
-    });
-  };
-
-  const rotate = (agent: Agent) => {
-    if (!window.confirm(`Перевыпустить токен агента «${agent.name}»? Старый токен перестанет работать после синхронизации relay. Новый токен нужно установить в конфигурации агента.`)) return;
-    run(async () => {
-      const reply = await api<{ agent: Agent; token: string }>("POST", `/api/agents/${agent.id}/rotate-token`);
-      setIssued({
-        kind: "agent",
-        name: reply.agent.name,
-        token: reply.token,
-        envLine: `LOGNARA_AGENT_TOKEN=${reply.token}`,
-        rotated: true,
-      });
-      setCopyStatus("");
-    });
-  };
+  const beginEdit = (kind: NodeKind, id: number, name: string) => setEditing({ kind, id, name });
+  const isEditing = (kind: NodeKind, id: number) => editing?.kind === kind && editing.id === id;
+  const updateEditName = (name: string) => setEditing((current) => current ? { ...current, name } : current);
 
   const copy = async (text: string, label: string) => {
     try {
@@ -157,129 +216,98 @@ export default function Access({ onUnauthorized }: { onUnauthorized: () => void 
     }
   };
 
-  const remove = (kind: "relays" | "agents" | "hosts", id: number, name: string) => {
-    if (!window.confirm(`Удалить «${name}»? Его токен перестанет работать.`)) return;
-    run(async () => {
-      await api("DELETE", `/api/${kind}/${id}`);
-    });
-  };
+  return <section className="access page-stack">
+    <header className="access-heading">
+      <div><h2>Подключения</h2><p className="muted">Структура узлов и управление именами, доступом и токенами.</p></div>
+      <button type="button" className="button" disabled={busy} onClick={() => refresh(true)}>Обновить</button>
+    </header>
+    {error && <p className="error" role="alert">{error}</p>}
 
-  return (
-    <section className="access">
-      <h2>Подключения</h2>
-      <p className="muted">Создайте relay, затем подключите к нему агентов для отправки логов.</p>
-      <div className="access-create">
-        <form onSubmit={addRelay} aria-label="Создать relay">
-          <h3>Создать relay</h3>
-          <label>
-            Имя нового relay
-            <input value={relayName} onChange={(e) => setRelayName(e.target.value)} placeholder="main" />
-          </label>
-          <button type="submit" disabled={busy || issued !== null || !relayName.trim()}>Добавить relay</button>
-        </form>
-        <form onSubmit={addAgent} aria-label="Создать агента">
-          <h3>Создать агента</h3>
-          <div className="access-agent-fields">
-            <label>
-              Relay агента
-              <select value={selectedRelay} onChange={(e) => setRelayId(e.target.value)} disabled={plainRelays.length === 0}>
-                {plainRelays.length === 0 && <option value="">Сначала создайте relay</option>}
-                {plainRelays.map((relay) => <option key={relay.id} value={relay.id}>{relay.name}</option>)}
-              </select>
-            </label>
-            <label>
-              Имя нового агента
-              <input value={agentName} onChange={(e) => setAgentName(e.target.value)} placeholder="api" />
-            </label>
-          </div>
-          <button type="submit" disabled={busy || issued !== null || !agentName.trim() || !selectedRelay}>Добавить агента</button>
-        </form>
-        <form onSubmit={addHost} aria-label="Создать хост">
-          <h3>Создать хост</h3>
-          <label>
-            Имя хоста
-            <input value={hostName} onChange={(e) => setHostName(e.target.value)} placeholder="mail-01" />
-          </label>
-          <p className="muted">lognara-hwagent на машине отправляет метрики, процессы и системные логи прямо в core.</p>
-          <button type="submit" disabled={busy || issued !== null || !hostName.trim()}>Добавить хост</button>
-        </form>
+    {issued && <div className="token" role="region" aria-label="Выданный токен">
+      <p><strong>{issued.rotated
+        ? `Токен ${issued.kind === "host" ? "хоста" : issued.kind === "agent" ? "агента" : "relay"} «${issued.name}» перевыпущен.`
+        : `${issued.kind === "relay" ? "Relay" : issued.kind === "host" ? "Хост" : "Агент"} «${issued.name}» создан.`}</strong>{" "}
+        Токен показан только сейчас и больше не покажется: {issued.kind === "host" ? "добавьте строку в /etc/lognara/hwagent.env (права 0600)" : "добавьте строку в .env"} и сохраните её.</p>
+      {issued.rotated && issued.kind === "host" && <p className="muted">Замените токен в hwagent.env и перезапустите lognara-hwagent. Старый токен уже не принимается.</p>}
+      {issued.rotated && issued.kind === "agent" && <p className="muted">Обновите конфигурацию агента. Замена применяется после успешной синхронизации relay, обычно в пределах 10 секунд.</p>}
+      <label>Строка для .env<textarea readOnly value={issued.envLine} rows={3} spellCheck={false} /></label>
+      <div className="access-actions">
+        <button type="button" onClick={() => copy(issued.envLine, "Строка .env")}>Скопировать строку .env</button>
+        <button type="button" onClick={() => copy(issued.token, "Токен")}>Скопировать токен</button>
+        <button type="button" onClick={() => { setIssued(null); setCopyStatus(""); }}>Я сохранил токен</button>
       </div>
-      {issued && (
-        <div className="token" role="region" aria-label="Выданный токен">
-          <p>
-            <strong>{issued.rotated
-              ? `Токен ${issued.kind === "host" ? "хоста" : "агента"} «${issued.name}» перевыпущен.`
-              : `${issued.kind === "relay" ? "Relay" : issued.kind === "host" ? "Хост" : "Агент"} «${issued.name}» создан.`}</strong>{" "}
-            Токен показан только сейчас и больше не покажется: {issued.kind === "host" ? "добавьте строку в /etc/lognara/hwagent.env (права 0600)" : "добавьте строку в .env"} и сохраните её.
-          </p>
-          {issued.rotated && issued.kind === "host" && <p className="muted">Замените токен в hwagent.env и перезапустите lognara-hwagent. Старый токен уже не принимается.</p>}
-          {issued.rotated && issued.kind === "agent" && <p className="muted">Обновите конфигурацию агента. Замена применяется после успешной синхронизации relay с core, обычно в пределах 10 секунд.</p>}
-          <label>
-            Строка для .env
-            <textarea readOnly value={issued.envLine} rows={3} spellCheck={false} />
-          </label>
-          <div className="access-actions">
-            <button type="button" onClick={() => copy(issued.envLine, "Строка .env")}>Скопировать строку .env</button>
-            <button type="button" onClick={() => copy(issued.token, "Токен")}>Скопировать токен</button>
-            <button type="button" onClick={() => { setIssued(null); setCopyStatus(""); }}>Я сохранил токен</button>
-          </div>
-          <p className="access-copy-status" role="status">{copyStatus}</p>
-        </div>
-      )}
-      {error && <p className="error">{error}</p>}
+      <p className="access-copy-status" role="status">{copyStatus}</p>
+    </div>}
 
-      <div className="access-list-heading">
-        <h3>Хост-агенты</h3>
-        <span className="muted">Хостов: {hosts.length}</span>
-      </div>
-      <div className="access-agent-grid">
-        {hosts.map((host) => (
-          <article className="access-agent" key={host.id} aria-label={`Хост ${host.name}`}>
-            <h4>{host.name}</h4>
-            <p className="muted">Создан {new Date(host.created_at).toLocaleString()}</p>
-            <div className="access-actions">
-              <button type="button" onClick={() => rotateHost(host)} disabled={busy || issued !== null}>Сменить токен</button>
-              <button type="button" className="quiet" onClick={() => remove("hosts", host.id, host.name)} disabled={busy}>Удалить</button>
-            </div>
-          </article>
-        ))}
-      </div>
-      {hosts.length === 0 && !busy && <p className="empty">Хостов пока нет.</p>}
-
-      <div className="access-list-heading">
-        <h3>Relay и агенты</h3>
-        <span className="muted">Relay: {plainRelays.length} · Агенты: {plainAgents.length}</span>
-      </div>
-      <div className="access-relays">
+    <section className="access-tree" aria-label="Дерево подключений">
+      <header className="access-dock-node">
+        <span className="access-dock-mark" aria-hidden="true">D</span>
+        <div><h3>Dock</h3><p className="muted">Управление подключениями</p></div>
+        <span className="node-status ok">Онлайн</span>
+      </header>
+      <div className="access-tree-branches">
         {plainRelays.map((relay) => {
           const relayAgents = agentsByRelay.get(relay.id) ?? [];
-          return (
-            <section className="access-relay" key={relay.id} aria-label={`Relay ${relay.name}`}>
-              <header className="access-relay-header">
-                <div>
-                  <h3>{relay.name}</h3>
-                  <span className="muted">Создан {new Date(relay.created_at).toLocaleString()} · Агентов: {relayAgents.length}</span>
-                </div>
-                <button type="button" className="quiet" onClick={() => remove("relays", relay.id, relay.name)} disabled={busy}>Удалить relay</button>
-              </header>
-              <div className="access-agent-grid">
-                {relayAgents.map((agent) => (
-                  <article className="access-agent" key={agent.id} aria-label={`Агент ${agent.name}`}>
-                    <h4>{agent.name}</h4>
-                    <p className="muted">Создан {new Date(agent.created_at).toLocaleString()}</p>
-                    <div className="access-actions">
-                      <button type="button" onClick={() => rotate(agent)} disabled={busy || issued !== null}>Перевыпустить токен</button>
-                      <button type="button" className="quiet" onClick={() => remove("agents", agent.id, agent.name)} disabled={busy}>Удалить</button>
-                    </div>
-                  </article>
-                ))}
+          const relayEditing = isEditing("relay", relay.id);
+          return <section className="access-relay-node" key={relay.id} aria-label={`Relay ${relay.name}`}>
+            <header className="access-node-header">
+              <div className="access-node-identity">
+                {relayEditing ? <NameEditor value={editing?.name ?? ""} disabled={busy} onChange={updateEditName} onSubmit={saveRename} onCancel={() => setEditing(null)} /> : <>
+                  <strong>Relay · {relay.name}</strong><NodeStatus receivedAt={relay.heartbeat?.received_at} now={now} />
+                  <span className="muted">Создан {new Date(relay.created_at).toLocaleString("ru-RU")} · {relayAgents.length} {relayAgents.length === 1 ? "агент" : "агентов"}</span>
+                </>}
               </div>
-              {relayAgents.length === 0 && <p className="empty">У этого relay пока нет агентов.</p>}
-            </section>
-          );
+              {!relayEditing && <div className="access-actions">
+                <button type="button" className="quiet" disabled={busy} onClick={() => beginEdit("relay", relay.id, relay.name)}>Переименовать</button>
+                <button type="button" className="quiet" disabled={busy} onClick={() => remove("relay", relay.id, relay.name)}>Удалить relay</button>
+              </div>}
+            </header>
+            <div className="access-agent-branches" aria-label={`Агенты relay ${relay.name}`}>
+              {relayAgents.map((agent) => {
+                const agentEditing = isEditing("agent", agent.id);
+                return <article className="access-agent-node" key={agent.id} aria-label={`Агент ${agent.name}`}>
+                  <div className="access-node-identity">
+                    {agentEditing ? <NameEditor value={editing?.name ?? ""} disabled={busy} onChange={updateEditName} onSubmit={saveRename} onCancel={() => setEditing(null)} /> : <>
+                      <strong>Agent · {agent.name}</strong><NodeStatus receivedAt={agent.heartbeat?.received_at} now={now} />
+                      <span className="muted">Создан {new Date(agent.created_at).toLocaleString("ru-RU")}</span>
+                    </>}
+                  </div>
+                  {!agentEditing && <div className="access-actions">
+                    <button type="button" className="quiet" disabled={busy} onClick={() => beginEdit("agent", agent.id, agent.name)}>Переименовать</button>
+                    <button type="button" disabled={busy || issued !== null} onClick={() => rotate("agent", agent.id, agent.name)}>Перевыпустить токен</button>
+                    <button type="button" className="quiet" disabled={busy} onClick={() => remove("agent", agent.id, agent.name)}>Удалить</button>
+                  </div>}
+                </article>;
+              })}
+              <AddSlot label="агента" active={isAdding({ kind: "agent", relayId: relay.id })} name={nameDraft} disabled={busy || issued !== null}
+                onName={setNameDraft} onOpen={() => openAdd({ kind: "agent", relayId: relay.id })} onSubmit={submitAdd}
+                onCancel={() => { setAdding(null); setNameDraft(""); }} />
+            </div>
+          </section>;
         })}
-        {plainRelays.length === 0 && !busy && <p className="empty">Relay пока нет. Создайте первый relay в форме выше.</p>}
+        {hosts.map((host) => {
+          const hostEditing = isEditing("host", host.id);
+          return <article className="access-host-node" key={host.id} aria-label={`Хост ${host.name}`}>
+            <div className="access-node-identity">
+              {hostEditing ? <NameEditor value={editing?.name ?? ""} disabled={busy} onChange={updateEditName} onSubmit={saveRename} onCancel={() => setEditing(null)} /> : <>
+                <strong><HostIcon /> hwagent · {host.name}</strong><NodeStatus receivedAt={host.heartbeat?.received_at} now={now} />
+                <span className="muted">Хост-агент · создан {new Date(host.created_at).toLocaleString("ru-RU")}</span>
+              </>}
+            </div>
+            {!hostEditing && <div className="access-actions">
+              <button type="button" className="quiet" disabled={busy} onClick={() => beginEdit("host", host.id, host.name)}>Переименовать</button>
+              <button type="button" disabled={busy || issued !== null} onClick={() => rotate("host", host.id, host.name)}>Сменить токен</button>
+              <button type="button" className="quiet" disabled={busy} onClick={() => remove("host", host.id, host.name)}>Удалить</button>
+            </div>}
+          </article>;
+        })}
+        <AddSlot label="relay" active={isAdding({ kind: "relay" })} name={nameDraft} disabled={busy || issued !== null}
+          onName={setNameDraft} onOpen={() => openAdd({ kind: "relay" })} onSubmit={submitAdd}
+          onCancel={() => { setAdding(null); setNameDraft(""); }} />
+        <AddSlot label="хост" active={isAdding({ kind: "host" })} name={nameDraft} disabled={busy || issued !== null}
+          onName={setNameDraft} onOpen={() => openAdd({ kind: "host" })} onSubmit={submitAdd}
+          onCancel={() => { setAdding(null); setNameDraft(""); }} />
       </div>
     </section>
-  );
+  </section>;
 }

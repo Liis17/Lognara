@@ -9,7 +9,7 @@ use axum::http::header::{
     CACHE_CONTROL, REFERRER_POLICY, RETRY_AFTER, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS,
 };
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post, put};
+use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router, middleware};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -101,6 +101,7 @@ pub enum ApiError {
     Internal,
     /// Core недоступен или ответил неожиданно.
     CoreUnavailable,
+    CoreUpgradeRequired,
     TelegramUnavailable,
     TelegramRateLimited(Duration),
     CursorExpired,
@@ -137,6 +138,7 @@ impl From<CoreError> for ApiError {
                     Self::CoreUnavailable
                 }
             },
+            CoreError::RenameUnsupported => Self::CoreUpgradeRequired,
             CoreError::Status {
                 status: StatusCode::BAD_REQUEST,
                 detail,
@@ -202,6 +204,7 @@ impl IntoResponse for ApiError {
             }
             Self::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
             Self::CoreUnavailable => (StatusCode::BAD_GATEWAY, "core_unavailable"),
+            Self::CoreUpgradeRequired => (StatusCode::NOT_IMPLEMENTED, "core_upgrade_required"),
             Self::TelegramUnavailable => (StatusCode::BAD_GATEWAY, "telegram_unavailable"),
             Self::TelegramRateLimited(wait) => {
                 let body = Json(json!({ "error": "telegram_rate_limited" }));
@@ -287,6 +290,7 @@ pub fn router(app: AppState) -> Router {
         )
         .route("/series/preview", post(series::preview))
         .route("/alerts", get(alerts::settings))
+        .route("/alerts/preview", post(alerts::preview_message))
         .route("/alerts/summary", get(alerts::summary))
         .route(
             "/alerts/definition",
@@ -316,18 +320,27 @@ pub fn router(app: AppState) -> Router {
             put(log_alerts::update).delete(log_alerts::delete),
         )
         .route("/hosts", post(access::create_host))
-        .route("/hosts/{id}", delete(access::delete_host))
+        .route(
+            "/hosts/{id}",
+            patch(access::rename_host).delete(access::delete_host),
+        )
         .route("/hosts/{id}/rotate-token", post(access::rotate_host_token))
         .route(
             "/relays",
             get(access::list_relays).post(access::create_relay),
         )
-        .route("/relays/{id}", delete(access::delete_relay))
+        .route(
+            "/relays/{id}",
+            patch(access::rename_relay).delete(access::delete_relay),
+        )
         .route(
             "/agents",
             get(access::list_agents).post(access::create_agent),
         )
-        .route("/agents/{id}", delete(access::delete_agent))
+        .route(
+            "/agents/{id}",
+            patch(access::rename_agent).delete(access::delete_agent),
+        )
         .route(
             "/agents/{id}/rotate-token",
             post(access::rotate_agent_token),
@@ -375,5 +388,21 @@ async fn ready(axum::extract::State(app): axum::extract::State<AppState>) -> Sta
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn unsupported_core_rename_returns_upgrade_required_code() {
+        let response = ApiError::from(CoreError::RenameUnsupported).into_response();
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"], "core_upgrade_required");
     }
 }

@@ -4,7 +4,7 @@ use crate::{
     columns,
     model::{LogEvent, StoredEvent, format_timestamp},
     pattern_catalog::{State, column, optional_string, string},
-    pattern_identity::{Identity, Part, VariableType, identify, valid_id},
+    pattern_identity::{Identity, Part, VariableType, identify, is_pattern_eligible, valid_id},
     query::{self, Filters, PreparedFilter, PreparedText, QueryError, TextQuery},
     storage::Core,
     wire::LogLevel,
@@ -281,6 +281,8 @@ pub(crate) async fn scan(
     state: &State,
     window: &Window,
     projection: Option<&[&str]>,
+    // Паттерны пропускают встроенные метрики; проблемы видят все события.
+    skip_metrics: bool,
     deadline: Instant,
     mut visit: impl FnMut(Row<'_>) -> Result<(), QueryError>,
 ) -> Result<(), QueryError> {
@@ -298,6 +300,12 @@ pub(crate) async fn scan(
         query::check_deadline(deadline)?;
         for row in 0..batch.num_rows() {
             let message = string(&batch, "message", row)?;
+            let service = string(&batch, "service", row)?;
+            if skip_metrics
+                && !is_pattern_eligible(message, service, string(&batch, "backend", row)?)
+            {
+                continue;
+            }
             if window
                 .text
                 .as_ref()
@@ -308,7 +316,7 @@ pub(crate) async fn scan(
             let level = LogLevel::from_code(column::<UInt8Array>(&batch, "level")?.value(row))?;
             let identity = identify(
                 optional_string(&batch, "environment", row)?,
-                string(&batch, "service", row)?,
+                service,
                 level.as_str(),
                 message,
             );
@@ -417,7 +425,15 @@ pub async fn search(core: &Core, request: PatternRequest) -> Result<PatternRespo
         core,
         &state,
         &window,
-        Some(&["environment", "service", "level", "message", "timestamp"]),
+        Some(&[
+            "environment",
+            "service",
+            "backend",
+            "level",
+            "message",
+            "timestamp",
+        ]),
+        true,
         deadline,
         |row| {
             total_events += u64::from(row.timestamp >= window.filter.from);
@@ -525,7 +541,7 @@ pub async fn details(
     let mut values: Vec<HashMap<String, u64>> = vec![];
     let (mut distinct, mut bytes) = (0_usize, 0_usize);
     let mut examples: Vec<(i64, u64, StoredEvent)> = vec![];
-    scan(core, &state, &window, None, deadline, |row| {
+    scan(core, &state, &window, None, true, deadline, |row| {
         let current = row.timestamp >= window.filter.from;
         total_events += u64::from(current);
         if row.identity.id != pattern_id {

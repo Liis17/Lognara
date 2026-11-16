@@ -238,7 +238,7 @@ export default function MetricEditor({ definition, start, onUnauthorized, onDone
             ))}
           </select>
         </label>
-        <label className="check">
+        <label className="check switch-label">
           <input type="checkbox" checked={form.enabled} onChange={(e) => set("enabled", e.target.checked)} />
           Включена
         </label>

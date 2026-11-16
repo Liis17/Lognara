@@ -63,7 +63,7 @@ test('errors page groups issues, shows stack trace and resolves an issue', async
   const rows = page.locator('.issues-table tbody tr');
   await expect(rows).toHaveCount(2);
   await expect(rows.first()).toContainText('System.NullReferenceException');
-  await expect(rows.first()).toContainText(`billing · invoice.sync · fp ${'1'.repeat(6)}`);
+  await expect(rows.first()).toContainText(`billing · invoice.sync · ID ${'1'.repeat(6)}`);
   await expect(rows.first().locator('.issue-status')).toHaveText('Новая');
   await expect(rows.nth(1).locator('.issue-status')).toHaveText('Открыта');
   const search = calls.find((call) => call.path === '/api/issues/search')!;
@@ -77,7 +77,7 @@ test('errors page groups issues, shows stack trace and resolves an issue', async
   await page.getByRole('button', { name: '+ 3 строки' }).click();
   await expect(trace).toContainText('Frame13.Run()');
   await expect(page.locator('.issue-servers')).toContainText('prod-eu-02');
-  await expect(page.locator('.issue-history')).toContainText('впервые в известной истории');
+  await expect(page.locator('.issue-history')).toContainText('первое событие');
   const all = page.getByRole('link', { name: 'Все 4 события' });
   expect(decodeURIComponent(await all.getAttribute('href') ?? '')).toContain(`fingerprint:"${fp(1)}"`);
   expect(await page.getByRole('link', { name: 'Поиск первопричины' }).getAttribute('href')).toContain('trace_id=4bf92f3577b34da6a3ce929d0e0e4736');

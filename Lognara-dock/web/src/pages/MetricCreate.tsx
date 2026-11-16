@@ -4,16 +4,21 @@ import {
   ApiError,
   errorText,
   type Definition,
+  type DefinitionInput,
   type PreviewReply,
+  type Relay,
+  type SeriesMetric,
 } from "../api";
 import {
   bundleOf,
   exampleBundle,
+  linuxHostDefinition,
   nginxTemplates,
   type ImportAction,
   type MetricBundle,
 } from "../metricBundles";
 import MetricDialog from "../components/MetricDialog";
+import ServiceCombobox from "../components/ServiceCombobox";
 import MetricEditor from "./MetricEditor";
 
 interface CheckReply {
@@ -37,6 +42,12 @@ export default function MetricCreate({
   onUnauthorized: () => void;
 }) {
   const [sources, setSources] = useState<Source[]>([]);
+  const [hosts, setHosts] = useState<Relay[]>([]);
+  const [hostsReady, setHostsReady] = useState(false);
+  const [linuxHost, setLinuxHost] = useState("");
+  const [linuxMetrics, setLinuxMetrics] = useState<SeriesMetric[]>([]);
+  const [linuxReady, setLinuxReady] = useState(false);
+  const [linuxSelected, setLinuxSelected] = useState<Set<string>>(new Set());
   const [server, setServer] = useState("");
   const [service, setService] = useState("");
   const [mode, setMode] = useState("manual");
@@ -67,6 +78,47 @@ export default function MetricCreate({
       });
     return () => controller.abort();
   }, []);
+  useEffect(() => {
+    const controller = new AbortController();
+    api<{ relays: Relay[] }>("GET", "/api/relays", undefined, { signal: controller.signal })
+      .then((reply) => {
+        if (controller.signal.aborted) return;
+        const nextHosts = reply.relays.filter((relay) => relay.kind === "host");
+        setHosts(nextHosts);
+        setLinuxHost((current) => current || nextHosts[0]?.name || "");
+        setHostsReady(true);
+      })
+      .catch((e) => {
+        if (!controller.signal.aborted) {
+          fail(e);
+          setHostsReady(true);
+        }
+      });
+    return () => controller.abort();
+  }, []);
+  useEffect(() => {
+    if (mode !== "linux" || !linuxHost) return;
+    const controller = new AbortController();
+    setLinuxReady(false);
+    setLinuxMetrics([]);
+    setLinuxSelected(new Set());
+    const query = new URLSearchParams({ group_by: "server", server: linuxHost, service: "host" });
+    api<{ metrics: SeriesMetric[] }>("GET", `/api/series?${query}`, undefined, { signal: controller.signal })
+      .then((reply) => {
+        if (controller.signal.aborted) return;
+        const observed = reply.metrics.filter((metric) => metric.first_seen !== null && metric.origin !== "rule");
+        setLinuxMetrics(observed);
+        setLinuxSelected(new Set(observed.filter((metric) => !metric.definition).map((metric) => metric.name + ":" + metric.origin)));
+        setLinuxReady(true);
+      })
+      .catch((e) => {
+        if (!controller.signal.aborted) {
+          fail(e);
+          setLinuxReady(true);
+        }
+      });
+    return () => controller.abort();
+  }, [linuxHost, mode]);
   const reset = () => {
     setCheck(null);
     setBundle(null);
@@ -139,6 +191,34 @@ export default function MetricCreate({
       setBusy(false);
     }
   };
+  const createLinuxDefinitions = async () => {
+    const selected = linuxMetrics.filter((metric) =>
+      linuxSelected.has(metric.name + ":" + metric.origin) && !metric.definition,
+    );
+    if (!linuxHost || !selected.length) return;
+    setBusy(true);
+    setError("");
+    setSummary("");
+    let created = 0;
+    try {
+      for (const metric of selected) {
+        const input: DefinitionInput = {
+          server: linuxHost,
+          service: "host",
+          ...linuxHostDefinition(metric.name, metric.origin as "counter" | "gauge"),
+        };
+        await api("POST", "/api/series/definitions", input);
+        created++;
+      }
+      setSummary(`Создано определений: ${created}. Существующие определения не изменены.`);
+      onDone();
+    } catch (e) {
+      if (created > 0) setSummary(`Создано определений: ${created}. Остальные не изменены.`);
+      fail(e);
+    } finally {
+      setBusy(false);
+    }
+  };
   const preview = async (index: number) => {
     if (!bundle) return;
     setBusy(true);
@@ -178,7 +258,18 @@ export default function MetricCreate({
   return (
     <MetricDialog title="Новая метрика" onClose={onClose} busy={busy}>
       <div className="metric-create">
-        <div className="metric-source-selectors">
+        {mode === "linux" ? <div className="metric-source-selectors">
+          <label>
+            Хост
+            <select aria-label="Хост Linux" value={linuxHost} disabled={busy || !hostsReady} onChange={(e) => {
+              setLinuxHost(e.target.value);
+              reset();
+            }}>
+              <option value="">Выберите хост</option>
+              {hosts.map((host) => <option key={host.id} value={host.name}>{host.name}</option>)}
+            </select>
+          </label>
+        </div> : <div className="metric-source-selectors">
           <label>
             Сервер
             <select
@@ -197,32 +288,18 @@ export default function MetricCreate({
               ))}
             </select>
           </label>
-          <label>
-            Сервис
-            <select
-              aria-label="Выберите сервис"
-              disabled={!server || busy}
-              value={service}
-              onChange={(e) => {
-                setService(e.target.value);
-                reset();
-              }}
-            >
-              <option value="">Выберите сервис</option>
-              {[
-                ...new Set(
-                  sources
-                    .filter((s) => s.server === server)
-                    .map((s) => s.service),
-                ),
-              ]
-                .sort()
-                .map((s) => (
-                  <option key={s}>{s}</option>
-                ))}
-            </select>
-          </label>
-        </div>
+          <ServiceCombobox
+            label="Сервис"
+            value={service || null}
+            options={[...new Set(sources.filter((s) => s.server === server).map((s) => s.service))]
+              .sort().map((value) => ({ value, secondary: server }))}
+            disabled={!server || busy}
+            onChange={(value) => {
+              setService(value ?? "");
+              reset();
+            }}
+          />
+        </div>}
         {sources.length === 0 && (
           <p className="muted">
             Источники появятся после получения логов или heartbeat агента.
@@ -233,6 +310,7 @@ export default function MetricCreate({
             ["manual", "Вручную"],
             ["json", "Импорт JSON"],
             ["templates", "Шаблоны"],
+            ["linux", "Linux-хост"],
           ].map(([value, label]) => (
             <button
               key={value}
@@ -331,7 +409,34 @@ export default function MetricCreate({
             ))}
           </>
         )}
-        {mode !== "manual" && (
+        {mode === "linux" && <section className="metric-linux-template" aria-label="Метрики Linux-хоста">
+          <h3>Наблюдаемые ряды hwagent</h3>
+          <p className="muted">Выберите ряды для определений без regex-правил. Байтовые счётчики создаются как приращения с суммированием.</p>
+          {!hostsReady && <p className="muted" role="status">Загружаем список хостов…</p>}
+          {hostsReady && hosts.length === 0 && <p className="muted">Хостов пока нет. Сначала подключите hwagent на странице <a href="/access">«Подключения»</a>.</p>}
+          {linuxHost && !linuxReady && <p className="muted" role="status">Ищем полученные ряды…</p>}
+          {linuxReady && linuxMetrics.length === 0 && linuxHost && <p className="muted">У этого хоста ещё нет наблюдаемых рядов service host.</p>}
+          {linuxMetrics.map((metric) => {
+            const key = metric.name + ":" + metric.origin;
+            const definition = linuxHostDefinition(metric.name, metric.origin as "counter" | "gauge");
+            return <label className="metric-template metric-linux-row" key={key}>
+              <span><input type="checkbox" disabled={busy || !!metric.definition} checked={linuxSelected.has(key)} onChange={(event) => {
+                setLinuxSelected((current) => {
+                  const next = new Set(current);
+                  if (event.target.checked) next.add(key); else next.delete(key);
+                  return next;
+                });
+              }} /> {definition.title}</span>
+              <span className="muted"><code>{metric.name}</code> · {definition.unit || "без единицы"} · {definition.kind}, {definition.aggregation}</span>
+              {metric.definition && <span className="muted">Определение уже существует и останется без изменений.</span>}
+              {!metric.definition && <span className="muted">{definition.description}</span>}
+            </label>;
+          })}
+          {linuxMetrics.length > 0 && <button type="button" disabled={busy || !linuxSelected.size} onClick={createLinuxDefinitions}>
+            Создать определения ({linuxSelected.size})
+          </button>}
+        </section>}
+        {mode !== "manual" && mode !== "linux" && (
           <button
             onClick={verify}
             disabled={

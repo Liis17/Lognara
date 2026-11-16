@@ -12,7 +12,7 @@ Rust-процесс, один на машину. Принимает пачки �
 
 ## Heartbeat
 
-`LOGNARA_HEARTBEAT_INTERVAL_MS` по умолчанию 10000, допустимо 1..30000 миллисекунд; первый тик сразу, HTTP timeout 5 секунд. Версия, spool, rate и отметки приёма/доставки/ошибок relay вместе с отчётами агентов идут отдельным JSON на `/v1/heartbeat` с персональным Bearer-токеном. Возраст отметок измеряется монотонно; core переводит его в собственные часы. Локальные счётчики и отметки сбрасываются после рестарта, durable spool сохраняется. Heartbeat не блокирует доставку логов. Подробности и границы: [контракт инфраструктуры](../../../docs/DockInfrastructureContract.md).
+`LOGNARA_HEARTBEAT_INTERVAL_MS` по умолчанию 10000, допустимо 1..30000 миллисекунд; первый тик сразу, HTTP timeout 5 секунд. Package `version`, release `release_version`, spool, rate и отметки приёма/доставки/ошибок relay вместе с отчётами агентов идут отдельным JSON на `/v1/heartbeat` с персональным Bearer-токеном. Release version выбирается при сборке: непустой `LOGNARA_RELEASE_VERSION`, иначе Cargo version с `+` и коротким SHA из `LOGNARA_GIT_COMMIT`, если он задан, иначе только Cargo version. Отсутствующее release-поле старого heartbeat остаётся допустимым в core. Возраст отметок измеряется монотонно; core переводит его в собственные часы. Локальные счётчики и отметки сбрасываются после рестарта, durable spool сохраняется. Heartbeat не блокирует доставку логов. Подробности и границы: [контракт инфраструктуры](../../../docs/DockInfrastructureContract.md).
 
 ## Параметры запуска
 
@@ -41,7 +41,7 @@ Rust-процесс, один на машину. Принимает пачки �
 
 Ресурсная конфигурация, admission до чтения тела и ожидание blocking-работников при остановке описаны в [[Relay/Memory]].
 
-`Lognara-relay/Dockerfile` собирается из корня репозитория и включает общий spool. Образ registry публикуется после успешного CI в `master`, работает от `1000:1000`; схема поставки и тегов в [[Repository/Images]].
+`Lognara-relay/Dockerfile` собирается из корня репозитория и включает общий spool. `LOGNARA_RELEASE_VERSION` и `LOGNARA_GIT_COMMIT` передаются как build args и становятся ENV до `cargo build`, поэтому смена метаданных пересобирает build layer. Образ registry публикуется после успешного CI в `master`, работает от `1000:1000`; схема поставки и тегов в [[Repository/Images]].
 
 Пример docker-compose:
 

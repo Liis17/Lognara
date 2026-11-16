@@ -5,7 +5,9 @@ use axum::{
 use lognara_core::{
     api,
     config::Config,
+    issues::{self, IssueRequest, Status},
     model::format_timestamp,
+    pattern_identity,
     patterns::{self, DetailsRequest, PatternRequest, PatternResponse, Sort},
     query::{self, QueryError, SearchRequest},
     storage::Core,
@@ -44,7 +46,7 @@ async fn structured_logs_fit_capacity_and_rebuild_old_catalog_and_indexes() {
     let response = patterns::search(&core, request(100, Sort::Count, &[]))
         .await
         .unwrap();
-    assert_eq!((response.total_events, response.total_patterns), (42, 3));
+    assert_eq!((response.total_events, response.total_patterns), (14, 1));
     let id = response.patterns[0].pattern_id.clone();
     core.shutdown().unwrap();
     let closed = core.snapshot().closed.clone();
@@ -74,7 +76,7 @@ async fn structured_logs_fit_capacity_and_rebuild_old_catalog_and_indexes() {
     let response = patterns::search(&core, request(100, Sort::Count, &[]))
         .await
         .unwrap();
-    assert_eq!((response.total_events, response.total_patterns), (42, 3));
+    assert_eq!((response.total_events, response.total_patterns), (14, 1));
     assert!(response.patterns.iter().all(|p| p.count == 14));
     assert!(std::fs::metadata(&path).unwrap().len() <= 1 << 20);
     let found = query::search(
@@ -104,6 +106,189 @@ async fn structured_logs_fit_capacity_and_rebuild_old_catalog_and_indexes() {
             Some("lognara-pattern-normalization-3")
         );
     }
+    core.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn service_metrics_are_searchable_but_not_patterns_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = Core::open(config(dir.path())).unwrap();
+    let metric_v1 = r#"ServiceMetrics { ServiceName: "api", Metrics: [("requests_total": 1)], Timestamp: 10/23/2026 12:14:47 }"#;
+    let metric_v2 = r#"ServiceMetrics { SchemaVersion: 2, ServiceName: "api", Counters: [("requests_total": 2)], Gauges: [], Timestamp: 11/15/2026 20:37:51 }"#;
+    let events = [
+        (LogLevel::Warn, "payment id=1 failed", 1),
+        (LogLevel::Info, metric_v1, 2),
+        (LogLevel::Error, metric_v2, 3),
+        (LogLevel::Warn, "payment id=2 failed", 4),
+    ];
+    let body = batch(&events);
+    let source = wire::decode(&body, 1 << 20)
+        .unwrap()
+        .groups
+        .remove(0)
+        .source;
+    let environment = source.environment.clone();
+    core.journal.accept(&body).unwrap();
+    processed(&core, 4).await;
+    core.shutdown().unwrap();
+    drop(core);
+
+    // Старый каталог мог сохранить ServiceMetrics до обновления Dock/Core.
+    let path = dir.path().join("patterns.sqlite");
+    let db = rusqlite::Connection::open(path).unwrap();
+    let mut metric_ids = Vec::new();
+    for (level, message, offset) in [("info", metric_v1, 2), ("error", metric_v2, 3)] {
+        let identity =
+            pattern_identity::identify(environment.as_deref(), &source.service, level, message);
+        metric_ids.push(identity.id.clone());
+        let metadata = json!({
+            "id": identity.id,
+            "environment": environment,
+            "service": source.service,
+            "level": level,
+            "template": identity.template,
+            "parts": identity.parts,
+            "exact": identity.exact,
+            "first": TS + offset * SECOND,
+            "last": TS + offset * SECOND,
+        });
+        db.execute(
+            "INSERT OR REPLACE INTO patterns(id, metadata) VALUES(?1, ?2)",
+            rusqlite::params![metric_ids.last().unwrap(), metadata.to_string()],
+        )
+        .unwrap();
+    }
+    drop(db);
+
+    let core = Core::open(config(dir.path())).unwrap();
+    processed(&core, 4).await;
+    let response = patterns::search(&core, request(100, Sort::Count, &[]))
+        .await
+        .unwrap();
+    assert_eq!((response.total_events, response.total_patterns), (2, 1));
+    assert_eq!(response.patterns[0].count, 2);
+    assert_eq!(response.patterns[0].share, 1.0);
+    assert!(metric_ids.iter().all(|id| {
+        response
+            .patterns
+            .iter()
+            .all(|pattern| &pattern.pattern_id != id)
+    }));
+
+    let detail = patterns::details(
+        &core,
+        &response.patterns[0].pattern_id,
+        details(BTreeMap::new()),
+    )
+    .await
+    .unwrap();
+    assert_eq!((detail.pattern.count, detail.pattern.share), (2, 1.0));
+    for id in &metric_ids {
+        assert!(matches!(
+            patterns::details(&core, id, details(BTreeMap::new())).await,
+            Err(QueryError::NotFound)
+        ));
+    }
+
+    let logs = query::search(
+        &core,
+        SearchRequest {
+            from: format_timestamp(TS),
+            to: format_timestamp(TS + 100 * SECOND),
+            filters: BTreeMap::new(),
+            text: None,
+            limit: 100,
+            cursor: None,
+        },
+        false,
+        Instant::now() + Duration::from_secs(20),
+    )
+    .unwrap();
+    assert_eq!(logs.events.len(), 4);
+    assert_eq!(
+        logs.events
+            .iter()
+            .filter(|event| event.message.starts_with("ServiceMetrics {"))
+            .count(),
+        2
+    );
+    assert!(
+        response
+            .patterns
+            .iter()
+            .all(|pattern| !pattern.template.starts_with("ServiceMetrics {"))
+    );
+    let found = issues::search(
+        &core,
+        IssueRequest {
+            from: format_timestamp(TS),
+            to: format_timestamp(TS + 100 * SECOND),
+            filters: BTreeMap::new(),
+            interval_seconds: 60,
+            limit: 100,
+            status: Status::Open,
+            resolved: vec![],
+            regressed: vec![],
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        found
+            .issues
+            .iter()
+            .any(|issue| issue.template.starts_with("ServiceMetrics {"))
+    );
+    core.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn hwagent_metrics_are_not_patterns_but_same_text_from_app_is() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = Core::open(config(dir.path())).unwrap();
+    let mut body = wire::decode(include_bytes!("fixtures/relay-batch.bin"), 1 << 20).unwrap();
+    let mut host = body.groups[0].clone();
+    host.source.server = "mail-01".into();
+    host.source.backend = "host".into();
+    host.source.service = "host".into();
+    let mut host_event = host.events[0].clone();
+    host_event.id = wire::LogId(uuid::Uuid::now_v7());
+    host_event.timestamp = TS + SECOND;
+    host_event.message = "host metrics".into();
+    host_event.level = LogLevel::Debug;
+    host_event.attributes.insert(
+        "Metrics".into(),
+        json!({
+            "SchemaVersion": 2,
+            "ServiceName": "host",
+            "Counters": {"net.eth0.rx_bytes": 1024},
+            "Gauges": {"cpu.usage_percent": 25.0},
+        }),
+    );
+    host.events = vec![host_event];
+
+    let mut application = body.groups[0].clone();
+    application.source.server = "mail-01".into();
+    application.source.backend = "payments".into();
+    application.source.service = "billing".into();
+    let mut application_event = application.events[0].clone();
+    application_event.id = wire::LogId(uuid::Uuid::now_v7());
+    application_event.timestamp = TS + 2 * SECOND;
+    application_event.message = "host metrics".into();
+    application_event.attributes.clear();
+    application.events = vec![application_event];
+    body.groups = vec![host, application];
+
+    let encoded = rmp_serde::to_vec_named(&body).unwrap();
+    let compressed = zstd::encode_all(&encoded[..], 3).unwrap();
+    core.journal.accept(&compressed).unwrap();
+    processed(&core, 2).await;
+
+    let response = patterns::search(&core, request(100, Sort::Count, &[]))
+        .await
+        .unwrap();
+    assert_eq!((response.total_events, response.total_patterns), (1, 1));
+    assert_eq!(response.patterns[0].template, "host metrics");
     core.shutdown().unwrap();
 }
 

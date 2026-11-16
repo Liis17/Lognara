@@ -3,35 +3,15 @@ import {
   api,
   ApiError,
   errorText,
-  nodeScopeLabel,
-  type MetricAlertDefinition,
   type MetricAlertGroup,
   type MetricAlertKey,
   type MetricAlertRecipient,
   type MetricAlertSettings as SettingsData,
+  type LogAlertList,
 } from "../api";
-
-function metricUrl(key: MetricAlertKey) {
-  const query = new URLSearchParams({
-    server: key.server,
-    service: key.service,
-    name: key.name,
-    origin: key.origin,
-  });
-  return `/metrics/detail?${query}`;
-}
 
 function keyText(key: MetricAlertKey) {
   return `${key.server} / ${key.service} / ${key.name} (${key.origin})`;
-}
-
-function stateText(alert: MetricAlertDefinition) {
-  if (!alert.enabled) return "Отключён";
-  if (alert.no_recipients) return "Нет получателей";
-  if (alert.loss_registered) return "Потеря данных";
-  return { unknown: "Ожидание данных", ok: "В норме", firing: "Сработал" }[
-    alert.state
-  ];
 }
 
 function Recipients({
@@ -45,6 +25,7 @@ function Recipients({
   const [name, setName] = useState("");
   const [chatId, setChatId] = useState("");
   const [editing, setEditing] = useState<MetricAlertRecipient | null>(null);
+  const [dialogOpen, setDialogOpen] = useState(false);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -54,12 +35,14 @@ function Recipients({
     setName(recipient.name);
     setChatId(String(recipient.chat_id));
     setError("");
+    setDialogOpen(true);
   };
   const reset = () => {
     setEditing(null);
     setName("");
     setChatId("");
     setError("");
+    setDialogOpen(false);
   };
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -102,6 +85,7 @@ function Recipients({
     <section className="alert-settings-panel" aria-labelledby="alert-recipients-title">
       <h3 id="alert-recipients-title">Получатели</h3>
       <p className="muted">Личные чаты и каналы ведутся отдельно.</p>
+      <button type="button" onClick={() => { reset(); setDialogOpen(true); }}>Добавить получателя</button>
       <ul className="alert-settings-list">
         {recipients.map((recipient) => (
           <li key={recipient.id}>
@@ -124,8 +108,9 @@ function Recipients({
         ))}
         {!recipients.length && <li className="muted">Получателей пока нет</li>}
       </ul>
+      {dialogOpen && <dialog open className="alert-form-dialog" aria-labelledby="recipient-dialog-title">
       <form onSubmit={submit}>
-        <h4>{editing ? "Изменить получателя" : "Добавить получателя"}</h4>
+        <h4 id="recipient-dialog-title">{editing ? "Изменить получателя" : "Добавить получателя"}</h4>
         <label>
           Тип
           <select
@@ -154,14 +139,11 @@ function Recipients({
           <button type="submit" disabled={busy || !name.trim() || !chatId.trim()}>
             {editing ? "Сохранить получателя" : "Добавить получателя"}
           </button>
-          {editing && (
-            <button type="button" onClick={reset} disabled={busy}>
-              Отмена
-            </button>
-          )}
+          <button type="button" onClick={reset} disabled={busy}>Отмена</button>
         </div>
         {error && <p className="error" role="alert">{error}</p>}
       </form>
+      </dialog>}
     </section>
   );
 }
@@ -176,6 +158,7 @@ function Groups({
   onChange: () => void;
 }) {
   const [editing, setEditing] = useState<MetricAlertGroup | null>(null);
+  const [dialogOpen, setDialogOpen] = useState(false);
   const [kind, setKind] = useState<"personal" | "channel">("personal");
   const [name, setName] = useState("");
   const [recipientIds, setRecipientIds] = useState<string[]>([]);
@@ -187,6 +170,7 @@ function Groups({
     setName("");
     setRecipientIds([]);
     setError("");
+    setDialogOpen(false);
   };
   const edit = (group: MetricAlertGroup) => {
     setEditing(group);
@@ -194,6 +178,7 @@ function Groups({
     setName(group.name);
     setRecipientIds(group.recipient_ids);
     setError("");
+    setDialogOpen(true);
   };
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -240,6 +225,7 @@ function Groups({
   return (
     <section className="alert-settings-panel" aria-labelledby="alert-groups-title">
       <h3 id="alert-groups-title">Группы получателей</h3>
+      <button type="button" onClick={() => { reset(); setDialogOpen(true); }}>Добавить группу</button>
       <ul className="alert-settings-list">
         {groups.map((group) => (
           <li key={group.id}>
@@ -248,9 +234,13 @@ function Groups({
               <span className="muted">
                 {group.kind === "personal" ? "Личные чаты" : "Каналы"} · {group.recipient_ids.length} получателей
               </span>
-              {group.alerts.length > 0 && (
-                <span className="muted">Алерты: {group.alerts.map(keyText).join("; ")}</span>
-              )}
+              {(group.alerts.length + (group.log_alerts?.length ?? 0)) > 0 && <details className="group-alerts-details">
+                <summary>{group.alerts.length + (group.log_alerts?.length ?? 0)} алертов</summary>
+                <ul>
+                  {group.alerts.map((key) => <li key={keyText(key)}>{keyText(key)}</li>)}
+                  {(group.log_alerts ?? []).map((name) => <li key={name}>Логи: {name}</li>)}
+                </ul>
+              </details>}
             </div>
             <button type="button" onClick={() => edit(group)} disabled={busy}>Изменить</button>
             <button type="button" onClick={() => remove(group)} disabled={busy}>Удалить</button>
@@ -258,8 +248,10 @@ function Groups({
         ))}
         {!groups.length && <li className="muted">Групп пока нет</li>}
       </ul>
+      {error && !dialogOpen && <p className="error" role="alert">{error}</p>}
+      {dialogOpen && <dialog open className="alert-form-dialog" aria-labelledby="group-dialog-title">
       <form onSubmit={submit}>
-        <h4>{editing ? "Изменить группу" : "Добавить группу"}</h4>
+        <h4 id="group-dialog-title">{editing ? "Изменить группу" : "Добавить группу"}</h4>
         <label>
           Тип группы
           <select
@@ -300,18 +292,23 @@ function Groups({
           <button type="submit" disabled={busy || !name.trim()}>
             {editing ? "Сохранить группу" : "Добавить группу"}
           </button>
-          {editing && <button type="button" onClick={reset} disabled={busy}>Отмена</button>}
+          <button type="button" onClick={reset} disabled={busy}>Отмена</button>
         </div>
         {error && <p className="error" role="alert">{error}</p>}
       </form>
+      </dialog>}
     </section>
   );
 }
 
 export default function MetricAlertSettings({
   onUnauthorized,
+  view,
+  logCoreStatus,
 }: {
   onUnauthorized: () => void;
+  view: "recipients" | "telegram";
+  logCoreStatus?: LogAlertList["core_status"];
 }) {
   const [settings, setSettings] = useState<SettingsData | null>(null);
   const [token, setToken] = useState("");
@@ -346,19 +343,6 @@ export default function MetricAlertSettings({
       setBusy(false);
     }
   };
-  const removeRule = async (id: string) => {
-    if (!window.confirm("Удалить правило, созданное через MCP? Ожидающие уведомления будут отменены.")) return;
-    setError("");
-    setBusy(true);
-    try {
-      await api("DELETE", `/api/alerts/rules/${encodeURIComponent(id)}`);
-      await load();
-    } catch (e) {
-      fail(e);
-    } finally {
-      setBusy(false);
-    }
-  };
   const setEnabled = async (enabled: boolean) => {
     if (!settings) return;
     setError("");
@@ -374,82 +358,53 @@ export default function MetricAlertSettings({
   };
 
   return (
-    <section className="alert-settings" id="alerts" aria-labelledby="metric-alerts-title">
-      <h2 id="metric-alerts-title">Алерты метрик</h2>
+    <section className="alert-settings" aria-labelledby="alert-settings-title">
       {settings ? (
         <>
-          <div className="alert-global-status">
-            <label>
-              <input
-                type="checkbox"
-                checked={settings.enabled}
-                disabled={busy || (!settings.enabled && !settings.token_configured)}
-                onChange={(event) => setEnabled(event.target.checked)}
-              />
-              Включить алерты глобально
-            </label>
-            {!settings.token_configured && (
-              <p className="muted">Сначала сохраните проверенный токен Telegram-бота.</p>
-            )}
-            {settings.send_paused && (
-              <p className="error">Отправка приостановлена: {settings.send_pause_reason === "invalid_token" ? "Telegram отклонил токен" : "ошибка отправки"}.</p>
-            )}
-            <p className="muted">
-              Core: {settings.core_status}
-              {settings.core_checked_at ? ` · проверен ${new Date(settings.core_checked_at).toLocaleString()}` : ""}
-              {settings.core_error ? ` · ${settings.core_error}` : ""}
-            </p>
-            <p className="muted">
-              В очереди: {settings.pending_deliveries} · постоянные ошибки получателей: {settings.permanent_errors}
-            </p>
-          </div>
-          <form onSubmit={saveToken} className="alert-token-form">
-            <h3>Telegram Bot API</h3>
-            <p className="muted">Токен проверяется через Telegram и хранится только в SQLite Dock. Он включён в резервные копии базы.</p>
-            <label>
-              {settings.token_configured ? "Новый токен бота" : "Токен бота"}
-              <input
-                type="password"
-                autoComplete="new-password"
-                value={token}
-                onChange={(event) => setToken(event.target.value)}
-                placeholder={settings.token_configured ? "Сохранённый токен скрыт" : "123456:…"}
-              />
-            </label>
-            <button type="submit" disabled={busy || !token.trim()}>
-              Проверить и сохранить токен
-            </button>
-            {tokenMessage && <p className="ok">{tokenMessage}</p>}
-          </form>
-          <div className="alert-settings-columns">
-            <Recipients recipients={settings.recipients} onChange={load} />
-            <Groups groups={settings.groups} recipients={settings.recipients} onChange={load} />
-          </div>
-          <section className="alert-settings-panel" aria-labelledby="alert-list-title">
-            <h3 id="alert-list-title">Все правила</h3>
-            <ul className="alert-settings-list">
-              {settings.alerts.map((alert) => (
-                <li key={alert.id}>
-                  <div>
-                    <strong>{keyText(alert.key)}</strong>
-                    {alert.node_scope.kind !== "all" && (
-                      <span className="muted">Создано через MCP · {nodeScopeLabel(alert.node_scope)} · изменяется через MCP</span>
-                    )}
-                    <span className="muted">{stateText(alert)} · {alert.environment ?? "все окружения"} · {alert.combine.toUpperCase()}</span>
-                    {alert.no_recipients && <span className="muted">Не выбраны группы с получателями</span>}
-                  </div>
-                  {alert.node_scope.kind === "all" ? (
-                    <a href={metricUrl(alert.key)}>Настроить</a>
-                  ) : (
-                    <button type="button" disabled={busy} onClick={() => removeRule(alert.id)}>
-                      Удалить
-                    </button>
-                  )}
-                </li>
-              ))}
-              {!settings.alerts.length && <li className="muted">Алертов пока нет</li>}
-            </ul>
-          </section>
+          {view === "telegram" ? <>
+            <h2 id="alert-settings-title">Telegram</h2>
+            <div className="alert-global-status">
+              <label className="switch-label">
+                <input
+                  type="checkbox"
+                  checked={settings.enabled}
+                  disabled={busy || (!settings.enabled && !settings.token_configured)}
+                  onChange={(event) => setEnabled(event.target.checked)}
+                />
+                Включить отправку алертов
+              </label>
+              {!settings.token_configured && <p className="muted">Сначала сохраните проверенный токен Telegram-бота.</p>}
+              {settings.send_paused && <p className="error">Отправка приостановлена: {settings.send_pause_reason === "invalid_token" ? "Telegram отклонил токен" : "ошибка отправки"}.</p>}
+              <p className="muted">
+                Core: {settings.core_status} · логи: {logCoreStatus ?? "unknown"}
+                {settings.core_checked_at ? ` · проверен ${new Date(settings.core_checked_at).toLocaleString()}` : ""}
+                {settings.core_error ? ` · ${settings.core_error}` : ""}
+              </p>
+              <p className="muted">В очереди: {settings.pending_deliveries} · постоянные ошибки получателей: {settings.permanent_errors}</p>
+            </div>
+            <form onSubmit={saveToken} className="alert-token-form">
+              <h3>Telegram Bot API</h3>
+              <p className="muted">Токен проверяется через Telegram и хранится в SQLite Dock.</p>
+              <label>
+                {settings.token_configured ? "Новый токен бота" : "Токен бота"}
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  value={token}
+                  onChange={(event) => setToken(event.target.value)}
+                  placeholder={settings.token_configured ? "Сохранённый токен скрыт" : "123456:…"}
+                />
+              </label>
+              <button type="submit" disabled={busy || !token.trim()}>Проверить и сохранить токен</button>
+              {tokenMessage && <p className="ok">{tokenMessage}</p>}
+            </form>
+          </> : <>
+            <h2 id="alert-settings-title">Получатели и группы</h2>
+            <div className="alert-settings-columns">
+              <Recipients recipients={settings.recipients} onChange={load} />
+              <Groups groups={settings.groups} recipients={settings.recipients} onChange={load} />
+            </div>
+          </>}
         </>
       ) : (
         <p className="muted">Загрузка настроек алертов…</p>

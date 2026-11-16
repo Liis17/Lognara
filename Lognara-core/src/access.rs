@@ -284,6 +284,84 @@ impl Access {
         })
     }
 
+    pub fn rename_host(&self, relay_id: i64, name: &str) -> Result<(Relay, Agent)> {
+        let name = valid_name(name)?;
+        let mut connection = self.connection.lock().unwrap();
+        let transaction = connection.transaction()?;
+        let (agent_id, created_at, agent_created_at) = transaction
+            .query_row(
+                "SELECT a.id,r.created_at,a.created_at FROM relays r
+                 JOIN agents a ON a.relay_id=r.id WHERE r.id=?1 AND r.kind='host'",
+                [relay_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or(AccessError::NotFound)?;
+        if transaction
+            .query_row(
+                "SELECT id FROM relays WHERE name=?1 AND id<>?2",
+                params![name, relay_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .is_some()
+            || transaction
+                .query_row(
+                    "SELECT id FROM agents WHERE relay_id=?1 AND name=?2 AND id<>?3",
+                    params![relay_id, name, agent_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?
+                .is_some()
+        {
+            return Err(AccessError::NameTaken);
+        }
+        transaction.execute(
+            "UPDATE relays SET name=?1 WHERE id=?2",
+            params![name, relay_id],
+        )?;
+        transaction.execute(
+            "UPDATE agents SET name=?1 WHERE id=?2",
+            params![name, agent_id],
+        )?;
+        let relay = Relay {
+            id: relay_id,
+            name: name.clone(),
+            kind: "host".into(),
+            created_at,
+            heartbeat: transaction
+                .query_row(
+                    "SELECT telemetry FROM heartbeats WHERE kind='relay' AND node_id=?1",
+                    [relay_id],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .and_then(telemetry),
+        };
+        let agent = Agent {
+            id: agent_id,
+            name,
+            relay_id,
+            created_at: agent_created_at,
+            heartbeat: transaction
+                .query_row(
+                    "SELECT telemetry FROM heartbeats WHERE kind='agent' AND node_id=?1",
+                    [agent_id],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .and_then(telemetry),
+        };
+        transaction.commit()?;
+        Ok((relay, agent))
+    }
+
     pub fn delete_host(&self, relay_id: i64) -> Result<()> {
         let mut connection = self.connection.lock().unwrap();
         let transaction = connection.transaction()?;
@@ -357,6 +435,87 @@ impl Access {
         };
         self.reload_tokens(&connection)?;
         Ok(CreatedAgent { agent, token })
+    }
+
+    pub fn rename_relay(&self, id: i64, name: &str) -> Result<Relay> {
+        let name = valid_name(name)?;
+        let mut connection = self.connection.lock().unwrap();
+        let transaction = connection.transaction()?;
+        let kind = Self::relay_kind(&transaction, id)?.ok_or(AccessError::NotFound)?;
+        if kind == "host" {
+            return Err(AccessError::HostNode);
+        }
+        if transaction
+            .query_row(
+                "SELECT id FROM relays WHERE name=?1 AND id<>?2",
+                params![name, id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .is_some()
+        {
+            return Err(AccessError::NameTaken);
+        }
+        transaction.execute("UPDATE relays SET name=?1 WHERE id=?2", params![name, id])?;
+        let relay = transaction.query_row(
+            "SELECT relays.id,relays.name,relays.created_at,heartbeats.telemetry,relays.kind FROM relays
+             LEFT JOIN heartbeats ON heartbeats.kind='relay' AND heartbeats.node_id=relays.id WHERE relays.id=?1",
+            [id],
+            |row| {
+                Ok(Relay {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    created_at: row.get(2)?,
+                    heartbeat: telemetry(row.get(3)?),
+                    kind: row.get(4)?,
+                })
+            },
+        )?;
+        transaction.commit()?;
+        Ok(relay)
+    }
+
+    pub fn rename_agent(&self, id: i64, name: &str) -> Result<Agent> {
+        let name = valid_name(name)?;
+        let mut connection = self.connection.lock().unwrap();
+        let transaction = connection.transaction()?;
+        let relay_id = transaction
+            .query_row("SELECT relay_id FROM agents WHERE id=?1", [id], |row| {
+                row.get::<_, i64>(0)
+            })
+            .optional()?
+            .ok_or(AccessError::NotFound)?;
+        if Self::agent_on_host(&transaction, id)? {
+            return Err(AccessError::HostNode);
+        }
+        if transaction
+            .query_row(
+                "SELECT id FROM agents WHERE relay_id=?1 AND name=?2 AND id<>?3",
+                params![relay_id, name, id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .is_some()
+        {
+            return Err(AccessError::NameTaken);
+        }
+        transaction.execute("UPDATE agents SET name=?1 WHERE id=?2", params![name, id])?;
+        let agent = transaction.query_row(
+            "SELECT id,name,relay_id,created_at,telemetry FROM agents
+             LEFT JOIN heartbeats ON kind='agent' AND node_id=id WHERE id=?1",
+            [id],
+            |row| {
+                Ok(Agent {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    relay_id: row.get(2)?,
+                    created_at: row.get(3)?,
+                    heartbeat: telemetry(row.get(4)?),
+                })
+            },
+        )?;
+        transaction.commit()?;
+        Ok(agent)
     }
 
     pub fn rotate_agent_token(&self, id: i64) -> Result<CreatedAgent> {

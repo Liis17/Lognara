@@ -40,7 +40,7 @@ async function accessFixture(page: Page) {
         metrics: body.metrics,
         alerts_write: body.alerts_write,
         node_scope: body.node_scope,
-        node_name: body.node_scope.kind === "relay" ? "Edge" : null,
+        node_name: body.node_scope.kind === "relay" ? "Edge" : body.node_scope.kind === "agent" ? "api-1" : null,
       };
       state.tokens.unshift(personal_token);
       return route.fulfill({ status: 201, json: { token: secret, personal_token } });
@@ -55,10 +55,36 @@ async function accessFixture(page: Page) {
     }
     return route.fulfill({ status: 404, json: { error: "not_found" } });
   });
-  await page.goto("/mcp-access");
+  await page.goto("/mcp-access?source=test#tokens");
+  await expect(page).toHaveURL(/\/settings\/mcp\?source=test#tokens$/u);
   await expect(page.getByRole("heading", { name: "MCP-доступ", exact: true })).toBeVisible();
   return state;
 }
+
+async function chooseCombobox(page: Page, label: string, option: string) {
+  const input = page.getByRole("combobox", { name: label, exact: true });
+  await input.fill(option);
+  await page.getByRole("option", { name: new RegExp(option, "u") }).click();
+}
+
+test("settings use URL tabs and a horizontal sidebar on narrow screens", async ({ page }) => {
+  await page.route("**/api/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/me") return route.fulfill({ json: { username: "liis", passkeys: 0 } });
+    if (path === "/api/account/passkeys") return route.fulfill({ json: { passkeys: [] } });
+    return route.fulfill({ status: 404, json: { error: "not_found" } });
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/settings");
+  await expect(page).toHaveURL(/\/settings\/account$/u);
+
+  const sidebar = page.getByRole("navigation", { name: "Настройки", exact: true });
+  await expect(sidebar.getByRole("link", { name: "Аккаунт", exact: true })).toHaveAttribute("aria-current", "page");
+  expect(await sidebar.evaluate((element) => getComputedStyle(element).display)).toBe("flex");
+  await sidebar.getByRole("link", { name: "Вход и passkey", exact: true }).click();
+  await expect(page).toHaveURL(/\/settings\/passkeys$/u);
+  await expect(page.getByRole("heading", { name: "Вход и passkey", exact: true })).toBeVisible();
+});
 
 test("issues one-time PAT, copies it explicitly, lists expiry and revokes credentials", async ({ page, context }) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
@@ -72,7 +98,7 @@ test("issues one-time PAT, copies it explicitly, lists expiry and revokes creden
   const issued = page.getByRole("region", { name: "Выданный токен" });
   await expect(issued.getByLabel("Скопируйте секрет сейчас")).toHaveValue(secret);
   expect(state.issued).toBe(1);
-  expect(state.bodies).toEqual([{ name: "Codex workstation", logs: true, metrics: true, alerts_write: false, node_scope: { kind: "all" } }]);
+  expect(state.bodies).toEqual([{ name: "Codex workstation", logs: true, metrics: true, alerts_write: false, node_scope: { kind: "all" }, expires_in_days: 30 }]);
   expect(await page.evaluate(() => localStorage.length)).toBe(0);
   await issued.getByRole("button", { name: "Скопировать токен", exact: true }).click();
   await expect(issued.getByRole("button", { name: "Скопировано", exact: true })).toBeVisible();
@@ -118,11 +144,14 @@ test("token with alerts write scoped to a relay is listed with its rights and no
   const alerts = page.getByRole("checkbox", { name: "Управление алертами логов и метрик", exact: true });
   await alerts.check();
   await page.getByRole("radio", { name: "Relay и его агенты", exact: true }).check();
-  await page.getByLabel("Relay", { exact: true }).selectOption({ label: "Edge" });
+  await chooseCombobox(page, "Relay", "Edge");
+  await page.getByRole("combobox", { name: "Срок действия", exact: true }).selectOption("90");
   await page.getByRole("button", { name: "Выпустить токен", exact: true }).click();
   await expect(page.getByRole("region", { name: "Выданный токен" })).toBeVisible();
-  expect(state.bodies).toEqual([{ name: "Alert bot", logs: true, metrics: true, alerts_write: true, node_scope: { kind: "relay", id: 4 } }]);
-  await expect(page.getByText("Права: логи, метрики, алерты логов и метрик · Узлы: Edge", { exact: true })).toBeVisible();
+  expect(state.bodies).toEqual([{ name: "Alert bot", logs: true, metrics: true, alerts_write: true, node_scope: { kind: "relay", id: 4 }, expires_in_days: 90 }]);
+  const relayToken = page.locator(".mcp-record").filter({ hasText: "Alert bot" });
+  await expect(relayToken.getByText("Relay и агенты · Edge", { exact: true })).toBeVisible();
+  await expect(relayToken.getByText("Управление алертами", { exact: true })).toBeVisible();
 });
 
 test("alert rights require data access and an agent is chosen only inside its relay", async ({ page }) => {
@@ -146,13 +175,15 @@ test("alert rights require data access and an agent is chosen only inside its re
   await page.getByRole("radio", { name: "Конкретный агент", exact: true }).check();
   const agent = page.getByLabel("Агент", { exact: true });
   await expect(agent).toBeDisabled();
-  await page.getByLabel("Relay", { exact: true }).selectOption({ label: "Edge" });
-  await expect(agent.locator("option")).toHaveText(["Выберите агента", "api-1"]);
-  await agent.selectOption({ label: "api-1" });
+  await chooseCombobox(page, "Relay", "Edge");
+  await agent.fill("");
+  await expect(page.getByRole("option", { name: /api-1/u })).toBeVisible();
+  await chooseCombobox(page, "Агент", "api-1");
   await page.getByRole("button", { name: "Выпустить токен", exact: true }).click();
   await expect(page.getByRole("region", { name: "Выданный токен" })).toBeVisible();
-  expect(state.bodies).toEqual([{ name: "Agent token", logs: true, metrics: true, alerts_write: false, node_scope: { kind: "agent", id: 9 } }]);
-  await expect(page.getByText("Права: логи, метрики · Узлы: агент #9", { exact: true })).toBeVisible();
+  expect(state.bodies).toEqual([{ name: "Agent token", logs: true, metrics: true, alerts_write: false, node_scope: { kind: "agent", id: 9 }, expires_in_days: 30 }]);
+  const agentToken = page.locator(".mcp-record").filter({ hasText: "Agent token" });
+  await expect(agentToken.getByText("Агент · api-1", { exact: true })).toBeVisible();
 });
 
 test("issues a log-only writer without granting metric alert tools", async ({ page }) => {
@@ -163,20 +194,22 @@ test("issues a log-only writer without granting metric alert tools", async ({ pa
   await page.getByRole("checkbox", { name: "Управление алертами логов и метрик", exact: true }).check();
   await page.getByRole("button", { name: "Выпустить токен", exact: true }).click();
   await expect(page.getByRole("region", { name: "Выданный токен" })).toBeVisible();
-  expect(state.bodies).toEqual([{ name: "Log alert bot", logs: true, metrics: false, alerts_write: true, node_scope: { kind: "all" } }]);
-  await expect(page.getByText("Права: логи, алерты логов · Узлы: все узлы", { exact: true })).toBeVisible();
+  expect(state.bodies).toEqual([{ name: "Log alert bot", logs: true, metrics: false, alerts_write: true, node_scope: { kind: "all" }, expires_in_days: 30 }]);
+  const logToken = page.locator(".mcp-record").filter({ hasText: "Log alert bot" });
+  await expect(logToken.getByText("Логи", { exact: true })).toBeVisible();
+  await expect(logToken.getByText("Все узлы", { exact: true })).toBeVisible();
 });
 
 test("changing the relay drops an agent chosen under the previous relay", async ({ page }) => {
   const state = await accessFixture(page);
   await page.getByLabel("Название", { exact: true }).fill("Stale agent");
   await page.getByRole("radio", { name: "Конкретный агент", exact: true }).check();
-  await page.getByLabel("Relay", { exact: true }).selectOption({ label: "Edge" });
-  await page.getByLabel("Агент", { exact: true }).selectOption({ label: "api-1" });
+  await chooseCombobox(page, "Relay", "Edge");
+  await chooseCombobox(page, "Агент", "api-1");
   await page.getByRole("radio", { name: "Relay и его агенты", exact: true }).check();
-  await page.getByLabel("Relay", { exact: true }).selectOption({ label: "Core" });
+  await chooseCombobox(page, "Relay", "Core");
   await page.getByRole("radio", { name: "Конкретный агент", exact: true }).check();
-  await expect(page.getByLabel("Агент", { exact: true })).toHaveValue("");
+  await expect(page.getByRole("combobox", { name: "Агент", exact: true })).toHaveValue("Выберите агента");
   await expect(page.getByRole("button", { name: "Выпустить токен", exact: true })).toBeDisabled();
   expect(state.bodies).toEqual([]);
 });

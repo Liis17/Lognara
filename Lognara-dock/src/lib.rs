@@ -23,6 +23,7 @@ pub mod series;
 pub mod session;
 pub mod store;
 pub mod token_access;
+pub mod version;
 
 use std::io;
 

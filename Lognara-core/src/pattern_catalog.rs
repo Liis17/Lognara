@@ -3,7 +3,7 @@ use crate::{
     analytics::raw_frame,
     config::Config,
     issue_identity::{Exception, fingerprint, is_error},
-    pattern_identity::{Part, identify},
+    pattern_identity::{Part, identify, is_pattern_eligible},
     query::{self, QueryError},
     storage::{Core, Snapshot},
     wire::LogLevel,
@@ -309,6 +309,7 @@ impl DiskCatalog {
             .select_columns(&[
                 "environment",
                 "service",
+                "backend",
                 "action",
                 "level",
                 "message",
@@ -328,6 +329,7 @@ impl DiskCatalog {
             for row in 0..batch.num_rows() {
                 let environment = optional_string(&batch, "environment", row)?;
                 let service = string(&batch, "service", row)?;
+                let backend = string(&batch, "backend", row)?;
                 let action = optional_string(&batch, "action", row)?;
                 let level = LogLevel::from_code(column::<UInt8Array>(&batch, "level")?.value(row))?;
                 let message = string(&batch, "message", row)?;
@@ -366,24 +368,26 @@ impl DiskCatalog {
                         },
                     )?;
                 }
-                observe(
-                    &mut known,
-                    &mut changed,
-                    &mut next.bytes,
-                    timestamp,
-                    identity.id.clone(),
-                    || Known {
-                        id: identity.id,
-                        environment: environment.map(str::to_owned),
-                        service: service.into(),
-                        level: level.as_str().into(),
-                        template: identity.template,
-                        parts: identity.parts,
-                        exact: identity.exact,
-                        first: timestamp,
-                        last: timestamp,
-                    },
-                )?;
+                if is_pattern_eligible(message, service, backend) {
+                    observe(
+                        &mut known,
+                        &mut changed,
+                        &mut next.bytes,
+                        timestamp,
+                        identity.id.clone(),
+                        || Known {
+                            id: identity.id,
+                            environment: environment.map(str::to_owned),
+                            service: service.into(),
+                            level: level.as_str().into(),
+                            template: identity.template,
+                            parts: identity.parts,
+                            exact: identity.exact,
+                            first: timestamp,
+                            last: timestamp,
+                        },
+                    )?;
+                }
                 if known.len() + issues.len() > config.pattern_max_entries
                     || next.bytes > config.pattern_catalog_bytes
                 {

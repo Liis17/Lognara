@@ -20,7 +20,16 @@ use crate::{
     token_access::{Permissions, Rights, Scope},
 };
 
-const TOKEN_LIFETIME_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+
+fn token_lifetime_ms(days: Option<u16>) -> Option<i64> {
+    match days.unwrap_or(30) {
+        7 => Some(7 * DAY_MS),
+        30 => Some(30 * DAY_MS),
+        90 => Some(90 * DAY_MS),
+        _ => None,
+    }
+}
 
 pub async fn access(State(app): State<AppState>, _user: AuthUser) -> Json<Value> {
     Json(json!({
@@ -47,6 +56,7 @@ pub struct CreateTokenRequest {
     metrics: Option<bool>,
     alerts_write: Option<bool>,
     node_scope: Option<Scope>,
+    expires_in_days: Option<u16>,
 }
 
 pub async fn create_token(
@@ -62,6 +72,8 @@ pub async fn create_token(
     if name.is_empty() || name.len() > 80 || name.chars().any(char::is_control) {
         return Err(ApiError::BadRequest("invalid_request"));
     }
+    let lifetime_ms =
+        token_lifetime_ms(body.expires_in_days).ok_or(ApiError::BadRequest("invalid_request"))?;
     let permissions = permissions(body.logs, body.metrics, body.alerts_write, body.node_scope)
         .ok_or(ApiError::BadRequest("invalid_request"))?;
     ensure_node_exists(&app, permissions.node_scope).await?;
@@ -75,7 +87,7 @@ pub async fn create_token(
             user.username,
             name.to_owned(),
             hash,
-            now + TOKEN_LIFETIME_MS,
+            now + lifetime_ms,
             permissions,
         )
         .await?;
@@ -83,6 +95,26 @@ pub async fn create_token(
         StatusCode::CREATED,
         Json(json!({ "token": secret, "personal_token": token })),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DAY_MS, token_lifetime_ms};
+
+    #[test]
+    fn token_lifetime_defaults_to_thirty_days_and_accepts_supported_values() {
+        assert_eq!(token_lifetime_ms(None), Some(30 * DAY_MS));
+        assert_eq!(token_lifetime_ms(Some(7)), Some(7 * DAY_MS));
+        assert_eq!(token_lifetime_ms(Some(30)), Some(30 * DAY_MS));
+        assert_eq!(token_lifetime_ms(Some(90)), Some(90 * DAY_MS));
+    }
+
+    #[test]
+    fn token_lifetime_rejects_unsupported_values() {
+        assert_eq!(token_lifetime_ms(Some(0)), None);
+        assert_eq!(token_lifetime_ms(Some(14)), None);
+        assert_eq!(token_lifetime_ms(Some(365)), None);
+    }
 }
 
 pub async fn revoke_token(

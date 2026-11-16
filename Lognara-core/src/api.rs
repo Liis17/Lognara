@@ -11,7 +11,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post, put},
+    routing::{get, patch, post, put},
 };
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
@@ -58,15 +58,24 @@ pub fn router(core: Arc<Core>) -> Router {
         .with_state(core.clone());
     let admin = Router::new()
         .route("/v1/admin/relays", get(list_relays).post(create_relay))
-        .route("/v1/admin/relays/{id}", axum::routing::delete(delete_relay))
+        .route(
+            "/v1/admin/relays/{id}",
+            patch(rename_relay).delete(delete_relay),
+        )
         .route("/v1/admin/agents", get(list_agents).post(create_agent))
-        .route("/v1/admin/agents/{id}", axum::routing::delete(delete_agent))
+        .route(
+            "/v1/admin/agents/{id}",
+            patch(rename_agent).delete(delete_agent),
+        )
         .route(
             "/v1/admin/agents/{id}/rotate-token",
             post(rotate_agent_token),
         )
         .route("/v1/admin/hosts", post(create_host))
-        .route("/v1/admin/hosts/{id}", axum::routing::delete(delete_host))
+        .route(
+            "/v1/admin/hosts/{id}",
+            patch(rename_host).delete(delete_host),
+        )
         .route("/v1/admin/hosts/{id}/rotate-token", post(rotate_host_token))
         .route_layer(middleware::from_fn_with_state(
             token_hash(&core.journal.config.admin_token),
@@ -803,6 +812,11 @@ struct AgentName {
     name: String,
     relay_id: i64,
 }
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Rename {
+    name: String,
+}
 fn invalid_request() -> Response {
     (
         StatusCode::BAD_REQUEST,
@@ -840,6 +854,60 @@ async fn delete_relay(
         return invalid_request();
     };
     access_task(move || access.delete_relay(id), StatusCode::NO_CONTENT).await
+}
+async fn rename_relay(
+    State(access): State<Arc<Access>>,
+    id: Result<Path<i64>, axum::extract::rejection::PathRejection>,
+    body: Result<Json<Rename>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let (Ok(Path(id)), Ok(Json(body))) = (id, body) else {
+        return invalid_request();
+    };
+    access_task(
+        move || {
+            access
+                .rename_relay(id, &body.name)
+                .map(|relay| serde_json::json!({"relay":relay}))
+        },
+        StatusCode::OK,
+    )
+    .await
+}
+async fn rename_agent(
+    State(access): State<Arc<Access>>,
+    id: Result<Path<i64>, axum::extract::rejection::PathRejection>,
+    body: Result<Json<Rename>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let (Ok(Path(id)), Ok(Json(body))) = (id, body) else {
+        return invalid_request();
+    };
+    access_task(
+        move || {
+            access
+                .rename_agent(id, &body.name)
+                .map(|agent| serde_json::json!({"agent":agent}))
+        },
+        StatusCode::OK,
+    )
+    .await
+}
+async fn rename_host(
+    State(access): State<Arc<Access>>,
+    id: Result<Path<i64>, axum::extract::rejection::PathRejection>,
+    body: Result<Json<Rename>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let (Ok(Path(id)), Ok(Json(body))) = (id, body) else {
+        return invalid_request();
+    };
+    access_task(
+        move || {
+            access
+                .rename_host(id, &body.name)
+                .map(|(relay, agent)| serde_json::json!({"relay":relay,"agent":agent}))
+        },
+        StatusCode::OK,
+    )
+    .await
 }
 async fn rotate_agent_token(
     State(access): State<Arc<Access>>,

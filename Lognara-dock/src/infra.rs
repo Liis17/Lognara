@@ -69,13 +69,21 @@ struct Relays {
 struct Relay {
     id: i64,
     name: String,
+    #[serde(default = "relay_kind")]
+    kind: String,
     heartbeat: Option<RelayHeartbeat>,
+}
+
+fn relay_kind() -> String {
+    "relay".into()
 }
 
 #[derive(Deserialize)]
 struct RelayHeartbeat {
     received_at: String,
     version: String,
+    #[serde(default)]
+    release_version: Option<String>,
     spool: Spool,
     last_ingest_at: Option<String>,
     last_delivery_at: Option<String>,
@@ -129,6 +137,8 @@ pub struct Node {
     pub name: String,
     /// ID relay из реестра Core для агента; у relay всегда `None`.
     pub relay_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<i64>,
     /// Relay агента.
     pub relay: Option<String>,
     pub status: NodeStatus,
@@ -136,6 +146,8 @@ pub struct Node {
     pub heartbeat_at: Option<String>,
     pub last_event_at: Option<String>,
     pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub release_version: Option<String>,
     pub spool: Option<Spool>,
     pub delivery_failures: Option<u64>,
     pub events_per_second: Option<f64>,
@@ -147,6 +159,10 @@ pub struct Node {
 pub struct CoreView {
     pub status: &'static str,
     pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub release_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub git_commit: Option<String>,
     pub visibility_lag_ms: Option<u64>,
     pub wal_bytes: Option<u64>,
     pub wal_limit_bytes: Option<u64>,
@@ -155,7 +171,7 @@ pub struct CoreView {
 #[derive(Debug, Serialize)]
 pub struct DockView {
     pub version: &'static str,
-    pub release_version: Option<&'static str>,
+    pub release_version: Option<String>,
     pub git_commit: Option<&'static str>,
     pub sse_clients: usize,
     pub sessions: Option<u64>,
@@ -192,6 +208,8 @@ pub async fn overview(State(app): State<AppState>, _user: AuthUser) -> Json<Infr
         Ok(status) => CoreView {
             status: if status.ready { "online" } else { "not_ready" },
             version: Some(status.version.clone()),
+            release_version: status.release_version.clone(),
+            git_commit: status.git_commit.clone(),
             visibility_lag_ms: Some(status.visibility_lag_ms),
             wal_bytes: Some(status.wal_bytes),
             wal_limit_bytes: Some(status.wal_limit_bytes),
@@ -201,6 +219,8 @@ pub async fn overview(State(app): State<AppState>, _user: AuthUser) -> Json<Infr
             CoreView {
                 status: "unavailable",
                 version: None,
+                release_version: None,
+                git_commit: None,
                 visibility_lag_ms: None,
                 wal_bytes: None,
                 wal_limit_bytes: None,
@@ -231,8 +251,7 @@ pub async fn overview(State(app): State<AppState>, _user: AuthUser) -> Json<Infr
         storage: status.ok().map(|status| status.storage),
         dock: DockView {
             version: env!("CARGO_PKG_VERSION"),
-            release_version: option_env!("LOGNARA_RELEASE_VERSION")
-                .filter(|value| !value.is_empty()),
+            release_version: Some(crate::version::release_version()),
             git_commit: option_env!("LOGNARA_GIT_COMMIT").filter(|value| !value.is_empty()),
             sse_clients: app.live.clients(),
             sessions: sessions.ok(),
@@ -243,11 +262,52 @@ pub async fn overview(State(app): State<AppState>, _user: AuthUser) -> Json<Infr
 }
 
 fn nodes(now: OffsetDateTime, relays: Vec<Relay>, agents: Vec<Agent>) -> Vec<Node> {
+    let host_relays: std::collections::HashMap<_, _> = relays
+        .iter()
+        .filter(|relay| relay.kind == "host")
+        .map(|relay| (relay.id, relay.name.as_str()))
+        .collect();
+    let mut host_agents = std::collections::HashMap::new();
+    let mut regular_agents = Vec::new();
+    for agent in agents {
+        if host_relays
+            .get(&agent.relay_id)
+            .is_some_and(|name| *name == agent.name)
+        {
+            host_agents.insert(agent.relay_id, agent);
+        } else if !host_relays.contains_key(&agent.relay_id) {
+            regular_agents.push(agent);
+        }
+    }
+
     let mut nodes: Vec<Node> = relays
         .into_iter()
         .map(|relay| {
+            let is_host = relay.kind == "host";
+            let kind = if is_host { "host" } else { "relay" };
+            let host_agent = host_agents.remove(&relay.id);
+            let agent_id = host_agent.as_ref().map(|agent| agent.id);
+            let host_heartbeat = host_agent.and_then(|agent| agent.heartbeat);
+            let host_source = host_heartbeat
+                .as_ref()
+                .map(|heartbeat| heartbeat.source.clone());
+            let host_last_event = host_heartbeat
+                .as_ref()
+                .and_then(|heartbeat| heartbeat.last_record_at.clone());
+            let host_version = host_heartbeat.map(|heartbeat| heartbeat.version);
             let Some(beat) = relay.heartbeat else {
-                return silent("relay", relay.id, relay.name, None, None);
+                let mut node = silent(
+                    kind,
+                    relay.id,
+                    relay.name,
+                    is_host.then_some(relay.id),
+                    None,
+                );
+                node.agent_id = agent_id;
+                node.source = host_source;
+                node.last_event_at = host_last_event;
+                node.version = host_version;
+                return node;
             };
             let (status, reason) = assess(
                 now,
@@ -260,24 +320,26 @@ fn nodes(now: OffsetDateTime, relays: Vec<Relay>, agents: Vec<Agent>) -> Vec<Nod
                 ),
             );
             Node {
-                kind: "relay",
+                kind,
                 id: relay.id,
                 name: relay.name,
-                relay_id: None,
+                relay_id: is_host.then_some(relay.id),
+                agent_id,
                 relay: None,
                 status,
                 reason,
                 heartbeat_at: Some(beat.received_at),
-                last_event_at: beat.last_ingest_at,
-                version: Some(beat.version),
+                last_event_at: host_last_event.or(beat.last_ingest_at),
+                version: host_version.or(Some(beat.version)),
+                release_version: beat.release_version,
                 spool: Some(beat.spool),
                 delivery_failures: Some(beat.delivery_failures),
                 events_per_second: Some(beat.events_per_second),
-                source: None,
+                source: host_source,
             }
         })
         .collect();
-    for agent in agents {
+    for agent in regular_agents {
         let relay = nodes
             .iter()
             .find(|node| node.kind == "relay" && node.id == agent.relay_id)
@@ -316,12 +378,14 @@ fn nodes(now: OffsetDateTime, relays: Vec<Relay>, agents: Vec<Agent>) -> Vec<Nod
             id: agent.id,
             name: agent.name,
             relay_id: Some(agent.relay_id),
+            agent_id: Some(agent.id),
             relay: relay_name,
             status,
             reason,
             heartbeat_at: Some(beat.received_at),
             last_event_at: beat.last_record_at,
             version: Some(beat.version),
+            release_version: None,
             spool: Some(beat.spool),
             delivery_failures: Some(beat.delivery_failures),
             events_per_second: None,
@@ -344,12 +408,14 @@ fn silent(
         id,
         name,
         relay_id,
+        agent_id: (kind == "agent").then_some(id),
         relay,
         status: NodeStatus::Unknown,
         reason: Some("no_heartbeat"),
         heartbeat_at: None,
         last_event_at: None,
         version: None,
+        release_version: None,
         spool: None,
         delivery_failures: None,
         events_per_second: None,

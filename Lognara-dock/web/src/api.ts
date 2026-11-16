@@ -154,6 +154,10 @@ export interface MetricAlertDefinition {
   last_point_at: number | null;
   last_as_of: number | null;
   no_recipients: boolean;
+  title?: string | null;
+  description?: string | null;
+  message_template?: string | null;
+  message_fields?: string[];
 }
 export interface MetricAlertSummary {
   enabled: boolean;
@@ -197,6 +201,10 @@ export interface MetricAlertDefinitionInput {
   combine: "and" | "or";
   group_ids: string[];
   triggers: MetricAlertTrigger[];
+  title?: string | null;
+  description?: string | null;
+  message_template?: string | null;
+  message_fields?: string[];
 }
 
 export interface PreviewSample {
@@ -218,6 +226,7 @@ export interface Relay {
   /** `host` - хост-агент со встроенным агентом, отправляет прямо в core. */
   kind?: "relay" | "host";
   created_at: string;
+  heartbeat?: { received_at?: string };
 }
 
 export interface LogAlertText {
@@ -234,6 +243,8 @@ export interface LogAlertInput {
   threshold: number;
   cooldown_seconds: number;
   group_ids: string[];
+  message_template?: string | null;
+  message_fields?: string[];
 }
 
 export interface LogAlert extends LogAlertInput {
@@ -244,6 +255,32 @@ export interface LogAlert extends LogAlertInput {
   last_match_at: number | null;
   last_checked_at: number | null;
   last_sent_at: number | null;
+  message_fields?: string[];
+}
+
+export interface AlertMessagePreviewInput {
+  kind: "metric" | "logs";
+  name: string;
+  title?: string | null;
+  description?: string | null;
+  server?: string | null;
+  service?: string | null;
+  origin?: Origin | null;
+  environment?: string | null;
+  condition?: string | null;
+  value?: string | null;
+  time?: string | null;
+  last_point?: string | null;
+  status?: "firing" | "recovered" | "data_loss" | "error";
+  count?: number;
+  query?: string | null;
+  message_template?: string | null;
+  message_fields: string[];
+}
+
+export interface AlertMessagePreviewReply {
+  html: string;
+  button: boolean;
 }
 
 export interface LogAlertList {
@@ -256,6 +293,7 @@ export interface Agent {
   name: string;
   relay_id: number;
   created_at: string;
+  heartbeat?: { received_at?: string };
 }
 
 const messages: Record<string, string> = {

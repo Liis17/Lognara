@@ -6,11 +6,12 @@ export interface InfraTreeGroup {
   relay: InfraNode | null;
   agents: InfraNode[];
   orphan: boolean;
+  host?: boolean;
 }
 
 export interface InfraTreePosition {
   key: string;
-  kind: "agent" | "relay" | "core" | "dock" | "orphan";
+  kind: "agent" | "relay" | "host" | "core" | "dock" | "orphan";
   x: number;
   y: number;
   width: number;
@@ -46,8 +47,10 @@ function compareRelayId(a: number | null, b: number | null): number {
 export function groupInfrastructure(nodes: InfraNode[]): InfraTreeGroup[] {
   const relays = new Map<number, InfraNode>();
   const agentsByRelay = new Map<number | null, InfraNode[]>();
+  const hosts: InfraNode[] = [];
   for (const node of nodes) {
     if (node.kind === "relay") relays.set(node.id, node);
+    else if (node.kind === "host") hosts.push(node);
     else {
       const agents = agentsByRelay.get(node.relay_id) ?? [];
       agents.push(node);
@@ -67,6 +70,16 @@ export function groupInfrastructure(nodes: InfraNode[]): InfraTreeGroup[] {
     if (relayId !== null && relays.has(relayId)) continue;
     const key = relayId === null ? "orphan-unknown" : `orphan-${relayId}`;
     groups.push({ key, relayId, relay: null, agents: agents.sort((a, b) => a.id - b.id), orphan: true });
+  }
+  for (const host of hosts) {
+    groups.push({
+      key: infraNodeKey(host),
+      relayId: host.relay_id ?? host.id,
+      relay: host,
+      agents: [],
+      orphan: false,
+      host: true,
+    });
   }
   return groups.sort((a, b) => compareRelayId(a.relayId, b.relayId));
 }
@@ -114,7 +127,7 @@ export function layoutInfrastructureTree(
     const height = relayHeight;
     positions.push({
       key: group.relay ? infraNodeKey(group.relay) : group.key,
-      kind: group.orphan ? "orphan" : "relay",
+      kind: group.orphan ? "orphan" : group.host ? "host" : "relay",
       x: RELAY_X,
       y: groupTop + (groupHeight - height) / 2,
       width: RELAY_WIDTH,
@@ -157,6 +170,16 @@ export function infrastructureTreeEdges(layout: InfraTreeLayout): InfraTreeEdge[
   const positions = new Map(layout.positions.map((position) => [position.key, position]));
   const edges: InfraTreeEdge[] = [];
   for (const group of layout.groups) {
+    if (group.host && group.relay) {
+      const host = positions.get(infraNodeKey(group.relay))!;
+      edges.push({
+        key: `${host.key}:core`,
+        from: host.key,
+        to: "core",
+        path: curve(host, positions.get("core")!),
+      });
+      continue;
+    }
     if (!group.relay || group.orphan) continue;
     const relayKey = infraNodeKey(group.relay);
     const relay = positions.get(relayKey)!;
@@ -220,15 +243,19 @@ function relayGroupCount(count: number): string {
 }
 
 function connectedGroupSummary(groups: InfraTreeGroup[]): string {
-  const connected = groups.filter((group) => !group.orphan && group.relay !== null);
+  const connected = groups.filter((group) => !group.orphan && group.relay !== null && !group.host);
   const connectedAgents = connected.reduce((count, group) => count + group.agents.length, 0);
-  return `${relayGroupCount(connected.length)}, ${agentCount(connectedAgents)} в них`;
+  const hosts = groups.filter((group) => group.host).length;
+  return `${relayGroupCount(connected.length)}, ${agentCount(connectedAgents)} в них${hosts ? `, ${hosts} хостов` : ""}`;
 }
 
 export function infrastructureTreeSelectionText(selection: string | null, groups: InfraTreeGroup[]): string {
   if (!selection) return "Выберите карточку, чтобы увидеть её группу и путь.";
   for (const group of groups) {
     if (group.relay && infraNodeKey(group.relay) === selection) {
+      if (group.host) {
+        return `Хост hwagent ${group.relay.name} (#${group.relay.id}) → Core → Dock`;
+      }
       return `Relay ${group.relay.name} (#${group.relay.id}), ${agentCount(group.agents.length)} → Core → Dock`;
     }
     const agent = group.agents.find((candidate) => infraNodeKey(candidate) === selection);

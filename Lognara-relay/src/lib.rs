@@ -7,6 +7,7 @@ pub mod core_wire;
 pub mod model_budget;
 pub mod normalize;
 pub mod spool;
+pub mod version;
 
 mod agents;
 mod heartbeat;

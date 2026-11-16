@@ -131,17 +131,55 @@ const keyOf = ({ server, service, name, origin }: MetricKey): MetricKey => ({
 type ListedMetric = SeriesMetric & { missing?: boolean };
 
 const originText = { counter: "счётчик", gauge: "показатель", rule: "regex" };
+const MINI_PERIODS = {
+  "1h": { label: "1 час", milliseconds: 60 * 60 * 1000, stepSeconds: 60 },
+  "24h": { label: "24 часа", milliseconds: 24 * 60 * 60 * 1000, stepSeconds: 1800 },
+  "7d": { label: "7 дней", milliseconds: 7 * 24 * 60 * 60 * 1000, stepSeconds: 3600 },
+} as const;
+type MiniPeriod = keyof typeof MINI_PERIODS;
+type MetricSource = { server: string; service: string };
+const metricNumber = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 3 });
+
+function groupMetrics(items: ListedMetric[]) {
+  const servers = new Map<string, Map<string, ListedMetric[]>>();
+  for (const item of items) {
+    const services = servers.get(item.server) ?? new Map<string, ListedMetric[]>();
+    const metrics = services.get(item.service) ?? [];
+    metrics.push(item);
+    services.set(item.service, metrics);
+    servers.set(item.server, services);
+  }
+  return [...servers.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([server, services]) => ({
+    server,
+    services: [...services.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([service, metrics]) => ({ service, metrics })),
+  }));
+}
+
+function groupSources(sources: MetricSource[]) {
+  const servers = new Map<string, Set<string>>();
+  for (const { server, service } of sources) {
+    const services = servers.get(server) ?? new Set<string>();
+    services.add(service);
+    servers.set(server, services);
+  }
+  return [...servers.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([server, services]) => ({
+    server,
+    services: [...services].sort(),
+  }));
+}
 
 function Tile({
   metric,
   loader,
   to,
+  period,
   onUnauthorized,
   favorite,
   busy,
   alert,
   alertsEnabled,
   onFavorite,
+  showSource = false,
 }: {
   metric: ListedMetric;
   favorite: boolean;
@@ -149,8 +187,10 @@ function Tile({
   alert: MetricAlertSummary["alerts"][number] | undefined;
   alertsEnabled: boolean;
   onFavorite: (metric: ListedMetric) => void;
+  showSource?: boolean;
   loader: ReturnType<typeof chartLoader>;
   to: number;
+  period: MiniPeriod;
   onUnauthorized: () => void;
 }) {
   const ref = useRef<HTMLElement>(null);
@@ -158,6 +198,7 @@ function Tile({
   const [chart, setChart] = useState<SeriesReply | null>(null);
   const [error, setError] = useState("");
   const disabled = metric.definition?.enabled === false || metric.missing;
+  const miniPeriod = MINI_PERIODS[period];
   useEffect(() => {
     const observer = new IntersectionObserver((entries) => {
       setVisible(entries.some((e) => e.isIntersecting));
@@ -177,9 +218,9 @@ function Tile({
           service: metric.service,
           name: metric.name,
           origin: metric.origin,
-          from: new Date(to - 86400000).toISOString(),
+          from: new Date(to - miniPeriod.milliseconds).toISOString(),
           to: new Date(to).toISOString(),
-          step_seconds: 1800,
+          step_seconds: miniPeriod.stepSeconds,
           split: "none",
         },
         controller.signal,
@@ -196,10 +237,11 @@ function Tile({
     return () => {
       controller.abort();
     };
-  }, [visible, disabled, metric, loader, to]);
+  }, [visible, disabled, metric, loader, to, miniPeriod]);
   const hasValues = chart?.series.some((line) =>
     line.values.some((value) => value !== null),
   );
+  const latestValue = chart?.series[0]?.values.slice().reverse().find((value) => value !== null && Number.isFinite(value));
   return (
     <article
       ref={ref}
@@ -244,11 +286,16 @@ function Tile({
           <strong>{metric.definition?.title || metric.name}</strong>
           <span className="tag">{originText[metric.origin]}</span>
         </div>
+        {showSource && <span className="metric-tile-source">{metric.server} · {metric.service}</span>}
         <span className="muted">
           {metric.name}
           {metric.definition?.unit ? " · " + metric.definition.unit : ""}
         </span>
-        <div className="metric-sparkline" aria-label="Миниграфик за 24 часа">
+        <div className="metric-tile-value" aria-label="Последнее значение">
+          <span>Последнее</span><strong>{latestValue == null ? "—" : metricNumber.format(latestValue)}</strong>
+          <span>{chart?.unit || metric.definition?.unit || ""}</span>
+        </div>
+        <div className="metric-sparkline" aria-label={`Миниграфик за ${miniPeriod.label}`}>
           {disabled ? (
             <span className="muted">
               {metric.missing ? "Метрика недоступна" : "Отключена"}
@@ -257,7 +304,7 @@ function Tile({
             <span className="error">{error}</span>
           ) : !chart ? (
             <span className="muted">
-              {visible ? "Загрузка…" : "За 24 часа"}
+              {visible ? "Загрузка…" : miniPeriod.label}
             </span>
           ) : hasValues ? (
             <Chart
@@ -267,7 +314,7 @@ function Tile({
               unit={chart.unit}
             />
           ) : (
-            <span className="muted">За 24 часа данных нет</span>
+            <span className="muted">За выбранный период данных нет</span>
           )}
         </div>
       </Link>
@@ -278,6 +325,7 @@ function Tile({
 type TileContext = {
   loader: ReturnType<typeof chartLoader>;
   to: number;
+  period: MiniPeriod;
   onUnauthorized: () => void;
   favorites: Set<string>;
   busy: Set<string>;
@@ -288,9 +336,11 @@ type TileContext = {
 function Grid({
   items,
   context,
+  showSource = false,
 }: {
   items: ListedMetric[];
   context: TileContext;
+  showSource?: boolean;
 }) {
   return (
     <div className="metric-grid">
@@ -300,12 +350,14 @@ function Grid({
           metric={metric}
           loader={context.loader}
           to={context.to}
+          period={context.period}
           onUnauthorized={context.onUnauthorized}
           favorite={context.favorites.has(metricKey(metric))}
           busy={context.busy.has(metricKey(metric))}
           alert={context.alerts.get(metricKey(metric))}
           alertsEnabled={context.alertsEnabled}
           onFavorite={context.onFavorite}
+          showSource={showSource}
         />
       ))}
     </div>
@@ -373,20 +425,10 @@ function ServiceSection(props: {
   context: TileContext;
 }) {
   const [open, setOpen] = useState(false);
-  return (
-    <section className="metric-service">
-      <h4>
-        <button
-          className="metric-disclosure"
-          aria-expanded={open}
-          onClick={() => setOpen(!open)}
-        >
-          {open ? "▾" : "▸"} {props.service}
-        </button>
-      </h4>
-      {open && <ServiceCatalog {...props} />}
-    </section>
-  );
+  return <details className="metric-service-group" onToggle={(event) => setOpen(event.currentTarget.open)}>
+    <summary>{props.service}</summary>
+    {open && <div className="metric-service-content"><ServiceCatalog {...props} /></div>}
+  </details>;
 }
 function ServerSection({
   server,
@@ -400,90 +442,12 @@ function ServerSection({
   context: TileContext;
 }) {
   const [open, setOpen] = useState(false);
-  return (
-    <section className="metric-server">
-      <h3>
-        <button
-          className="metric-disclosure"
-          aria-expanded={open}
-          onClick={() => setOpen(!open)}
-        >
-          {open ? "▾" : "▸"} {server || "Сервер без имени"}
-        </button>
-      </h3>
-      {open &&
-        services.map((service) => (
-          <ServiceSection
-            key={service}
-            server={server}
-            service={service}
-            generation={generation}
-            context={context}
-          />
-        ))}
-    </section>
-  );
-}
-function OtherMetrics({
-  generation,
-  context,
-}: {
-  generation: number;
-  context: TileContext;
-}) {
-  const [sources, setSources] = useState<{ server: string; service: string }[]>(
-    [],
-  );
-  const [ready, setReady] = useState(false);
-  const [error, setError] = useState("");
-  useEffect(() => {
-    const controller = new AbortController();
-    setError("");
-    api<{ sources: typeof sources }>("GET", "/api/series/sources", undefined, {
-      signal: controller.signal,
-    })
-      .then((reply) => {
-        if (!controller.signal.aborted) {
-          setSources(reply.sources);
-          setReady(true);
-        }
-      })
-      .catch((e) => {
-        if (!controller.signal.aborted) {
-          if (e instanceof ApiError && e.status === 401)
-            context.onUnauthorized();
-          else setError(errorText(e));
-        }
-      });
-    return () => controller.abort();
-  }, [generation]);
-  const servers = [...new Set(sources.map((s) => s.server))].sort();
-  return (
-    <>
-      {error && (
-        <p role="alert" className="error">
-          {error}
-        </p>
-      )}
-      {!ready && !error && <p className="muted">Загрузка…</p>}
-      {ready && !sources.length && (
-        <p className="muted">Источников метрик пока нет.</p>
-      )}
-      {servers.map((server) => (
-        <ServerSection
-          key={server}
-          server={server}
-          services={[
-            ...new Set(
-              sources.filter((s) => s.server === server).map((s) => s.service),
-            ),
-          ].sort()}
-          generation={generation}
-          context={context}
-        />
-      ))}
-    </>
-  );
+  return <details className="metric-server-group" onToggle={(event) => setOpen(event.currentTarget.open)}>
+    <summary>{server || "Сервер без имени"}<span className="muted"> · {services.length} сервисов</span></summary>
+    {open && <div className="metric-server-services">{services.map((service) => <ServiceSection
+      key={service} server={server} service={service} generation={generation} context={context}
+    />)}</div>}
+  </details>;
 }
 export default function Metrics({
   onUnauthorized,
@@ -495,7 +459,13 @@ export default function Metrics({
   const [error, setError] = useState("");
   const [creating, setCreating] = useState(false);
   const [generation, setGeneration] = useState(0);
-  const [othersOpen, setOthersOpen] = useState(false);
+  const [sources, setSources] = useState<MetricSource[]>([]);
+  const [sourcesReady, setSourcesReady] = useState(false);
+  const [search, setSearch] = useState("");
+  const [searchCatalog, setSearchCatalog] = useState<SeriesMetric[] | null>(null);
+  const [searchReady, setSearchReady] = useState(false);
+  const [serverFilter, setServerFilter] = useState("");
+  const [period, setPeriod] = useState<MiniPeriod>("24h");
   const [busy, setBusy] = useState(new Set<string>());
   const [alertSummary, setAlertSummary] = useState<MetricAlertSummary>({
     enabled: false,
@@ -556,6 +526,56 @@ export default function Metrics({
     return () => controller.abort();
   }, [generation]);
   useEffect(() => {
+    const controller = new AbortController();
+    setSourcesReady(false);
+    api<{ sources: MetricSource[] }>("GET", "/api/series/sources", undefined, { signal: controller.signal })
+      .then((reply) => {
+        if (!controller.signal.aborted) {
+          setSources(reply.sources);
+          setSourcesReady(true);
+        }
+      })
+      .catch((e) => {
+        if (!controller.signal.aborted) {
+          if (e instanceof ApiError && e.status === 401) onUnauthorized();
+          else setError(errorText(e));
+        }
+      });
+    return () => controller.abort();
+  }, [generation, onUnauthorized]);
+  useEffect(() => {
+    const needle = search.trim();
+    if (!needle) {
+      setSearchCatalog(null);
+      setSearchReady(true);
+      return;
+    }
+    const controller = new AbortController();
+    setSearchReady(false);
+    const timeout = window.setTimeout(() => {
+      const query = new URLSearchParams({ group_by: "server" });
+      if (serverFilter) query.set("server", serverFilter);
+      api<{ metrics: SeriesMetric[] }>("GET", `/api/series?${query}`, undefined, { signal: controller.signal })
+        .then((reply) => {
+          if (!controller.signal.aborted) {
+            setSearchCatalog(reply.metrics);
+            setSearchReady(true);
+          }
+        })
+        .catch((e) => {
+          if (!controller.signal.aborted) {
+            if (e instanceof ApiError && e.status === 401) onUnauthorized();
+            else setError(errorText(e));
+            setSearchReady(true);
+          }
+        });
+    }, 180);
+    return () => {
+      window.clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [search, serverFilter, generation, onUnauthorized]);
+  useEffect(() => {
     let active = true;
     loadAlertSummary()
       .then((summary) => {
@@ -603,6 +623,7 @@ export default function Metrics({
   const context: TileContext = {
     loader,
     to,
+    period,
     onUnauthorized,
     favorites,
     busy,
@@ -615,68 +636,70 @@ export default function Metrics({
     alertsEnabled: alertSummary.enabled,
     onFavorite,
   };
-  const servers = [...new Set(items.map((m) => m.server))].sort();
+  const needle = search.trim().toLocaleLowerCase();
+  const matches = (metric: SeriesMetric) => !needle || [metric.name, metric.definition?.title,
+    metric.definition?.description, metric.service, metric.server]
+    .some((value) => value?.toLocaleLowerCase().includes(needle));
+  const visibleFavorites = items.filter((metric) => (!serverFilter || metric.server === serverFilter) && matches(metric));
+  const visibleSources = sources.filter((source) => !serverFilter || source.server === serverFilter);
+  const sourceGroups = groupSources(visibleSources);
+  const serverOptions = [...new Set([...sources.map((source) => source.server), ...items.map((item) => item.server)])].sort();
+  const searchMatches = (searchCatalog ?? []).filter((metric) => (!serverFilter || metric.server === serverFilter) && matches(metric));
+  const searchResults = searchMatches.filter((metric) => !favorites.has(metricKey(metric)));
   return (
     <section className="metrics metrics-overview">
-      <div className="toolbar">
+      <div className="toolbar metrics-toolbar">
         <h1>Метрики</h1>
         <button onClick={() => setCreating(true)}>Новая метрика</button>
         <button onClick={refresh} disabled={busy.size > 0}>
           Обновить
         </button>
-        <span className="muted">Миниграфики за 24 часа</span>
+      </div>
+      <div className="metric-filters">
+        <label>Поиск метрики, сервиса или сервера<input type="search" aria-label="Поиск метрики, сервиса или сервера"
+          value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Например, requests или billing" /></label>
+        <label>Сервер<select aria-label="Фильтр по серверу" value={serverFilter} onChange={(event) => setServerFilter(event.target.value)}>
+          <option value="">Все серверы</option>
+          {serverOptions.map((server) => <option key={server} value={server}>{server || "Сервер без имени"}</option>)}
+        </select></label>
+        <label>Период миниграфиков<select aria-label="Период миниграфиков" value={period} onChange={(event) => setPeriod(event.target.value as MiniPeriod)}>
+          {Object.entries(MINI_PERIODS).map(([key, value]) => <option key={key} value={key}>{value.label}</option>)}
+        </select></label>
       </div>
       {error && (
         <p className="error" role="alert">
           {error}
         </p>
       )}
-      <section aria-label="Избранные метрики">
-        <h2>Избранные метрики</h2>
+      <section className="metric-favorites" aria-label="Избранные метрики">
+        <h2>Избранное</h2>
         {!ready && <p className="muted">Загрузка…</p>}
-        {ready && !error && !items.length && (
+        {ready && !error && !visibleFavorites.length && (
           <p className="muted">
-            Избранных метрик пока нет. Раскройте остальные метрики и нажмите
-            звёздочку на нужной карточке.
+            {items.length ? "По выбранным условиям избранных метрик нет." : "Избранных метрик пока нет. Отметьте звёздочкой нужную карточку в списке."}
           </p>
         )}
-        {servers.map((server) => (
-          <section className="metric-server" key={server}>
-            <h3>{server || "Сервер без имени"}</h3>
-            {[
-              ...new Set(
-                items.filter((m) => m.server === server).map((m) => m.service),
-              ),
-            ]
-              .sort()
-              .map((service) => (
-                <section className="metric-service" key={service}>
-                  <h4>{service}</h4>
-                  <Grid
-                    items={items.filter(
-                      (m) => m.server === server && m.service === service,
-                    )}
-                    context={context}
-                  />
-                </section>
-              ))}
-          </section>
-        ))}
+        {visibleFavorites.length > 0 && <Grid items={visibleFavorites} context={context} showSource />}
       </section>
-      <section aria-label="Остальные метрики">
-        <h2>
-          <button
-            className="metric-disclosure"
-            aria-expanded={othersOpen}
-            onClick={() => setOthersOpen(!othersOpen)}
-          >
-            {othersOpen ? "▾" : "▸"} Остальные метрики
-          </button>
-        </h2>
-        {othersOpen && (
-          <OtherMetrics generation={generation} context={context} />
-        )}
-      </section>
+      {needle ? <section className="metric-search-results" aria-label="Результаты поиска">
+        <h2>Результаты поиска</h2>
+        {!searchReady && <p className="muted" role="status">Ищем метрики…</p>}
+        {searchReady && <p className="muted metric-search-summary">Найдено {searchMatches.length} метрик; избранные показаны выше.</p>}
+        {searchReady && !searchResults.length && <p className="muted">Других метрик по этому запросу нет.</p>}
+        {groupMetrics(searchResults).map(({ server, services }) => <details className="metric-server-group" key={server} open>
+          <summary>{server || "Сервер без имени"}<span className="muted"> · {services.reduce((count, service) => count + service.metrics.length, 0)} метрик</span></summary>
+          <div className="metric-server-services">{services.map(({ service, metrics }) => <details className="metric-service-group" key={service} open>
+            <summary>{service}<span className="muted"> · {metrics.length} метрик</span></summary>
+            <div className="metric-service-content"><Grid items={metrics} context={context} /></div>
+          </details>)}</div>
+        </details>)}
+      </section> : <section className="metric-catalog" aria-label="Все метрики">
+        <h2>Все метрики</h2>
+        {!sourcesReady && <p className="muted" role="status">Загружаем серверы и сервисы…</p>}
+        {sourcesReady && !sourceGroups.length && <p className="muted">Источников метрик пока нет.</p>}
+        {sourceGroups.map(({ server, services }) => <ServerSection key={server} server={server}
+          services={services} generation={generation} context={context} />)}
+      </section>}
       {creating && (
         <MetricCreate
           onClose={() => setCreating(false)}

@@ -2,7 +2,6 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router";
 import { api, ApiError, errorText } from "../api";
 import { withPatternFilter } from "../logs";
-import PeriodChips from "./PeriodChips";
 import type { ParsedQuery } from "../logs";
 import type { HistogramBucket, MessagePattern, PatternDetailsResponse, PatternPart, PatternRequest, PatternResponse, PatternSort } from "../types";
 
@@ -10,7 +9,7 @@ const number = new Intl.NumberFormat("ru-RU");
 const percent = new Intl.NumberFormat("ru-RU", { style: "percent", maximumFractionDigits: 1 });
 const date = new Intl.DateTimeFormat("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
 const stamp = (value: string) => date.format(new Date(value));
-const growth = (pattern: MessagePattern) => pattern.previous_count === 0 ? "Нет в прошлом окне" :
+const growth = (pattern: MessagePattern) => pattern.previous_count === 0 ? "Нет в прошлом периоде" :
   `${(pattern.growth_percent ?? 0) > 0 ? "+" : ""}${number.format(pattern.growth_percent ?? 0)}%`;
 // Заметный рост выделяется акцентом, заметное снижение зелёным.
 const growthTone = (pattern: MessagePattern) => pattern.previous_count === 0 || pattern.growth_percent === null ? "" :
@@ -38,27 +37,34 @@ function PatternDetails({ details, eventLink }: { details: PatternDetailsRespons
   const { pattern } = details;
   return <>
     <dl className="pattern-metadata">
-      <div><dt>События</dt><dd>{number.format(pattern.count)} · {percent.format(pattern.share)} всех совпадений</dd></div>
+      <div><dt>События</dt><dd>{number.format(pattern.count)} · {percent.format(pattern.share)} диапазона</dd></div>
       <div><dt>Прошлое окно</dt><dd>{number.format(pattern.previous_count)} · {growth(pattern)}</dd></div>
-      <div><dt>Первое в известной истории</dt><dd><time dateTime={pattern.first_seen} title={pattern.first_seen}>{stamp(pattern.first_seen)}</time></dd></div>
+      <div><dt>Впервые</dt><dd><time dateTime={pattern.first_seen} title={pattern.first_seen}>{stamp(pattern.first_seen)}</time></dd></div>
       <div><dt>Последнее в диапазоне</dt><dd><time dateTime={pattern.last_seen} title={pattern.last_seen}>{stamp(pattern.last_seen)}</time></dd></div>
-      <div><dt>Новизна</dt><dd>{pattern.is_new === null ? "Не установлена: история неполна" : pattern.is_new ? "Новый в выбранном диапазоне" : "Встречался раньше"}</dd></div>
-      <div><dt>Область</dt><dd>{pattern.environment === null ? "environment не задан" : `environment: ${JSON.stringify(pattern.environment)}`} · {pattern.service} · {pattern.level.toUpperCase()}</dd></div>
+      <div><dt>Новизна</dt><dd>{pattern.is_new === null
+        ? <span title="Индекс обработал не всю историю">Неизвестна</span> : pattern.is_new ? "Новый за период" : "Был раньше"}</dd></div>
+      <div><dt>Сервис</dt><dd>{pattern.environment ?? "Без окружения"} · {pattern.service} · {pattern.level.toUpperCase()}</dd></div>
     </dl>
-    {pattern.exact && <p className="page-note">Точное сообщение: нормализация не применялась из-за размера или числа переменных. Предпросмотр может быть сокращён; ID учитывает полный текст.</p>}
+    {pattern.exact && <p className="page-note">Полный текст сохранён без нормализации; предпросмотр может быть короче.</p>}
     <div className="pattern-detail-grid">
-      <div><h3>Значения переменных</h3>
+      <div><h3>Частые значения</h3>
         {!details.variables.length && <p className="muted">В этом паттерне нет нормализованных переменных.</p>}
         {details.variables.map((variable) => <div className="pattern-values" key={variable.name}>
           <h4>{variable.name} <span className="muted">· {variable.variable_type} · {number.format(variable.total)} значений</span></h4>
-          <ul>{variable.values.map((value) => <li key={value.value}>
-            <code>{value.value}</code><span className="pattern-track" aria-hidden="true"><i style={{ width: `${variable.total ? value.count / variable.total * 100 : 0}%` }} /></span>
-            <span className="pattern-value-count">{number.format(value.count)} <span className="muted">({percent.format(variable.total ? value.count / variable.total : 0)})</span></span>
-          </li>)}</ul>
-          <p className="page-note">Остальные значения: {number.format(variable.other_count)}. Топ значений рассчитан по всем событиям этого паттерна в диапазоне.</p>
+          {variable.total >= 8 && variable.values.length > 0 && variable.values.every((value) => value.count === 1) ? <div className="pattern-cardinality">
+            <strong>{number.format(variable.total)} уникальных значений</strong>
+            <span className="muted">Примеры</span>
+            <ul>{variable.values.slice(0, 3).map((value) => <li key={value.value}><code>{value.value}</code></li>)}</ul>
+          </div> : <>
+            <ul>{variable.values.map((value) => <li key={value.value}>
+              <code>{value.value}</code><span className="pattern-track" aria-hidden="true"><i style={{ width: `${variable.total ? value.count / variable.total * 100 : 0}%` }} /></span>
+              <span className="pattern-value-count">{number.format(value.count)} <span className="muted">({percent.format(variable.total ? value.count / variable.total : 0)})</span></span>
+            </li>)}</ul>
+            {!!variable.other_count && <p className="page-note">Ещё {number.format(variable.other_count)} значений.</p>}
+          </>}
         </div>)}
       </div>
-      <div><h3>Реальные примеры · до 3 событий</h3>
+      <div><h3>Примеры сообщений</h3>
         <div className="pattern-examples">{details.examples.map((event, index) => <details key={`${event.id}:${index}`}>
           <summary><time dateTime={event.timestamp} title={event.timestamp}>{stamp(event.timestamp)}</time><code>{event.message}</code></summary>
           <pre className="json">{JSON.stringify(event, null, 2)}</pre>
@@ -68,9 +74,9 @@ function PatternDetails({ details, eventLink }: { details: PatternDetailsRespons
           <tbody>{pattern.buckets.map((bucket) => <tr key={bucket.timestamp}><td>{bucket.timestamp}</td><td>{number.format(bucket.count)}</td></tr>)}</tbody>
         </table></details>
       </div>
-      <div className="actions"><Link className="button solid" to={eventLink}>Все события ({number.format(pattern.count)})</Link></div>
+      <div className="actions"><Link className="button solid" to={eventLink}>Показать {number.format(pattern.count)} событий</Link></div>
     </div>
-    <p className="page-note">Снимок деталей: <time dateTime={details.as_of}>{details.as_of}</time>. Примеры не используются для подсчёта частот.</p>
+    <p className="page-note" title={`Снимок ${details.as_of}`}>Примеры не влияют на счётчики.</p>
   </>;
 }
 
@@ -153,16 +159,17 @@ export default function Patterns({ from, to, range, q, query, error, intervalSec
     <div className="summary"><h1>Паттерны</h1>
       {response && <div className="chips">
         <span className="chip">{number.format(response.total_events)} событий</span><span className="chip">{number.format(response.total_patterns)} паттернов</span>
-        <span className="chip">Новых: {response.new_patterns === null ? "не установлено" : number.format(response.new_patterns)}</span>
+        <span className="chip">Новых: {response.new_patterns === null ? <span title="История индекса обработана не полностью">неизвестно</span> : number.format(response.new_patterns)}</span>
       </div>}
-      <p className="muted">Доли считаются от всех совпавших событий, включая скрытые паттерны</p>
     </div>
-    <PeriodChips from={from} to={to} />
-    <p className="page-note pattern-intro">Сравнение — с соседним прошлым окном такой же длины и тем же запросом. Отсутствие в прошлом окне не означает новизну.</p>
+    <p className="page-note pattern-intro">Доля — от всех подходящих событий. Рост сравнивается с предыдущим периодом такой же длины.</p>
     {response && <div className="pattern-coverage" role="status">
-      <p>Известная история: {response.history_from ? <time dateTime={response.history_from} title={response.history_from}>{stamp(response.history_from)}</time> : "ещё не обработана"} · {response.history_complete ? "полная" : "неполная: новизна части паттернов не установлена"}.</p>
-      <p>Обработано до <time dateTime={response.as_of}>{response.as_of}</time> · watermark {number.format(response.watermark)} / {number.format(response.core_watermark)}.
-        {response.core_watermark > response.watermark ? ` Есть отставание индекса: ${number.format(response.core_watermark - response.watermark)} публикаций.` : " Индекс догнал доступные публикации."}</p>
+      <span className={`pattern-index-chip ${response.history_complete ? "complete" : "partial"}`}
+        title={`Известная история с ${response.history_from ?? "не определена"}; обработано до ${response.as_of}; watermark ${number.format(response.watermark)} / ${number.format(response.core_watermark)}${response.core_watermark > response.watermark ? `; отставание ${number.format(response.core_watermark - response.watermark)} публикаций` : ""}`}>
+        {response.history_complete ? "История полная" : "История обновляется"}
+      </span>
+      <span>Обновлено {stamp(response.as_of)}</span>
+      {response.core_watermark > response.watermark && <span className="muted">Индекс догоняет данные</span>}
     </div>}
     {(validation || listError) && <p className="error" role="alert">{validation || listError}</p>}
     {actionError && <p className="error" role="alert">Не удалось изменить видимость: {actionError}</p>}
@@ -194,8 +201,9 @@ export default function Patterns({ from, to, range, q, query, error, intervalSec
       </table></div>
       {!response?.patterns.length && <p className="empty-state" role="status">{loading ? "Загружаем паттерны…" : validation || listError ? "Запрос паттернов не выполнен." :
         response && response.visible_patterns === 0 && response.total_patterns > 0 ? "Все совпавшие паттерны скрыты. Включите «Показывать скрытые»." : "В выбранном диапазоне паттернов нет."}</p>}
-      {response && <div className="table-footer">Показано {response.patterns.length} из {number.format(response.visible_patterns)} видимых паттернов · максимум 100.
-        {response.visible_patterns > response.patterns.length ? " Измените запрос, чтобы найти остальные." : ""} Алгоритм v{response.algorithm_version}.</div>}
+      {response && <div className="table-footer" title={`Алгоритм нормализации v${response.algorithm_version}`}>
+        Показано {response.patterns.length} из {number.format(response.visible_patterns)}. Максимум 100.
+        {response.visible_patterns > response.patterns.length ? " Уточните запрос, чтобы найти остальные." : ""}</div>}
     </section>
   </div>;
 }

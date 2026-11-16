@@ -1,15 +1,15 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router";
 import { api, ApiError, errorText } from "../api";
+import DateRangePicker from "../components/DateRangePicker";
 import EventsChart from "../components/EventsChart";
 import Patterns from "../components/Patterns";
-import PeriodChips from "../components/PeriodChips";
 import { appendHistory, contextBounds, eventBounds, eventsToCsv, LOG_LEVELS, matchesQuery, MAX_LIVE_ROWS,
   parseQuery, prependLive, sourceQuery } from "../logs";
 import type { ParsedQuery } from "../logs";
 import type { HistogramResponse, LogEvent, LogLevel, SearchRequest, SearchResponse, SummaryResponse } from "../types";
 
-const RANGES = { "1h": 3_600_000, "24h": 86_400_000, "7d": 604_800_000 };
+const RANGES = { "15m": 900_000, "1h": 3_600_000, "6h": 21_600_000, "24h": 86_400_000, "7d": 604_800_000 };
 type Range = keyof typeof RANGES;
 type Status = "connecting" | "live" | "core_error" | "disconnected";
 const STATUS_TEXT: Record<Status, string> = {
@@ -27,7 +27,7 @@ function eventTime(timestamp: string): string {
 }
 
 function logAlertParams(query: string, nodeFilters: { relay_id: string[]; agent_id: string[] }): URLSearchParams {
-  const params = new URLSearchParams({ q: query });
+  const params = new URLSearchParams({ tab: "rules", type: "logs", q: query });
   for (const field of ["relay_id", "agent_id"] as const) {
     for (const value of nodeFilters[field]) params.append(field, value);
   }
@@ -69,13 +69,18 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
       q: params.get("q") ?? "", range,
       from: params.get("from") ?? new Date(now - RANGES[range]).toISOString(),
       to: params.get("to") ?? new Date(now).toISOString(),
+      levelSelection: params.get("levels") ?? "",
+      visibleLevels: new Set<LogLevel>(params.get("levels") === "none" ? [] :
+        params.get("levels") === null ? LOG_LEVELS : (params.get("levels") ?? "").split(",")
+          .filter((level): level is LogLevel => LOG_LEVELS.some((item) => item === level))),
       traceId: params.get("trace_id") ?? "", selected: params.get("selected"),
       selectedTimestamp: params.get("selected_timestamp"),
       occurrence: /^\d{1,6}$/.test(params.get("selected_occurrence") ?? "") ? Number(params.get("selected_occurrence")) : 0,
       nodeFilters: { relay_id: params.getAll("relay_id"), agent_id: params.getAll("agent_id") },
     };
   }, [paramsKey]);
-  const queryKey = JSON.stringify([location.view, location.q, location.range, location.from, location.to, location.traceId, location.nodeFilters]);
+  const queryKey = JSON.stringify([location.view, location.q, location.range, location.from, location.to,
+    location.traceId, location.levelSelection, location.nodeFilters]);
   const parsed = useMemo((): { query: ParsedQuery; error: string } => {
     if (!(Number.isFinite(Date.parse(location.from)) && Number.isFinite(Date.parse(location.to))) ||
         Date.parse(location.from) >= Date.parse(location.to)) {
@@ -84,9 +89,9 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
     if (location.view === "trace" && location.q) return {
       query: { filters: {} }, error: "Trace принимает только trace_id. Для фильтров запроса перейдите в режим «События».",
     };
-    if (location.view === "trace") return TRACE_ID.test(location.traceId) ?
+    if (location.view === "trace") return !location.traceId ? { query: { filters: {} }, error: "" } : TRACE_ID.test(location.traceId) ?
       { query: { filters: { trace_id: [location.traceId.toLowerCase()] } }, error: "" } :
-      { query: { filters: {} }, error: "Введите Trace ID: 32 шестнадцатеричных символа." };
+      { query: { filters: {} }, error: "Trace ID должен содержать 32 шестнадцатеричных символа." };
     try {
       const query = parseQuery(location.q);
       for (const field of ["relay_id", "agent_id"] as const) {
@@ -98,9 +103,22 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
     catch (error) { return { query: { filters: {} }, error: error instanceof Error ? error.message : String(error) }; }
   }, [queryKey]);
   const coreOnly = !!(parsed.query.filters.pattern_id || parsed.query.filters.fingerprint);
+  const traceInputEmpty = location.view === "trace" && !location.traceId;
+  const traceWithoutQuery = location.view === "trace" && (traceInputEmpty || !!parsed.error);
+  const requestedLevels = parsed.query.filters.level as LogLevel[] | undefined;
+  const effectiveLevels = location.view === "events" ? LOG_LEVELS.filter((level) =>
+    location.visibleLevels.has(level) && (!requestedLevels || requestedLevels.includes(level))) : [];
+  const emptyLevelIntersection = location.view === "events" && effectiveLevels.length === 0;
+  const effectiveQuery = (() => {
+    if (location.view !== "events") return parsed.query;
+    const filters = { ...parsed.query.filters };
+    if (requestedLevels) filters.level = effectiveLevels;
+    else if (effectiveLevels.length < LOG_LEVELS.length) filters.level = effectiveLevels;
+    return { ...parsed.query, filters };
+  })();
   const [draft, setDraft] = useState(location.view === "trace" ? location.traceId : location.q);
   const [page, setPage] = useState<SearchResponse>(emptyPage);
-  const [loading, setLoading] = useState(!parsed.error);
+  const [loading, setLoading] = useState(!parsed.error && !traceInputEmpty && !emptyLevelIntersection);
   const [paging, setPaging] = useState(false);
   const [searchError, setSearchError] = useState("");
   const [expired, setExpired] = useState(false);
@@ -132,19 +150,18 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
   const upperMillis = Date.parse(location.to) + (/[1-9]/.test(toFraction.slice(3)) ? 1 : 0);
   const bucketCount = Math.ceil(upperMillis / intervalMillis) - Math.floor(Date.parse(location.from) / intervalMillis);
   const summaryUnavailable = location.view === "events" && bucketCount > 10000;
-  const [hiddenLevels, setHiddenLevels] = useState<ReadonlySet<LogLevel>>(new Set());
-  const toggleLevel = (level: LogLevel) => setHiddenLevels((current) => {
-    const next = new Set(current);
-    if (!next.delete(level)) next.add(level);
-    return next;
-  });
   const rows = liveEnabled ? liveRows : page.events;
-  const visibleCount = rows.filter((event) => !hiddenLevels.has(event.level)).length;
+  const visibleCount = rows.length;
   const selectedIndex = rows.reduce<number[]>((indices, event, index) => {
     if (event.id === location.selected && (!location.selectedTimestamp || event.timestamp === location.selectedTimestamp)) indices.push(index);
     return indices;
   }, [])[location.occurrence] ?? -1;
   const fixedRange = Date.parse(location.to) - Date.parse(location.from) !== RANGES[location.range];
+  const validPickerRange = Number.isFinite(Date.parse(location.from)) && Number.isFinite(Date.parse(location.to)) &&
+    Date.parse(location.from) < Date.parse(location.to);
+  const pickerRange = validPickerRange ? { from: location.from, to: location.to } : {
+    from: new Date(Date.now() - RANGES[location.range]).toISOString(), to: new Date().toISOString(),
+  };
 
   const updateLocation = (values: Record<string, string | null>, replace = false) => {
     setParams((current) => {
@@ -155,6 +172,14 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
       if (values.selected === null) { next.delete("selected_timestamp"); next.delete("selected_occurrence"); }
       return next;
     }, { replace });
+  };
+  const toggleLevel = (level: LogLevel) => {
+    const next = new Set(location.visibleLevels);
+    if (!next.delete(level)) next.add(level);
+    updateLocation({
+      levels: next.size === LOG_LEVELS.length ? null : next.size ? [...next].join(",") : "none",
+      selected: null,
+    });
   };
   useEffect(() => {
     if (!params.has("from") || !params.has("to") || !params.has("view") || !params.has("range")) {
@@ -172,7 +197,7 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
       return api<SearchResponse>("GET", `/api/traces/${encodeURIComponent(location.traceId.toLowerCase())}?${query}`, undefined, { signal });
     }
     const request: SearchRequest = {
-      from: location.from, to: location.to, ...parsed.query, limit: 50, ...(cursor ? { cursor } : {}),
+      from: location.from, to: location.to, ...effectiveQuery, limit: 50, ...(cursor ? { cursor } : {}),
     };
     return api<SearchResponse>("POST", "/api/logs/search", request, { signal });
   };
@@ -185,12 +210,12 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
     const controller = new AbortController();
     pagingAbort.current?.abort();
     // Паттерны загружает отдельный компонент со своим серверным запросом.
-    const enabled = !parsed.error && location.view !== "patterns";
+    const enabled = !parsed.error && !traceInputEmpty && !emptyLevelIntersection && location.view !== "patterns";
     setPage(emptyPage); setSummary(null); setSearchError(""); setExpired(false); setPaging(false); setLoading(enabled);
     if (enabled) {
       const request = location.view === "events" && !summaryUnavailable
         ? api<SummaryResponse>("POST", "/api/stats/summary", {
-          from: location.from, to: location.to, ...parsed.query,
+          from: location.from, to: location.to, ...effectiveQuery,
           interval_seconds: intervalSeconds, search_limit: 50,
         }, { signal: controller.signal }).then((response) => {
           if (!controller.signal.aborted && current === generation.current) {
@@ -209,7 +234,7 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
   useEffect(() => {
     const controller = new AbortController();
     setHistogram(null); setHistogramError("");
-    const enabled = !parsed.error && location.view === "trace";
+    const enabled = !parsed.error && !traceInputEmpty && location.view === "trace";
     setHistogramLoading(enabled);
     if (enabled) api<HistogramResponse>("POST", "/api/stats/histogram", {
       from: location.from, to: location.to, filters: parsed.query.filters, interval_seconds: intervalSeconds,
@@ -238,7 +263,7 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
       setSelectionNote(errorText(error)); return () => controller.abort();
     }
     api<SearchResponse>("POST", "/api/logs/search", {
-      ...bounds, ...parsed.query,
+      ...bounds, ...effectiveQuery,
       filters: { ...parsed.query.filters, id: [selected] }, limit: 1000,
     }, { signal: controller.signal }).then((response) => {
       if (controller.signal.aborted) return;
@@ -257,7 +282,7 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
   }, [location.selected, location.selectedTimestamp, location.occurrence, selectedIndex, queryKey, page.events, loading, liveEnabled, parsed.error]);
   useEffect(() => {
     pausedRef.current = false; setPaused(false); pending.current = []; setPendingCount(0); setLiveRows([]); setLiveNotice("");
-    if (location.view !== "events" || parsed.error || coreOnly) { setLiveEnabled(false); return; }
+    if (location.view !== "events" || parsed.error || coreOnly || emptyLevelIntersection) { setLiveEnabled(false); return; }
     if (!liveEnabled) return;
     const source = new EventSource("/api/logs/stream");
     const seen = new Set<string>();
@@ -270,11 +295,11 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
       try { batch = JSON.parse(message.data) as LogEvent[]; }
       catch { setLiveNotice("Не удалось прочитать Live. Обновите историю для проверки событий."); return; }
       setStatus((current) => current === "core_error" ? current : "live");
-      const oldest = Date.now() - RANGES[location.range];
+      const oldest = Date.now() - (Date.parse(location.to) - Date.parse(location.from));
       const fresh = batch.filter((event) => {
         if (seen.has(event.id)) return false;
         seen.add(event.id);
-        return Date.parse(event.timestamp) >= oldest && matchesQuery(event, parsed.query);
+        return Date.parse(event.timestamp) >= oldest && matchesQuery(event, effectiveQuery);
       });
       matchedCount += fresh.length;
       while (seen.size > MAX_LIVE_ROWS * 2) seen.delete(seen.values().next().value!);
@@ -342,6 +367,11 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
   const setRange = (range: Range) => {
     const to = Date.now(); updateLocation({ range, from: new Date(to - RANGES[range]).toISOString(), to: new Date(to).toISOString(), selected: null });
   };
+  const setDateRange = (from: string, to: string) => {
+    const duration = Date.parse(to) - Date.parse(from);
+    const preset = Object.entries(RANGES).find(([, milliseconds]) => Math.abs(milliseconds - duration) < 1000)?.[0] as Range | undefined;
+    updateLocation({ from, to, range: preset ?? location.range, selected: null });
+  };
   const refreshHistory = () => { setRange(location.range); restart(); };
   const openContext = (event: LogEvent) => {
     setLiveEnabled(false);
@@ -355,6 +385,7 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
   const copyLink = async (event: LogEvent) => {
     const query = new URLSearchParams({ view: location.view, range: location.range, q: location.q,
       from: location.from, to: location.to, selected: event.id });
+    if (location.levelSelection) query.set("levels", location.levelSelection);
     query.set("selected_timestamp", event.timestamp);
     query.set("selected_occurrence", String(location.occurrence));
     if (location.view === "trace") query.set("trace_id", location.traceId);
@@ -409,17 +440,20 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
       <label className="sr-only" htmlFor="log-range">Период</label>
       <select id="log-range" value={fixedRange ? "fixed" : location.range} onChange={(event) => setRange(event.target.value as Range)}>
         {fixedRange && <option value="fixed" disabled>Точный диапазон</option>}
-        <option value="1h">1 час</option><option value="24h">24 часа</option><option value="7d">7 дней</option>
+        <option value="15m">15 минут</option><option value="1h">1 час</option><option value="6h">6 часов</option>
+        <option value="24h">24 часа</option><option value="7d">7 дней</option>
       </select>
+      <DateRangePicker from={pickerRange.from} to={pickerRange.to} onChange={setDateRange} />
       {location.view !== "patterns" && <>
-        <button type="button" className="button" aria-pressed={liveEnabled} disabled={location.view !== "events" || !!parsed.error || coreOnly}
+        <button type="button" className="button" aria-pressed={liveEnabled}
+          disabled={location.view !== "events" || !!parsed.error || coreOnly || emptyLevelIntersection}
           title={location.view === "trace" ? "Trace показывает историю связанных логов" :
             coreOnly ? "pattern_id и fingerprint вычисляет core: фильтр доступен только в истории" : "Переключить отдельную ленту Live"}
           onClick={() => setLiveEnabled((current) => !current)}>Live {liveEnabled ? "вкл" : "выкл"}</button>
         <button type="button" className="button" aria-expanded={exportsOpen} disabled={!rows.length}
           onClick={() => setExportsOpen((current) => !current)}>Экспорт</button>
         {location.view === "events" && location.q.trim() && !parsed.error && (
-          <Link className="button" to={`/log-alerts?${logAlertParams(location.q, location.nodeFilters)}`}>Создать алерт</Link>
+          <Link className="button" to={`/alerts?${logAlertParams(location.q, location.nodeFilters)}`}>Создать алерт</Link>
         )}
       </>}
     </div>
@@ -439,17 +473,20 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
       <div className="chips"><span className="chip">Загружено {rows.length}</span>
         {!liveEnabled && total !== undefined && <span className="chip">В диапазоне {total.toLocaleString("ru-RU")}</span>}
         {LOG_LEVELS.map((level) => {
-          const count = rows.filter((event) => event.level === level).length;
+          const count = liveEnabled || location.view === "trace"
+            ? rows.filter((event) => event.level === level).length
+            : summary?.levels[level] ?? rows.filter((event) => event.level === level).length;
           return count ? <span key={level} className="chip">{level.toUpperCase()} {count}</span> : null;
         })}
-      </div><p className="muted">Уровни посчитаны по загруженным строкам</p>
+        {!liveEnabled && page.as_of && <span className="period-fresh" title={page.as_of}>Обновлено {clock.format(new Date(page.as_of))}</span>}
+      </div><p className="muted">{!liveEnabled && location.view === "events" ? "Счётчики за весь выбранный диапазон" : "Счётчики по загруженным строкам"}</p>
     </div>
     {liveEnabled ? <div className="live-toolbar">
       <span className={`status ${status}`} role="status">{STATUS_TEXT[status]}</span>
       <button type="button" className="button" aria-pressed={paused} onClick={togglePause}>{paused ? "Продолжить" : "Пауза"}</button>
       {paused && <span className="muted">На паузе · в буфере {pendingCount} строк</span>}
       <button type="button" className="button" onClick={refreshHistory}>Обновить историю</button>
-    </div> : <PeriodChips from={location.from} to={location.to} asOf={page.as_of} />}
+    </div> : null}
     {liveEnabled && <p className="page-note">Live показывает новые поступления из общего потока, до 2000 строк. Возможны пропуски при высокой нагрузке;
       для полного диапазона используйте историю. Пауза по Space вне элементов управления.</p>}
     {liveEnabled && liveNotice && <p className="page-note" role="status">{liveNotice}</p>}
@@ -459,8 +496,8 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
     {!liveEnabled && !parsed.error && summaryUnavailable && <p className="page-note" role="status">
       Сводка недоступна для такого длинного диапазона, сузьте период. Показаны только загруженные строки.
     </p>}
-    {!liveEnabled && !parsed.error && !summaryUnavailable && <EventsChart buckets={chart?.buckets ?? []}
-      hidden={hiddenLevels} onToggleLevel={toggleLevel}
+    {!liveEnabled && !parsed.error && !traceInputEmpty && !summaryUnavailable && <EventsChart buckets={chart?.buckets ?? []}
+      visibleLevels={location.visibleLevels} onToggleLevel={toggleLevel} showLevels={location.view === "events"}
       loading={location.view === "events" ? loading : histogramLoading} intervalSeconds={intervalSeconds}
       aside={<span className="muted">Шаг {Math.round(intervalSeconds / 60 * 10) / 10} мин</span>}
       caption={chart ? location.view === "events"
@@ -485,8 +522,8 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
     <section className="panel" aria-label="События">
       <div className="table-scroll"><table className="logs-table"><thead><tr>
         <th scope="col" className="time">Время</th><th scope="col" className="level-cell">Уровень</th>
-        <th scope="col" className="source">Источник</th><th scope="col">Сообщение</th>
-      </tr></thead><tbody>{rows.map((event, index) => hiddenLevels.has(event.level) ? null : <Fragment key={`${event.id}:${index}`}>
+      <th scope="col" className="source">Источник</th><th scope="col">Сообщение</th>
+      </tr></thead><tbody>{rows.map((event, index) => <Fragment key={`${event.id}:${index}`}>
         <tr className={`event-row ${selectedIndex === index ? "open" : ""}`}>
           <td className="time" title={event.timestamp}>
             {Date.parse(location.to) - Date.parse(location.from) >= 86_400_000 && <span className="date">{calendar.format(new Date(event.timestamp))}</span>}
@@ -507,18 +544,19 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
         {selectedIndex === index && <tr className="event-details"><td colSpan={4}>{details(event)}</td></tr>}
       </Fragment>)}</tbody></table></div>
       {!visibleCount && <p className="empty-state" role="status">{!liveEnabled && loading ? "Загружаем события…" :
-        rows.length ? "Все загруженные события скрыты фильтром уровней." :
+        traceInputEmpty ? "Введите Trace ID, чтобы показать связанные логи." :
+        emptyLevelIntersection ? "Включите хотя бы один уровень в легенде." :
         liveEnabled ? "Ожидаем события Live, соответствующие запросу." : parsed.error || searchError ? "Поиск не выполнен." : "В выбранном диапазоне событий нет."}</p>}
       <div ref={moreSentinel} aria-hidden="true" />
       {paging && <div className="loading-more" role="status">
         <svg className="spinner" viewBox="0 0 28 28" aria-hidden="true"><circle cx="14" cy="14" r="11" /></svg>Загружаем ещё строки…
       </div>}
-      <div className="table-footer"><span>Показано {visibleCount} из {rows.length} загруженных строк{!liveEnabled && page.next_cursor ? " · есть следующая страница" : ""}.</span>
+      {!traceWithoutQuery && <div className="table-footer"><span>Показано {visibleCount} из {rows.length} загруженных строк{!liveEnabled && page.next_cursor ? " · есть следующая страница" : ""}.</span>
         {!liveEnabled && <div className="footer-actions">
           {page.next_cursor && <button type="button" className="button" disabled={paging || expired} onClick={loadMore}>{paging ? "Загрузка…" : "Загрузить ещё 50"}</button>}
           <button type="button" className="button" disabled={loading || paging || !!parsed.error} onClick={restart}>Обновить поиск</button>
         </div>}
-      </div>
+      </div>}
     </section></>}
   </section>;
 }

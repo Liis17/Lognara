@@ -139,3 +139,70 @@ export const exampleBundle: MetricBundle = {
 export function bundleOf(metrics: PortableMetric[]): MetricBundle {
   return { format: "lognara-metrics", version: 1, metrics };
 }
+
+export function linuxHostDefinition(
+  name: string,
+  origin: "counter" | "gauge",
+): PortableMetric {
+  let title = name;
+  let description = "Наблюдаемая метрика lognara-hwagent.";
+  let unit = "";
+  let kind: PortableMetric["kind"] = origin === "counter" ? "delta" : "gauge";
+  let aggregation: PortableMetric["aggregation"] = origin === "counter" ? "sum" : "avg";
+
+  const fixed: Record<string, [string, string, string]> = {
+    "cpu.usage_percent": ["Загрузка CPU", "Доля занятого процессорного времени.", "%"],
+    "cpu.iowait_percent": ["Ожидание ввода-вывода CPU", "Доля времени ожидания ввода-вывода.", "%"],
+    "cpu.steal_percent": ["Steal CPU", "Доля времени, отданного гипервизору.", "%"],
+    "cpu.cores": ["Ядра CPU", "Число процессорных ядер.", "ядер"],
+    "load.1": ["Load average за 1 минуту", "Средняя нагрузка за 1 минуту.", ""],
+    "load.5": ["Load average за 5 минут", "Средняя нагрузка за 5 минут.", ""],
+    "load.15": ["Load average за 15 минут", "Средняя нагрузка за 15 минут.", ""],
+    "memory.used_percent": ["Использование памяти", "Доля занятой оперативной памяти.", "%"],
+    "memory.total_bytes": ["Всего памяти", "Общий объём оперативной памяти.", "байт"],
+    "memory.available_bytes": ["Доступно памяти", "Объём доступной оперативной памяти.", "байт"],
+    "swap.used_bytes": ["Использовано swap", "Объём занятого swap.", "байт"],
+    "swap.used_percent": ["Использование swap", "Доля занятого swap.", "%"],
+    "pressure.cpu.some_avg10": ["CPU pressure", "Время ожидания CPU за последние 10 секунд.", "%"],
+    "pressure.memory.some_avg10": ["Memory pressure", "Время ожидания памяти за последние 10 секунд.", "%"],
+    "pressure.io.some_avg10": ["I/O pressure", "Время ожидания ввода-вывода за последние 10 секунд.", "%"],
+    "proc.count": ["Количество процессов", "Число работающих процессов.", "процессов"],
+    "proc.top_cpu_percent": ["Максимальная загрузка процесса", "Загрузка CPU самым активным процессом.", "%"],
+  };
+  const known = fixed[name];
+  if (known) [title, description, unit] = known;
+
+  const fs = name.match(/^fs\.(.+)\.(free_bytes|used_percent)$/u);
+  if (fs) {
+    title = fs[2] === "free_bytes" ? `Свободное место: ${fs[1]}` : `Заполнение: ${fs[1]}`;
+    description = `Метрика файловой системы ${fs[1]}.`;
+    unit = fs[2] === "free_bytes" ? "байт" : "%";
+  }
+  const device = name.match(/^(disk|net)\.(.+)\.(read_bytes|write_bytes|rx_bytes|tx_bytes)$/u);
+  if (device) {
+    const direction = device[3] === "read_bytes" ? "чтение"
+      : device[3] === "write_bytes" ? "запись"
+        : device[3] === "rx_bytes" ? "приём" : "передача";
+    title = `${direction[0].toLocaleUpperCase("ru-RU")}${direction.slice(1)} ${device[1] === "disk" ? "диска" : "сети"} ${device[2]}`;
+    description = `Сумма байтов за интервалы, собранных для ${device[2]}.`;
+    unit = "байт";
+  }
+  const gpu = name.match(/^gpu\.(.+)\.(util_percent|memory_used_bytes|memory_used_percent|temperature_c|power_w)$/u);
+  if (gpu) {
+    const labels: Record<string, [string, string]> = {
+      util_percent: ["Загрузка", "%"],
+      memory_used_bytes: ["Использовано памяти", "байт"],
+      memory_used_percent: ["Использование памяти", "%"],
+      temperature_c: ["Температура", "°C"],
+      power_w: ["Потребление", "Вт"],
+    };
+    const [label, gpuUnit] = labels[gpu[2]];
+    title = `${label} GPU ${gpu[1]}`;
+    description = `Метрика видеокарты ${gpu[1]}.`;
+    unit = gpuUnit;
+  }
+  if (name === "cpu.cores" || name === "proc.count") aggregation = "last";
+  if (origin === "counter") description = `Счётчик hwagent; значения суммируются за интервал. ${description}`;
+
+  return { name, title, description, unit, kind, aggregation, enabled: true, rule: null };
+}

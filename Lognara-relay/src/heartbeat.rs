@@ -164,6 +164,7 @@ impl Telemetry {
         json!({
             "relay": {
                 "version": env!("CARGO_PKG_VERSION"),
+                "release_version": crate::version::release_version(),
                 "spool": SpoolUsage {
                     used_bytes: spool.bytes(),
                     limit_bytes: limit,

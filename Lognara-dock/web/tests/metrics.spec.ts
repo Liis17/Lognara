@@ -147,7 +147,9 @@ async function create(page: Page, server = "server-a", service = "billing") {
     .getByRole("button", { name: "Новая метрика", exact: true })
     .click();
   await page.getByLabel("Выберите сервер").selectOption(server);
-  await page.getByLabel("Выберите сервис").selectOption(service);
+  const serviceInput = page.getByRole("combobox", { name: "Сервис" });
+  await serviceInput.fill(service);
+  await serviceInput.press("Enter");
 }
 test("server tiles link to reloadable detail pages and preserve query scope", async ({
   page,
@@ -155,10 +157,10 @@ test("server tiles link to reloadable detail pages and preserve query scope", as
   await fixture(page);
   await page.goto("/metrics");
   await expect(
-    page.getByRole("heading", { name: "server-a", exact: true }),
+    page.locator(".metric-server-group > summary").filter({ hasText: /^server-a/ }),
   ).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: "server-b", exact: true }),
+    page.locator(".metric-server-group > summary").filter({ hasText: /^server-b/ }),
   ).toBeVisible();
   await expect(page.locator(".metric-tile canvas")).toHaveCount(2);
   await page.screenshot({
@@ -199,6 +201,75 @@ test("server tiles link to reloadable detail pages and preserve query scope", as
   await page.keyboard.press("Escape");
   await expect(dialog).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Настроить" })).toBeFocused();
+});
+
+for (const origin of ["counter", "rule"] as const) {
+  test(`selecting a ${origin} metric range opens scoped logs`, async ({ page }) => {
+    await fixture(page);
+    const selectedMetric = {
+      ...metric,
+      origin,
+      definition: origin === "rule" ? {
+        server: "server-a", id: "definition-1", service: "billing", name: "requests",
+        title: "Запросы", description: "", unit: "req", kind: "delta", aggregation: "sum",
+        enabled: true, rule: { environment: null, contains: "duration=", pattern: "duration=(?<value>\\d+)", value_group: "value", label_groups: [] },
+        updated_at: "2026-10-15T12:00:00Z",
+      } : null,
+    };
+    await page.route("**/api/series/lookup", (route) => route.fulfill({ json: { metrics: [selectedMetric] } }));
+    await page.route("**/api/series/query", (route) => {
+      const now = Date.now();
+      const step = 5 * 60_000;
+      return route.fulfill({ json: {
+        kind: "delta", aggregation: "sum", unit: "req",
+        buckets: Array.from({ length: 13 }, (_, index) => new Date(now - (12 - index) * step).toISOString()),
+        series: [{ label: "", values: Array.from({ length: 13 }, (_, index) => index + 1) }],
+      } });
+    });
+    await page.goto(`/metrics/detail?server=server-a&service=billing&name=requests&origin=${origin}`);
+    const plot = page.locator(".line-chart-plot .u-over");
+    await expect(plot).toBeVisible();
+    await plot.scrollIntoViewIfNeeded();
+    const box = (await plot.boundingBox())!;
+    await page.mouse.move(box.x + 110, box.y + 120);
+    await page.mouse.down();
+    await page.mouse.move(box.x + 410, box.y + 120, { steps: 4 });
+    await page.mouse.up();
+    await expect(page).toHaveURL(/\/logs\?/);
+    const url = new URL(page.url());
+    const query = url.searchParams.get("q")!;
+    expect(query).toContain('service:"billing"');
+    expect(url.searchParams.get("view")).toBe("events");
+    if (origin === "rule") expect(query).toContain('server:"server-a"');
+    else expect(query).not.toContain("server:");
+    expect(Date.parse(url.searchParams.get("to")!)).toBeGreaterThan(Date.parse(url.searchParams.get("from")!));
+  });
+}
+
+test("metric search, server filter, and mini chart period work together", async ({ page }) => {
+  await fixture(page);
+  await page.route("**/api/series?**", (route) => route.fulfill({ json: {
+    metrics: [{ ...metric, name: "latency", definition: {
+      server: "server-a", id: "definition-latency", service: "billing", name: "latency", title: "Задержка",
+      description: "Задержка запроса", unit: "мс", kind: "gauge", aggregation: "avg", enabled: true, rule: null,
+      updated_at: "2026-10-15T12:00:00Z",
+    } }],
+  } }));
+  await page.goto("/metrics");
+  await page.getByLabel("Фильтр по серверу").selectOption("server-a");
+  const searchRequest = page.waitForRequest((request) => request.url().includes("/api/series?group_by=server"));
+  await page.getByLabel("Поиск метрики, сервиса или сервера").fill("latency");
+  expect(new URL((await searchRequest).url()).searchParams.get("server")).toBe("server-a");
+  const tile = page.locator(".metric-search-results .metric-tile");
+  await expect(tile).toHaveCount(1);
+  await expect(tile.locator(".metric-tile-value")).toContainText("20");
+  await expect(tile.locator(".metric-tile-value")).toContainText("requests");
+  const longPeriodQuery = page.waitForRequest((request) =>
+    request.url().endsWith("/api/series/query") && request.postDataJSON().step_seconds === 3600,
+  );
+  await page.getByLabel("Период миниграфиков").selectOption("7d");
+  expect(new Date((await longPeriodQuery).postDataJSON().to).getTime() -
+    new Date((await longPeriodQuery).postDataJSON().from).getTime()).toBe(7 * 24 * 60 * 60 * 1000);
 });
 
 test("enabled alert eye appears for any metric and is muted while global alerts are paused", async ({
@@ -260,7 +331,7 @@ test("tile eye follows the global rule when an MCP-scoped rule shares its key", 
   await expect(page.getByRole("link", { name: "Настроить алерт метрики" })).toBeVisible();
   await expect(page.locator(".metric-alert-indicator.paused")).toHaveCount(0);
 });
-test("manual creation uses dependent selects and scoped editor on mobile", async ({
+test("manual creation uses dependent service search and scoped editor on mobile", async ({
   page,
 }, testInfo) => {
   await fixture(page);
@@ -269,15 +340,19 @@ test("manual creation uses dependent selects and scoped editor on mobile", async
   await page
     .getByRole("button", { name: "Новая метрика", exact: true })
     .click();
-  await expect(page.getByLabel("Выберите сервис")).toBeDisabled();
+  const serviceInput = page.getByRole("combobox", { name: "Сервис" });
+  await expect(serviceInput).toBeDisabled();
   await page.getByLabel("Выберите сервер").selectOption("server-b");
+  await serviceInput.focus();
   await expect(
-    page.getByLabel("Выберите сервис").getByRole("option", { name: "billing" }),
+    page.getByRole("listbox", { name: "Сервис: подсказки" }).getByRole("option", { name: /billing/ }),
   ).toHaveCount(0);
-  await page.getByLabel("Выберите сервис").selectOption("nginx");
+  await serviceInput.fill("nginx");
+  await serviceInput.press("Enter");
   await page.getByLabel("Выберите сервер").selectOption("server-a");
-  await expect(page.getByLabel("Выберите сервис")).toHaveValue("");
-  await page.getByLabel("Выберите сервис").selectOption("billing");
+  await expect(serviceInput).toHaveValue("Все сервисы");
+  await serviceInput.fill("billing");
+  await serviceInput.press("Enter");
   await page.getByLabel("Имя", { exact: true }).fill("latency");
   await page.getByLabel("Подстрока для отбора строк").fill("duration=");
   await page.getByLabel("Регулярное выражение").fill("duration=(?<ms>\\d+)");
@@ -340,7 +415,9 @@ test("JSON import resolves conflicts and sends checked revision", async ({
     revision: "revision-1",
     actions: [{ action: "rename", name: "requests.v2" }],
   });
-  await expect(page.getByRole("status")).toContainText("Создано: 1");
+  await expect(
+    page.getByRole("status").filter({ hasText: "Создано: 1" }),
+  ).toContainText("Создано: 1");
 });
 test("nginx templates allow preview without matches", async ({ page }) => {
   await fixture(page);
@@ -424,7 +501,7 @@ test("mini charts limit concurrent requests and load more as slots free", async 
   pending.splice(0).forEach((resolve) => resolve());
   expect(peak).toBeLessThanOrEqual(2);
   await expect(
-    page.getByText("За 24 часа данных нет", { exact: true }),
+    page.getByText("За выбранный период данных нет", { exact: true }),
   ).toHaveCount(6);
 });
 
@@ -434,12 +511,13 @@ async function openService(
   service = "billing",
 ) {
   const others = page.getByRole("region", {
-    name: "Остальные метрики",
+    name: "Все метрики",
     exact: true,
   });
-  await others.getByRole("button", { name: "Остальные метрики" }).click();
-  await others.getByRole("button", { name: server, exact: false }).click();
-  await others.getByRole("button", { name: service, exact: false }).click();
+  const serverGroup = others.locator(".metric-server-group").filter({ hasText: server }).first();
+  await serverGroup.locator(":scope > summary").click();
+  const serviceGroup = serverGroup.locator(".metric-service-group").filter({ hasText: service }).first();
+  await serviceGroup.locator(":scope > summary").click();
   return others;
 }
 
@@ -472,9 +550,10 @@ test("empty favorites do not fetch catalogs and stars persist without navigation
   });
   await page.goto("/metrics");
   await expect(page.getByText(/Избранных метрик пока нет/)).toBeVisible();
-  expect([...new Set(calls.map((url) => new URL(url).pathname))]).toEqual([
-    "/api/series/favorites",
+  expect([...new Set(calls.map((url) => new URL(url).pathname))].sort()).toEqual([
+    "/api/series/favorites", "/api/series/sources",
   ]);
+  expect(calls.some((url) => new URL(url).pathname === "/api/series")).toBe(false);
   const others = await openService(page);
   await expect(others.locator(".metric-tile")).toHaveCount(1);
   const catalogs = calls.filter(
@@ -498,9 +577,7 @@ test("empty favorites do not fetch catalogs and stars persist without navigation
   await expect(page).toHaveURL(/\/metrics$/);
   await page.reload();
   await expect(favorites.locator(".metric-tile")).toHaveCount(1);
-  await expect(
-    page.getByRole("button", { name: "Остальные метрики" }),
-  ).toHaveAttribute("aria-expanded", "false");
+  await expect(page.getByRole("region", { name: "Все метрики" })).toBeVisible();
   failSave = true;
   await favorites.getByRole("button", { name: "Убрать из избранного" }).click();
   await expect(page.getByRole("alert")).toBeVisible();
@@ -572,7 +649,7 @@ test("large catalogs remain lazy and refresh only expanded services", async ({
   await page.getByRole("button", { name: "Обновить", exact: true }).click();
   await expect.poll(() => catalogs).toBe(beforeRefresh + 1);
   await expect(others.locator(".metric-tile")).toHaveCount(1100);
-  await others.getByRole("button", { name: "billing", exact: false }).click();
+  await others.locator(".metric-service-group").filter({ hasText: "billing" }).locator(":scope > summary").click();
   await expect(others.locator(".metric-tile")).toHaveCount(0);
   await page.getByRole("button", { name: "Обновить", exact: true }).click();
   await expect(page.getByText(/Избранных метрик пока нет/)).toBeVisible();
@@ -620,7 +697,7 @@ test("collapsing a service aborts active charts and removes queued charts", asyn
   await page.goto("/metrics");
   const others = await openService(page);
   await expect.poll(() => started).toBe(2);
-  await others.getByRole("button", { name: "billing", exact: false }).click();
+  await others.locator(".metric-service-group").filter({ hasText: "billing" }).locator(":scope > summary").click();
   await expect(others.locator(".metric-tile")).toHaveCount(0);
   await expect.poll(() => failed).toBe(2);
   releases.splice(0).forEach((resolve) => resolve());
@@ -655,7 +732,7 @@ for (const unit of [
     for (const width of [390, 1280]) {
       await page.setViewportSize({ width, height: 900 });
       await expect(page.locator(".chart-panel canvas")).toBeVisible();
-      const label = page.locator(".metric-chart-unit");
+      const label = page.locator(".line-chart-unit");
       if (unit) await expect(label).toHaveText(unit);
       else await expect(label).toHaveCount(0);
       await expect
@@ -666,7 +743,7 @@ for (const unit of [
         )
         .toBe(true);
       const sizes = await page
-        .locator(".metric-chart")
+        .locator(".line-chart")
         .evaluate((el) => ({ width: el.clientWidth, scroll: el.scrollWidth }));
       expect(sizes.scroll).toBeLessThanOrEqual(sizes.width);
       if (unit)

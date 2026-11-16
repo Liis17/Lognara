@@ -2,6 +2,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    net::IpAddr,
     time::Duration,
 };
 
@@ -58,6 +59,14 @@ pub struct DefinitionInput {
     pub combine: String,
     pub group_ids: Vec<String>,
     pub triggers: Vec<TriggerInput>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub message_template: Option<String>,
+    #[serde(default)]
+    pub message_fields: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -72,6 +81,10 @@ pub struct AlertDefinition {
     pub combine: String,
     pub group_ids: Vec<String>,
     pub triggers: Vec<TriggerInput>,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub message_template: Option<String>,
+    pub message_fields: Vec<String>,
     pub revision: i64,
     pub enabled_at: i64,
     pub state: String,
@@ -161,6 +174,43 @@ pub struct TokenInput {
     pub token: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MessagePreviewInput {
+    pub kind: String,
+    pub name: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub server: Option<String>,
+    #[serde(default)]
+    pub service: Option<String>,
+    #[serde(default)]
+    pub origin: Option<String>,
+    #[serde(default)]
+    pub environment: Option<String>,
+    #[serde(default)]
+    pub condition: Option<String>,
+    #[serde(default)]
+    pub value: Option<String>,
+    #[serde(default)]
+    pub time: Option<String>,
+    #[serde(default)]
+    pub last_point: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub count: Option<u64>,
+    #[serde(default)]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub message_template: Option<String>,
+    #[serde(default)]
+    pub message_fields: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 struct GlobalConfig {
     enabled: bool,
@@ -187,6 +237,70 @@ enum AlertStoreError {
     GroupKindMismatch,
     #[error("recipient type is used by a group")]
     RecipientKindInUse,
+}
+
+const METRIC_MESSAGE_FIELDS: &[&str] = &[
+    "name",
+    "title",
+    "description",
+    "service",
+    "server",
+    "origin",
+    "node",
+    "environment",
+    "condition",
+    "value",
+    "time",
+    "last_point",
+    "status",
+    "count",
+    "query",
+    "samples",
+];
+
+pub(crate) fn default_metric_message_fields() -> Vec<String> {
+    [
+        "name",
+        "description",
+        "service",
+        "server",
+        "origin",
+        "node",
+        "environment",
+        "condition",
+        "value",
+        "time",
+        "last_point",
+        "status",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+pub(crate) fn default_log_message_fields() -> Vec<String> {
+    ["name", "count", "query", "samples", "time", "status"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+}
+
+fn valid_message_text(value: &str, max_chars: usize) -> bool {
+    value.chars().count() <= max_chars
+        && !value
+            .chars()
+            .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+}
+
+fn validate_message_fields(fields: &[String], allowed: &[&str]) -> Result<(), AlertStoreError> {
+    if fields
+        .iter()
+        .any(|field| !allowed.contains(&field.as_str()))
+        || fields.iter().collect::<BTreeSet<_>>().len() != fields.len()
+    {
+        return Err(AlertStoreError::Invalid("invalid message fields"));
+    }
+    Ok(())
 }
 
 fn validate_key(key: &MetricKey) -> Result<(), AlertStoreError> {
@@ -238,6 +352,19 @@ fn validate_definition(input: &DefinitionInput) -> Result<(), AlertStoreError> {
     }
     if input.group_ids.iter().collect::<BTreeSet<_>>().len() != input.group_ids.len() {
         return Err(AlertStoreError::Invalid("duplicate alert group"));
+    }
+    for value in [&input.title, &input.description, &input.message_template]
+        .into_iter()
+        .flatten()
+    {
+        if !valid_message_text(value, 2000) {
+            return Err(AlertStoreError::Invalid(
+                "message text must be printable and at most 2000 characters",
+            ));
+        }
+    }
+    if let Some(fields) = &input.message_fields {
+        validate_message_fields(fields, METRIC_MESSAGE_FIELDS)?;
     }
     Ok(())
 }
@@ -303,7 +430,8 @@ fn read_alerts(conn: &Connection) -> rusqlite::Result<Vec<AlertDefinition>> {
         let mut statement = conn.prepare(
             "SELECT a.id,a.server,a.service,a.name,a.origin,a.enabled,a.environment,
                     a.no_data,a.combine_mode,a.revision,s.condition_state,s.loss_registered,
-                    a.enabled_at,s.loss_at,s.last_point_at,s.last_as_of,a.scope_kind,a.scope_id
+                    a.enabled_at,s.loss_at,s.last_point_at,s.last_as_of,a.scope_kind,a.scope_id,
+                    a.title,a.description,a.message_template,a.message_fields
              FROM metric_alerts a LEFT JOIN metric_alert_states s ON s.alert_id=a.id
              ORDER BY a.server,a.service,a.name,a.origin,a.scope_kind,a.scope_id",
         )?;
@@ -339,6 +467,11 @@ fn read_alerts(conn: &Connection) -> rusqlite::Result<Vec<AlertDefinition>> {
                     last_point_at: row.get(14)?,
                     last_as_of: row.get(15)?,
                     no_recipients: true,
+                    title: row.get(18)?,
+                    description: row.get(19)?,
+                    message_template: row.get(20)?,
+                    message_fields: serde_json::from_str::<Vec<String>>(&row.get::<_, String>(21)?)
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?,
                 },
             ))
         })? {
@@ -685,21 +818,24 @@ impl Store {
                     return Ok(Err(AlertStoreError::Conflict("group_not_found")));
                 }
             }
-            let old: Option<(String, i64, i64)> = match &mode {
+            type OldMetricAlert = (String, i64, i64, Option<String>, Option<String>, Option<String>, String);
+            let old: Option<OldMetricAlert> = match &mode {
                 AlertWrite::Update(id) => tx
                     .query_row(
-                        "SELECT id,revision,enabled FROM metric_alerts WHERE id=?1",
+                        "SELECT id,revision,enabled,title,description,message_template,message_fields
+                         FROM metric_alerts WHERE id=?1",
                         [id],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
                     )
                     .optional()?,
                 _ => tx
                     .query_row(
-                        "SELECT id,revision,enabled FROM metric_alerts
+                        "SELECT id,revision,enabled,title,description,message_template,message_fields
+                         FROM metric_alerts
                          WHERE server=?1 AND service=?2 AND name=?3 AND origin=?4
                            AND scope_kind=?5 AND scope_id=?6",
                         params![input.key.server,input.key.service,input.key.name,input.key.origin,scope_kind,scope_id],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
                     )
                     .optional()?,
             };
@@ -713,7 +849,7 @@ impl Store {
             let reset_state = old.is_none() || input.enabled;
             if input.enabled
                 && !global.enabled
-                && old.as_ref().is_none_or(|(_, _, was_enabled)| *was_enabled == 0)
+                && old.as_ref().is_none_or(|(_, _, was_enabled, ..)| *was_enabled == 0)
             {
                 return Ok(Err(AlertStoreError::Conflict("global_disabled_or_alert_limit")));
             }
@@ -723,31 +859,60 @@ impl Store {
                 |row| row.get(0),
             )?;
             let next_enabled = current_enabled
-                - old.as_ref().filter(|(_, _, enabled)| *enabled != 0).map_or(0, |_| 1)
+                - old.as_ref().filter(|(_, _, enabled, ..)| *enabled != 0).map_or(0, |_| 1)
                 + if input.enabled { 1 } else { 0 };
             if next_enabled > MAX_ENABLED {
                 return Ok(Err(AlertStoreError::Conflict("global_disabled_or_alert_limit")));
             }
             let now = now_ms();
             let id = match old {
-                Some((id, revision, _)) => {
+                Some((id, revision, _, old_title, old_description, old_template, old_fields)) => {
                     cancel_alert_pending(&tx, &id, now)?;
+                    let fields: Vec<String> = input.message_fields.clone().unwrap_or_else(|| {
+                        serde_json::from_str(&old_fields).unwrap_or_else(|_| default_metric_message_fields())
+                    });
+                    let fields = serde_json::to_string(&fields).map_err(|error| {
+                        rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                    })?;
+                    let title = input.title.clone().or(old_title);
+                    let description = input.description.clone().or(old_description);
+                    let message_template = input
+                        .message_template
+                        .clone()
+                        .map(|value| if value.trim().is_empty() { None } else { Some(value) })
+                        .unwrap_or(old_template);
                     tx.execute(
                         "UPDATE metric_alerts SET server=?2,service=?3,name=?4,origin=?5,enabled=?6,environment=?7,
-                         no_data=?8,combine_mode=?9,revision=?10,enabled_at=?11 WHERE id=?1",
+                         no_data=?8,combine_mode=?9,revision=?10,enabled_at=?11,title=?12,description=?13,
+                         message_template=?14,message_fields=?15 WHERE id=?1",
                         params![id,input.key.server,input.key.service,input.key.name,input.key.origin,
-                            if input.enabled { 1 } else { 0 },input.environment,input.no_data,input.combine,revision+1,now],
+                            if input.enabled { 1 } else { 0 },input.environment,input.no_data,input.combine,revision+1,now,
+                            title,description,message_template,fields],
                     )?;
                     id
                 }
                 None => {
                     let id = Uuid::new_v4().to_string();
+                    let title = input.title.clone();
+                    let description = input.description.clone();
+                    let message_template = input
+                        .message_template
+                        .clone()
+                        .filter(|value| !value.trim().is_empty());
+                    let message_fields = input
+                        .message_fields
+                        .clone()
+                        .unwrap_or_else(default_metric_message_fields);
+                    let message_fields = serde_json::to_string(&message_fields).map_err(|error| {
+                        rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                    })?;
                     tx.execute(
                         "INSERT INTO metric_alerts(id,server,service,name,origin,enabled,environment,
-                         no_data,combine_mode,revision,enabled_at,scope_kind,scope_id)
-                         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,1,?10,?11,?12)",
+                         no_data,combine_mode,revision,enabled_at,scope_kind,scope_id,title,description,message_template,message_fields)
+                         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,1,?10,?11,?12,?13,?14,?15,?16)",
                         params![id,input.key.server,input.key.service,input.key.name,input.key.origin,
-                            if input.enabled { 1 } else { 0 },input.environment,input.no_data,input.combine,now,scope_kind,scope_id],
+                            if input.enabled { 1 } else { 0 },input.environment,input.no_data,input.combine,now,scope_kind,scope_id,
+                            title,description,message_template,message_fields],
                     )?;
                     id
                 }
@@ -1473,6 +1638,8 @@ struct PendingDelivery {
     recipient_id: String,
     chat_id: i64,
     message: String,
+    parse_mode: Option<String>,
+    reply_markup: Option<String>,
     token: String,
     attempts: u32,
 }
@@ -1961,8 +2128,10 @@ impl Store {
                 tx.commit()?;
                 return Ok(None);
             }
-            let row: Option<(String, String, i64, String, String, i64)> = tx.query_row(
-                "SELECT d.event_id,d.recipient_id,d.recipient_chat_id,o.message,g.telegram_token,d.attempts
+            type DeliveryRow = (String, String, i64, String, Option<String>, Option<String>, String, i64);
+            let row: Option<DeliveryRow> = tx.query_row(
+                "SELECT d.event_id,d.recipient_id,d.recipient_chat_id,o.message,o.parse_mode,o.reply_markup,
+                        g.telegram_token,d.attempts
                  FROM metric_alert_deliveries d
                  JOIN metric_alert_recipients r ON r.id=d.recipient_id AND r.chat_id=d.recipient_chat_id
                  JOIN metric_alert_outbox o ON o.id=d.event_id
@@ -1982,9 +2151,9 @@ impl Store {
                        AND (eo.created_at<o.created_at OR (eo.created_at=o.created_at AND eo.id<o.id)))
                  ORDER BY o.created_at,o.id,d.recipient_id LIMIT 1",
                 [now],
-                |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?)),
+                |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?,row.get(7)?)),
             ).optional()?;
-            let Some((event_id, recipient_id, chat_id, message, token, attempts)) = row else {
+            let Some((event_id, recipient_id, chat_id, message, parse_mode, reply_markup, token, attempts)) = row else {
                 tx.commit()?;
                 return Ok(None);
             };
@@ -2002,6 +2171,8 @@ impl Store {
                 recipient_id,
                 chat_id,
                 message,
+                parse_mode,
+                reply_markup,
                 token,
                 attempts: attempts as u32 + 1,
             }))
@@ -2108,7 +2279,13 @@ async fn send_pending_bounded(app: &AppState, limit: usize, budget: Duration) {
             _ = app.shutdown.cancelled() => return,
             result = tokio::time::timeout_at(
                 deadline,
-                app.telegram.send(&delivery.token, delivery.chat_id, &delivery.message),
+                app.telegram.send(
+                    &delivery.token,
+                    delivery.chat_id,
+                    &delivery.message,
+                    delivery.parse_mode.as_deref(),
+                    delivery.reply_markup.as_deref(),
+                ),
             ) => result.unwrap_or(Err(TelegramFailure::Transient)),
         };
         let deadline_reached = Instant::now() >= deadline;
@@ -2130,7 +2307,7 @@ fn enqueue_alert_event(
     tx: &rusqlite::Transaction<'_>,
     alert: &AlertDefinition,
     kind: &str,
-    message: &str,
+    message: &RenderedTelegramMessage,
     now: i64,
 ) -> rusqlite::Result<()> {
     let event_id = Uuid::new_v4().to_string();
@@ -2141,9 +2318,10 @@ fn enqueue_alert_event(
     )?;
     let created_at = previous.map_or(now, |previous| now.max(previous.saturating_add(1)));
     tx.execute(
-        "INSERT INTO metric_alert_outbox(id,alert_id,alert_revision,event_kind,message,created_at,expires_at)
-         VALUES(?1,?2,?3,?4,?5,?6,?7)",
-        params![event_id,alert.id,alert.revision,kind,message,created_at,created_at+OUTBOX_TTL_MS],
+        "INSERT INTO metric_alert_outbox(id,alert_id,alert_revision,event_kind,message,created_at,expires_at,parse_mode,reply_markup)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+        params![event_id,alert.id,alert.revision,kind,message.text,created_at,created_at+OUTBOX_TTL_MS,
+            message.parse_mode,message.reply_markup],
     )?;
     let recipients = {
         let mut statement = tx.prepare(
@@ -2335,6 +2513,404 @@ fn evaluate_conditions(
     }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct RenderedTelegramMessage {
+    pub text: String,
+    pub parse_mode: Option<String>,
+    pub reply_markup: Option<String>,
+}
+
+fn expand_message_template(template: &str, values: &BTreeMap<&'static str, String>) -> String {
+    let mut output = String::with_capacity(template.len());
+    let mut cursor = 0;
+    while let Some(relative_start) = template[cursor..].find('%') {
+        let start = cursor + relative_start;
+        output.push_str(&template[cursor..start]);
+        let token_start = start + 1;
+        let Some(relative_end) = template[token_start..].find('%') else {
+            output.push_str(&template[start..]);
+            return output;
+        };
+        let end = token_start + relative_end;
+        let token = &template[token_start..end];
+        if let Some(value) = values.get(token) {
+            output.push_str(value);
+        } else {
+            output.push_str(&template[start..=end]);
+        }
+        cursor = end + 1;
+    }
+    output.push_str(&template[cursor..]);
+    output
+}
+
+fn escape_html(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
+}
+
+fn append_limited_html_text(output: &mut String, text: &str, remaining: &mut usize) {
+    if *remaining == 0 {
+        return;
+    }
+    let length = text.chars().count();
+    if length <= *remaining {
+        output.push_str(&escape_html(text));
+        *remaining -= length;
+    } else {
+        let take = remaining.saturating_sub(1);
+        output.push_str(&escape_html(&text.chars().take(take).collect::<String>()));
+        output.push('…');
+        *remaining = 0;
+    }
+}
+
+fn append_html_block(
+    output: &mut String,
+    heading: Option<&str>,
+    text: &str,
+    remaining: &mut usize,
+) {
+    if *remaining == 0 {
+        return;
+    }
+    if let Some(heading) = heading {
+        output.push_str("<b>");
+        append_limited_html_text(output, heading, remaining);
+        output.push_str("</b>");
+        if *remaining > 0 {
+            output.push('\n');
+            *remaining -= 1;
+        }
+    }
+    append_limited_html_text(output, text, remaining);
+    if *remaining > 0 {
+        output.push('\n');
+        *remaining -= 1;
+    }
+}
+
+fn telegram_button(link: &str) -> Option<String> {
+    let url = Url::parse(link).ok()?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || telegram_button_host_is_local_or_private(url.host_str()?)
+    {
+        return None;
+    }
+    serde_json::to_string(&json!({
+        "inline_keyboard": [[{"text": "Открыть в Dock", "url": url.as_str()}]]
+    }))
+    .ok()
+}
+
+fn telegram_button_host_is_local_or_private(host: &str) -> bool {
+    let host = host.trim_end_matches('.');
+    if host.eq_ignore_ascii_case("localhost")
+        || host.to_ascii_lowercase().ends_with(".localhost")
+        || host.to_ascii_lowercase().ends_with(".local")
+    {
+        return true;
+    }
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    match host.parse::<IpAddr>() {
+        Ok(IpAddr::V4(address)) => {
+            let octets = address.octets();
+            address.is_private()
+                || address.is_loopback()
+                || address.is_link_local()
+                || address.is_unspecified()
+                || address.is_broadcast()
+                || address.is_multicast()
+                || (octets[0] == 100 && octets[1] & 0b1100_0000 == 0b0100_0000)
+        }
+        Ok(IpAddr::V6(address)) => {
+            address.is_loopback()
+                || address.is_unspecified()
+                || address.is_unique_local()
+                || address.is_unicast_link_local()
+                || address.is_multicast()
+                || address.to_ipv4_mapped().is_some_and(|ipv4| {
+                    let octets = ipv4.octets();
+                    ipv4.is_private()
+                        || ipv4.is_loopback()
+                        || ipv4.is_link_local()
+                        || ipv4.is_unspecified()
+                        || ipv4.is_broadcast()
+                        || ipv4.is_multicast()
+                        || (octets[0] == 100 && octets[1] & 0b1100_0000 == 0b0100_0000)
+                })
+        }
+        Err(_) => false,
+    }
+}
+
+pub(crate) fn render_telegram_message(
+    status: &str,
+    emoji: &str,
+    template: Option<&str>,
+    placeholders: &BTreeMap<&'static str, String>,
+    blocks: Vec<(&'static str, Vec<String>)>,
+    link: &str,
+) -> RenderedTelegramMessage {
+    const MESSAGE_BUDGET: usize = 4000;
+    let mut text = String::new();
+    let mut remaining = MESSAGE_BUDGET;
+    text.push_str("<b>");
+    append_limited_html_text(&mut text, &format!("{emoji} {status}"), &mut remaining);
+    text.push_str("</b>");
+    if remaining > 0 {
+        text.push('\n');
+        remaining -= 1;
+    }
+    if let Some(template) = template.filter(|value| !value.trim().is_empty()) {
+        append_html_block(
+            &mut text,
+            None,
+            &expand_message_template(template, placeholders),
+            &mut remaining,
+        );
+    }
+    for (heading, lines) in blocks {
+        if !lines.is_empty() {
+            append_html_block(&mut text, Some(heading), &lines.join("\n"), &mut remaining);
+        }
+    }
+    let reply_markup = telegram_button(link);
+    if reply_markup.is_none() {
+        append_html_block(&mut text, Some("Открыть в Dock"), link, &mut remaining);
+    }
+    RenderedTelegramMessage {
+        text,
+        parse_mode: Some("HTML".into()),
+        reply_markup,
+    }
+}
+
+pub async fn preview_message(
+    State(app): State<AppState>,
+    Json(input): Json<MessagePreviewInput>,
+) -> Result<Json<Value>, ApiError> {
+    let allowed = match input.kind.as_str() {
+        "metric" => METRIC_MESSAGE_FIELDS,
+        "logs" => METRIC_MESSAGE_FIELDS,
+        _ => return Err(ApiError::Invalid("kind must be metric or logs".into())),
+    };
+    if input.name.trim().is_empty()
+        || input.name.chars().count() > 2000
+        || input
+            .message_template
+            .as_ref()
+            .is_some_and(|text| !valid_message_text(text, 2000))
+    {
+        return Err(ApiError::Invalid("invalid preview text".into()));
+    }
+    validate_message_fields(&input.message_fields, allowed)
+        .map_err(|_| ApiError::Invalid("invalid message fields".into()))?;
+    let field = |name: &str| input.message_fields.iter().any(|item| item == name);
+    let title = input.title.as_deref().unwrap_or(&input.name);
+    let description = input.description.as_deref().unwrap_or("");
+    let status_value = input.status.as_deref().unwrap_or("firing");
+    let (emoji, status) = match status_value {
+        "recovered" => ("🟢", "Алерт восстановился"),
+        "data_loss" => ("⚠️", "Нет данных"),
+        "error" => ("⚠️", "Ошибка проверки"),
+        _ => (
+            "🔴",
+            if input.kind == "logs" {
+                "Алерт на логи сработал"
+            } else {
+                "Алерт метрики сработал"
+            },
+        ),
+    };
+    let mut source = Vec::new();
+    if field("name") {
+        source.push(format!("Имя: {}", input.name));
+    }
+    if field("title") {
+        source.push(format!("Название: {title}"));
+    }
+    if field("description") && !description.is_empty() {
+        source.push(format!("Описание: {description}"));
+    }
+    if field("server")
+        && let Some(server) = &input.server
+    {
+        source.push(format!("Сервер: {server}"));
+    }
+    if field("service")
+        && let Some(service) = &input.service
+    {
+        source.push(format!("Сервис: {service}"));
+    }
+    if field("origin")
+        && let Some(origin) = &input.origin
+    {
+        source.push(format!("Источник: {origin}"));
+    }
+    if field("environment") {
+        source.push(format!(
+            "Окружение: {}",
+            input.environment.as_deref().unwrap_or("все")
+        ));
+    }
+    if field("query")
+        && let Some(query) = &input.query
+    {
+        source.push(format!("Запрос: {query}"));
+    }
+    if field("status") {
+        source.push(format!("Статус: {status_value}"));
+    }
+    if field("samples") && input.kind == "logs" {
+        source.push(
+            "2026-11-16T09:30:00Z srv-eu-12 / billing error: Database connection refused".into(),
+        );
+    }
+    let mut condition = Vec::new();
+    if field("condition")
+        && let Some(value) = &input.condition
+    {
+        condition.push(format!("Условие: {value}"));
+    }
+    if field("value") {
+        if let Some(value) = &input.value {
+            condition.push(format!("Значение: {value}"));
+        } else if let Some(count) = input.count {
+            condition.push(format!("Новых совпадений: {count}"));
+        }
+    }
+    if field("count")
+        && let Some(count) = input.count
+    {
+        condition.push(format!("Новых совпадений: {count}"));
+    }
+    let mut time = Vec::new();
+    if field("time") {
+        time.push(format!(
+            "Время Core: {}",
+            input.time.as_deref().unwrap_or("2026-11-16T09:30:00Z")
+        ));
+    }
+    if field("last_point") {
+        time.push(format!(
+            "Последняя точка: {}",
+            input.last_point.as_deref().unwrap_or("нет данных")
+        ));
+    }
+    let mut placeholders = BTreeMap::new();
+    placeholders.insert(
+        "value",
+        input
+            .value
+            .clone()
+            .unwrap_or_else(|| input.count.unwrap_or_default().to_string()),
+    );
+    placeholders.insert("name", input.name.clone());
+    placeholders.insert("title", title.to_owned());
+    placeholders.insert("description", description.to_owned());
+    placeholders.insert("service", input.service.clone().unwrap_or_default());
+    placeholders.insert("server", input.server.clone().unwrap_or_default());
+    placeholders.insert(
+        "environment",
+        input.environment.clone().unwrap_or_else(|| "все".into()),
+    );
+    placeholders.insert("condition", input.condition.clone().unwrap_or_default());
+    placeholders.insert(
+        "time",
+        input
+            .time
+            .clone()
+            .unwrap_or_else(|| "2026-11-16T09:30:00Z".into()),
+    );
+    placeholders.insert(
+        "last_point",
+        input
+            .last_point
+            .clone()
+            .unwrap_or_else(|| "нет данных".into()),
+    );
+    placeholders.insert("status", status_value.to_owned());
+    placeholders.insert("count", input.count.unwrap_or_default().to_string());
+    placeholders.insert("query", input.query.clone().unwrap_or_default());
+    let link = if input.kind == "logs" {
+        let mut url = app
+            .config
+            .public_url
+            .join("logs")
+            .unwrap_or_else(|_| app.config.public_url.clone());
+        if let Some(query) = &input.query {
+            url.query_pairs_mut()
+                .append_pair("q", query)
+                .append_pair("range", "1h");
+        }
+        url.to_string()
+    } else {
+        let mut url = app
+            .config
+            .public_url
+            .join("metrics/detail")
+            .unwrap_or_else(|_| app.config.public_url.clone());
+        if let Some(server) = &input.server {
+            url.query_pairs_mut().append_pair("server", server);
+        }
+        if let Some(service) = &input.service {
+            url.query_pairs_mut().append_pair("service", service);
+        }
+        url.query_pairs_mut().append_pair("name", &input.name);
+        if let Some(origin) = &input.origin {
+            url.query_pairs_mut().append_pair("origin", origin);
+        }
+        url.to_string()
+    };
+    let rendered = render_telegram_message(
+        status,
+        emoji,
+        input.message_template.as_deref(),
+        &placeholders,
+        vec![
+            (
+                if input.kind == "logs" {
+                    "Источник"
+                } else {
+                    "Метрика / источник"
+                },
+                source,
+            ),
+            ("Условие / значение", condition),
+            ("Время", time),
+        ],
+        &link,
+    );
+    Ok(Json(
+        json!({"html": rendered.text, "button": rendered.reply_markup.is_some()}),
+    ))
+}
+
+fn window_text(seconds: u64) -> String {
+    if seconds.is_multiple_of(86_400) {
+        format!("{} дн", seconds / 86_400)
+    } else if seconds.is_multiple_of(3_600) {
+        format!("{} ч", seconds / 3_600)
+    } else if seconds.is_multiple_of(60) {
+        format!("{} мин", seconds / 60)
+    } else {
+        format!("{seconds} сек")
+    }
+}
+
 fn alert_message(
     alert: &AlertDefinition,
     kind: &str,
@@ -2342,32 +2918,79 @@ fn alert_message(
     as_of: &str,
     last_point: &Option<String>,
     public_url: &Url,
-) -> String {
-    let title = match kind {
-        "firing" => "Алерт метрики сработал",
-        "recovered" => "Алерт метрики восстановился",
-        "data_loss" => "Потеряны новые точки метрики",
-        "data_recovered" => "Точки метрики снова поступают",
-        _ => "Состояние алерта метрики изменилось",
+) -> RenderedTelegramMessage {
+    let (emoji, status) = match kind {
+        "firing" => ("🔴", "Алерт метрики сработал"),
+        "recovered" => ("🟢", "Алерт метрики восстановился"),
+        "data_loss" => ("⚠️", "Нет новых точек метрики"),
+        "data_recovered" => ("🟢", "Точки метрики снова поступают"),
+        _ => ("⚠️", "Ошибка проверки алерта метрики"),
     };
-    // Скоупленное правило отличается от глобального с тем же ключом только строкой узла.
-    let node = match alert.node_scope {
-        Scope::All => String::new(),
-        Scope::Relay { id } => format!("Узел: relay {id}\n"),
-        Scope::Agent { id } => format!("Узел: agent {id}\n"),
-    };
-    let mut body = format!(
-        "{title}\nМетрика: {} / {} / {} ({})\n{node}Окружение: {}\nВремя Core: {}\nПоследняя точка: {}\nУсловие: {}\n",
-        alert.key.server,
-        alert.key.service,
-        alert.key.name,
-        alert.key.origin,
-        alert.environment.as_deref().unwrap_or("все"),
-        as_of,
-        last_point.as_deref().unwrap_or("нет данных"),
-        alert.combine.to_uppercase(),
-    );
+    let selected = |field: &str| alert.message_fields.iter().any(|value| value == field);
+    let title = alert
+        .title
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(&alert.key.name);
+    let mut source = Vec::new();
+    if selected("name") {
+        source.push(format!("Имя: {}", alert.key.name));
+    }
+    if selected("title") {
+        source.push(format!("Название: {title}"));
+    }
+    if selected("description")
+        && let Some(description) = alert
+            .description
+            .as_deref()
+            .filter(|value| !value.is_empty())
+    {
+        source.push(format!("Описание: {description}"));
+    }
+    if selected("server") {
+        source.push(format!("Сервер: {}", alert.key.server));
+    }
+    if selected("service") {
+        source.push(format!("Сервис: {}", alert.key.service));
+    }
+    if selected("origin") {
+        source.push(format!("Источник: {}", alert.key.origin));
+    }
+    if selected("node") {
+        match alert.node_scope {
+            Scope::All => {}
+            Scope::Relay { id } => source.push(format!("Узел: relay {id}")),
+            Scope::Agent { id } => source.push(format!("Узел: agent {id}")),
+        }
+    }
+    if selected("environment") {
+        source.push(format!(
+            "Окружение: {}",
+            alert.environment.as_deref().unwrap_or("все")
+        ));
+    }
+    if selected("status") {
+        source.push(format!("Статус: {status}"));
+    }
+    let mut conditions = Vec::new();
+    let mut values = Vec::new();
     for trigger in &alert.triggers {
+        let aggregate = match trigger.aggregate.as_str() {
+            "avg" => "среднее",
+            "min" => "минимум",
+            "max" => "максимум",
+            "sum" => "сумма",
+            "count" => "число точек",
+            "increase" => "прирост",
+            _ => trigger.aggregate.as_str(),
+        };
+        let comparator = match trigger.comparator.as_str() {
+            ">" => "строго больше",
+            ">=" => "не меньше",
+            "<" => "строго меньше",
+            "<=" => "не больше",
+            _ => trigger.comparator.as_str(),
+        };
         let value = windows.get(&trigger.window_seconds).and_then(|window| {
             match trigger.aggregate.as_str() {
                 "avg" => window.avg,
@@ -2379,16 +3002,75 @@ fn alert_message(
                 _ => None,
             }
         });
-        body.push_str(&format!(
-            "{} за {} сек {} {}: {}\n",
-            trigger.aggregate,
-            trigger.window_seconds,
-            trigger.comparator,
+        conditions.push(format!(
+            "{} за {} {} {} (значение: {})",
+            aggregate,
+            window_text(trigger.window_seconds),
+            comparator,
             trigger.threshold,
             value.map_or_else(|| String::from("нет значения"), |value| value.to_string()),
         ));
+        values.push(value.map_or_else(|| String::from("нет значения"), |value| value.to_string()));
     }
-    append_message_link(body, metric_link(public_url, alert))
+    let condition = format!(
+        "{}: {}",
+        if alert.combine == "and" {
+            "Все условия"
+        } else {
+            "Любое условие"
+        },
+        conditions.join("; "),
+    );
+    let mut condition_lines = Vec::new();
+    if selected("condition") {
+        condition_lines.push(condition.clone());
+    }
+    if selected("value") {
+        condition_lines.push(format!("Значение: {}", values.join("; ")));
+    }
+    if selected("last_point") {
+        condition_lines.push(format!(
+            "Последняя точка: {}",
+            last_point.as_deref().unwrap_or("нет данных")
+        ));
+    }
+    let mut time_lines = Vec::new();
+    if selected("time") {
+        time_lines.push(format!("Время Core: {as_of}"));
+    }
+    let title_value = alert
+        .title
+        .clone()
+        .unwrap_or_else(|| alert.key.name.clone());
+    let description = alert.description.clone().unwrap_or_default();
+    let last_point_value = last_point.as_deref().unwrap_or("нет данных").to_owned();
+    let mut placeholders = BTreeMap::new();
+    placeholders.insert("value", values.join("; "));
+    placeholders.insert("name", alert.key.name.clone());
+    placeholders.insert("title", title_value);
+    placeholders.insert("description", description);
+    placeholders.insert("service", alert.key.service.clone());
+    placeholders.insert("server", alert.key.server.clone());
+    placeholders.insert(
+        "environment",
+        alert.environment.clone().unwrap_or_else(|| "все".into()),
+    );
+    placeholders.insert("condition", condition);
+    placeholders.insert("time", as_of.to_owned());
+    placeholders.insert("last_point", last_point_value);
+    placeholders.insert("status", status.to_owned());
+    render_telegram_message(
+        status,
+        emoji,
+        alert.message_template.as_deref(),
+        &placeholders,
+        vec![
+            ("Метрика / источник", source),
+            ("Условие / значение", condition_lines),
+            ("Время", time_lines),
+        ],
+        &metric_link(public_url, alert),
+    )
 }
 
 fn metric_link(public_url: &Url, alert: &AlertDefinition) -> String {
@@ -2405,22 +3087,8 @@ fn metric_link(public_url: &Url, alert: &AlertDefinition) -> String {
 
 pub(crate) fn settings_link(public_url: &Url) -> String {
     public_url
-        .join("settings#alerts")
-        .map_or_else(|_| "/settings#alerts".into(), |url| url.to_string())
-}
-
-pub(crate) fn append_message_link(mut body: String, link: String) -> String {
-    let suffix = format!("\nОткрыть: {link}");
-    let budget = 4096usize.saturating_sub(suffix.chars().count());
-    if body.chars().count() > budget {
-        body = body
-            .chars()
-            .take(budget.saturating_sub(2))
-            .collect::<String>();
-        body.push_str("…\n");
-    }
-    body.push_str(&suffix);
-    body
+        .join("alerts?tab=telegram")
+        .map_or_else(|_| "/alerts?tab=telegram".into(), |url| url.to_string())
 }
 
 fn retry_delay(attempt: u32) -> i64 {
@@ -2491,35 +3159,142 @@ impl TelegramClient {
         }
     }
 
-    async fn send(&self, token: &str, chat_id: i64, text: &str) -> Result<(), TelegramFailure> {
+    async fn send(
+        &self,
+        token: &str,
+        chat_id: i64,
+        text: &str,
+        parse_mode: Option<&str>,
+        reply_markup: Option<&str>,
+    ) -> Result<(), TelegramFailure> {
         let url = self.endpoint(token, "sendMessage")?;
-        let response = self
-            .http
-            .post(url)
-            .json(&json!({"chat_id": chat_id, "text": text}))
-            .send()
-            .await
-            .map_err(|_| TelegramFailure::Transient)?;
-        let status = response.status();
-        let body = response
-            .bytes()
-            .await
-            .map_err(|_| TelegramFailure::Transient)?;
-        let reply: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-        if status.is_success() && reply["ok"].as_bool() == Some(true) {
-            return Ok(());
+        let mut text = text.to_owned();
+        let mut parse_mode = parse_mode.map(str::to_owned);
+        let mut reply_markup: Option<Value> = match reply_markup {
+            Some(markup) => {
+                Some(serde_json::from_str(markup).map_err(|_| TelegramFailure::Transient)?)
+            }
+            None => None,
+        };
+
+        loop {
+            let mut payload = json!({"chat_id": chat_id, "text": text});
+            let payload = payload.as_object_mut().ok_or(TelegramFailure::Transient)?;
+            if let Some(parse_mode) = &parse_mode {
+                payload.insert("parse_mode".into(), Value::String(parse_mode.clone()));
+            }
+            if let Some(reply_markup) = &reply_markup {
+                payload.insert("reply_markup".into(), reply_markup.clone());
+            }
+            let response = self
+                .http
+                .post(url.clone())
+                .json(&Value::Object(payload.clone()))
+                .send()
+                .await
+                .map_err(|_| TelegramFailure::Transient)?;
+            let status = response.status();
+            let body = response
+                .bytes()
+                .await
+                .map_err(|_| TelegramFailure::Transient)?;
+            let reply: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+            if status.is_success() && reply["ok"].as_bool() == Some(true) {
+                return Ok(());
+            }
+            if status == StatusCode::UNAUTHORIZED || reply["error_code"] == 401 {
+                return Err(TelegramFailure::InvalidToken);
+            }
+            if status == StatusCode::TOO_MANY_REQUESTS || reply["error_code"] == 429 {
+                return Err(telegram_rate_limit(&reply));
+            }
+
+            let description = reply["description"].as_str().unwrap_or_default();
+            if status == StatusCode::FORBIDDEN
+                || reply["error_code"] == 403
+                || ((status.is_client_error() || reply["error_code"] == 400)
+                    && telegram_description_is_recipient_error(description))
+            {
+                return Err(TelegramFailure::PermanentRecipient);
+            }
+            if status != StatusCode::BAD_REQUEST {
+                return Err(TelegramFailure::Transient);
+            }
+            if reply_markup.is_some() && telegram_description_is_button_error(description) {
+                if let Some(link) = reply_markup.as_ref().and_then(telegram_markup_url) {
+                    append_telegram_text_link(&mut text, link, parse_mode.as_deref());
+                }
+                reply_markup = None;
+                continue;
+            }
+            if parse_mode.is_some() && telegram_description_is_parse_error(description) {
+                text = telegram_plain_text(&text);
+                parse_mode = None;
+                continue;
+            }
+            return Err(TelegramFailure::Transient);
         }
-        if status == StatusCode::UNAUTHORIZED || reply["error_code"] == 401 {
-            return Err(TelegramFailure::InvalidToken);
-        }
-        if status == StatusCode::TOO_MANY_REQUESTS || reply["error_code"] == 429 {
-            return Err(telegram_rate_limit(&reply));
-        }
-        if status == StatusCode::BAD_REQUEST || status == StatusCode::FORBIDDEN {
-            return Err(TelegramFailure::PermanentRecipient);
-        }
-        Err(TelegramFailure::Transient)
     }
+}
+
+fn telegram_markup_url(markup: &Value) -> Option<&str> {
+    for row in markup["inline_keyboard"].as_array()? {
+        for button in row.as_array()? {
+            if let Some(url) = button["url"].as_str() {
+                return Some(url);
+            }
+        }
+    }
+    None
+}
+
+fn append_telegram_text_link(text: &mut String, link: &str, parse_mode: Option<&str>) {
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    if parse_mode == Some("HTML") {
+        text.push_str("<b>Открыть в Dock:</b> ");
+        text.push_str(&escape_html(link));
+    } else {
+        text.push_str("Открыть в Dock: ");
+        text.push_str(link);
+    }
+}
+
+fn telegram_plain_text(html: &str) -> String {
+    html.replace("<b>", "")
+        .replace("</b>", "")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&amp;", "&")
+}
+
+fn telegram_description_is_button_error(description: &str) -> bool {
+    let description = description.to_ascii_lowercase();
+    description.contains("button") || description.contains("wrong http url")
+}
+
+fn telegram_description_is_parse_error(description: &str) -> bool {
+    let description = description.to_ascii_lowercase();
+    description.contains("can't parse entities") || description.contains("can’t parse entities")
+}
+
+fn telegram_description_is_recipient_error(description: &str) -> bool {
+    let description = description.to_ascii_lowercase();
+    [
+        "chat not found",
+        "bot was blocked",
+        "user is deactivated",
+        "user deactivated",
+        "bot was kicked",
+        "bot is not a member",
+        "not enough rights",
+        "have no rights",
+        "forbidden",
+    ]
+    .iter()
+    .any(|needle| description.contains(*needle))
 }
 
 impl Default for TelegramClient {
@@ -2633,7 +3408,108 @@ mod tests {
                 comparator: ">".into(),
                 threshold: 1.0,
             }],
+            title: None,
+            description: None,
+            message_template: None,
+            message_fields: None,
         }
+    }
+
+    #[test]
+    fn telegram_metric_message_escapes_html_expands_placeholders_and_adds_button() {
+        let mut alert = condition_alert("and", "normal", vec![trigger(300, "avg")]);
+        alert.title = Some("CPU < 80%".into());
+        alert.description = Some("disk & network".into());
+        alert.message_template = Some("%title%: %value%; %unknown% <raw>".into());
+        alert.message_fields = vec![
+            "name",
+            "title",
+            "description",
+            "server",
+            "service",
+            "condition",
+            "value",
+            "time",
+            "last_point",
+            "status",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        let window = AlertSeriesWindow {
+            seconds: 300,
+            count: 2,
+            sum: 10.0,
+            avg: Some(5.0),
+            min: Some(4.0),
+            max: Some(6.0),
+            increase: Some(2.0),
+        };
+        let windows = BTreeMap::from([(300, &window)]);
+        let rendered = alert_message(
+            &alert,
+            "firing",
+            &windows,
+            "2026-11-16T09:30:00Z",
+            &Some("2026-11-16T09:29:00Z".into()),
+            &Url::parse("https://dock.example/").unwrap(),
+        );
+
+        assert_eq!(rendered.parse_mode.as_deref(), Some("HTML"));
+        assert!(rendered.text.contains("<b>🔴 Алерт метрики сработал</b>"));
+        assert!(rendered.text.contains("CPU &lt; 80%"));
+        assert!(rendered.text.contains("disk &amp; network"));
+        assert!(
+            rendered
+                .text
+                .contains("Все условия: среднее за 5 мин строго больше 1 (значение: 5)")
+        );
+        assert!(rendered.text.contains("5"));
+        assert!(rendered.text.contains("%unknown%"));
+        assert!(rendered.text.contains("&lt;raw&gt;"));
+        let markup: Value =
+            serde_json::from_str(rendered.reply_markup.as_deref().unwrap()).unwrap();
+        assert_eq!(markup["inline_keyboard"][0][0]["text"], "Открыть в Dock");
+        assert!(
+            markup["inline_keyboard"][0][0]["url"]
+                .as_str()
+                .unwrap()
+                .starts_with("https://dock.example/metrics/detail?")
+        );
+    }
+
+    #[test]
+    fn legacy_metric_rule_uses_default_fields_and_html_button() {
+        let alert = condition_alert("or", "normal", vec![trigger(300, "sum")]);
+        let rendered = alert_message(
+            &alert,
+            "recovered",
+            &BTreeMap::new(),
+            "2026-11-16T09:30:00Z",
+            &None,
+            &Url::parse("https://dock.example/").unwrap(),
+        );
+        assert!(rendered.text.contains("🟢 Алерт метрики восстановился"));
+        assert!(rendered.text.contains("Сервер: server-a"));
+        assert!(rendered.text.contains("Сервис: api"));
+        assert!(!rendered.text.contains("Все условия"));
+        assert_eq!(rendered.parse_mode.as_deref(), Some("HTML"));
+        assert!(rendered.reply_markup.is_some());
+    }
+
+    #[test]
+    fn local_dock_url_is_rendered_as_text_instead_of_a_telegram_button() {
+        let rendered = render_telegram_message(
+            "status",
+            "🟡",
+            None,
+            &BTreeMap::new(),
+            Vec::new(),
+            "http://localhost:7403",
+        );
+
+        assert!(rendered.reply_markup.is_none());
+        assert!(rendered.text.contains("http://localhost:7403"));
     }
 
     #[test]
@@ -2696,6 +3572,10 @@ mod tests {
             last_point_at: None,
             last_as_of: None,
             no_recipients: true,
+            title: None,
+            description: None,
+            message_template: None,
+            message_fields: default_metric_message_fields(),
         }
     }
 
@@ -2986,6 +3866,43 @@ mod tests {
             })
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn legacy_outbox_delivery_keeps_plain_text_without_new_telegram_options() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path()).unwrap();
+        let now = now_ms();
+        store
+            .call(move |conn| {
+                conn.execute(
+                    "UPDATE metric_alert_global SET enabled=1,telegram_token=?1 WHERE singleton=1",
+                    [BOT_TOKEN],
+                )?;
+                conn.execute(
+                    "INSERT INTO metric_alert_recipients(id,kind,name,chat_id,created_at)
+                     VALUES('recipient-1','personal','On call',1001,?1)",
+                    [now],
+                )?;
+                conn.execute(
+                    "INSERT INTO metric_alert_outbox(id,event_kind,message,created_at,expires_at)
+                     VALUES('legacy-event','core_recovered','Old <plain> & text',?1,?2)",
+                    params![now, now + OUTBOX_TTL_MS],
+                )?;
+                conn.execute(
+                    "INSERT INTO metric_alert_deliveries(event_id,recipient_id,recipient_name,recipient_chat_id,status,next_attempt_at)
+                     VALUES('legacy-event','recipient-1','On call',1001,'pending',?1)",
+                    [now],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let delivery = store.next_alert_delivery().await.unwrap().unwrap();
+        assert_eq!(delivery.message, "Old <plain> & text");
+        assert_eq!(delivery.parse_mode, None);
+        assert_eq!(delivery.reply_markup, None);
     }
 
     #[tokio::test]
@@ -4184,7 +5101,7 @@ mod tests {
             ),
             (
                 StatusCode::FORBIDDEN,
-                json!({"ok":false,"description":"private details"}),
+                json!({"ok":false,"description":"Forbidden: bot was blocked by the user"}),
             ),
             (
                 StatusCode::UNAUTHORIZED,
@@ -4215,33 +5132,128 @@ mod tests {
         let verification_error = client.verify_token(BOT_TOKEN).await.unwrap_err();
         assert!(matches!(verification_error, TelegramFailure::Transient));
         let rate = client
-            .send(BOT_TOKEN, 1001, "plain text")
+            .send(BOT_TOKEN, 1001, "plain text", None, None)
             .await
             .unwrap_err();
         assert!(
             matches!(rate, TelegramFailure::RateLimited(wait) if wait == Duration::from_secs(7))
         );
         let permanent = client
-            .send(BOT_TOKEN, 1002, "plain text")
+            .send(BOT_TOKEN, 1002, "plain text", None, None)
             .await
             .unwrap_err();
         assert!(matches!(permanent, TelegramFailure::PermanentRecipient));
         let invalid = client
-            .send(BOT_TOKEN, 1003, "plain text")
+            .send(BOT_TOKEN, 1003, "plain text", None, None)
             .await
             .unwrap_err();
         assert!(matches!(invalid, TelegramFailure::InvalidToken));
         let transient = client
-            .send(BOT_TOKEN, 1004, "plain text")
+            .send(BOT_TOKEN, 1004, "plain text", None, None)
             .await
             .unwrap_err();
         assert!(matches!(transient, TelegramFailure::Transient));
+        client
+            .send(
+                BOT_TOKEN,
+                1005,
+                "<b>formatted</b>",
+                Some("HTML"),
+                Some(r#"{"inline_keyboard":[[{"text":"Открыть в Dock","url":"https://dock.example/"}]]}"#),
+            )
+            .await
+            .unwrap();
         assert!(!format!("{invalid:?}").contains(BOT_TOKEN));
         assert!(!format!("{transient:?}").contains("do not log this"));
         let requests = mock.requests.lock().unwrap();
-        assert_eq!(requests.len(), 8);
+        assert_eq!(requests.len(), 9);
         assert_eq!(requests[4].1["text"], "plain text");
         assert_eq!(requests[4].1["chat_id"], 1001);
+        assert_eq!(requests[8].1["parse_mode"], "HTML");
+        assert_eq!(
+            requests[8].1["reply_markup"]["inline_keyboard"][0][0]["text"],
+            "Открыть в Dock"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn telegram_send_retries_button_and_parse_errors_within_one_delivery() {
+        let mock = MockTelegram::default();
+        mock.replies.lock().unwrap().extend([
+            (
+                StatusCode::BAD_REQUEST,
+                json!({"ok":false,"error_code":400,"description":"Bad Request: BUTTON_URL_INVALID"}),
+            ),
+            (StatusCode::OK, json!({"ok":true})),
+            (
+                StatusCode::BAD_REQUEST,
+                json!({"ok":false,"error_code":400,"description":"Bad Request: can't parse entities: Unsupported start tag"}),
+            ),
+            (StatusCode::OK, json!({"ok":true})),
+            (
+                StatusCode::BAD_REQUEST,
+                json!({"ok":false,"error_code":400,"description":"Bad Request: chat not found"}),
+            ),
+        ]);
+        let app = Router::new()
+            .route("/{token}/getMe", get(get_me))
+            .route("/{token}/sendMessage", post(send_message))
+            .with_state(mock.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = TelegramClient::with_base(Url::parse(&format!("http://{address}/")).unwrap());
+        let markup = r#"{"inline_keyboard":[[{"text":"Открыть в Dock","url":"https://dock.example/?a=1&b=2"}]]}"#;
+
+        client
+            .send(
+                BOT_TOKEN,
+                1001,
+                "<b>A &amp; B</b>",
+                Some("HTML"),
+                Some(markup),
+            )
+            .await
+            .unwrap();
+        client
+            .send(
+                BOT_TOKEN,
+                1002,
+                "<b>formatted</b>",
+                Some("HTML"),
+                Some(markup),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            client
+                .send(BOT_TOKEN, 1003, "plain text", None, None,)
+                .await,
+            Err(TelegramFailure::PermanentRecipient)
+        ));
+
+        let requests = mock.requests.lock().unwrap();
+        assert_eq!(requests.len(), 5);
+        assert!(requests[0].1["reply_markup"].is_object());
+        assert!(requests[1].1.get("reply_markup").is_none());
+        assert_eq!(requests[1].1["parse_mode"], "HTML");
+        assert!(
+            requests[1].1["text"]
+                .as_str()
+                .unwrap()
+                .contains("https://dock.example/?a=1&amp;b=2")
+        );
+        assert!(requests[2].1.get("parse_mode").is_some());
+        assert!(requests[3].1.get("parse_mode").is_none());
+        assert!(requests[3].1.get("reply_markup").is_some());
+        assert!(
+            requests[3].1["text"]
+                .as_str()
+                .unwrap()
+                .contains("formatted")
+        );
+        assert!(!requests[3].1["text"].as_str().unwrap().contains("<b>"));
         server.abort();
     }
 
@@ -4295,7 +5307,7 @@ mod tests {
         let (store, metric_alert, _) = configured_store(directory.path(), "normal", 1).await;
         let group = metric_alert.group_ids[0].clone();
         let input = LogAlertInput {
-            name: "sudo".into(),
+            name: "sudo & cleanup".into(),
             enabled: true,
             query: "service:host sudo".into(),
             filters: BTreeMap::from([("service".into(), vec!["host".into()])]),
@@ -4306,6 +5318,13 @@ mod tests {
             threshold: 2,
             cooldown_seconds: 0,
             group_ids: vec![group.clone()],
+            message_template: Some("%name%: %count% hits (%query%) %unknown% <tag>".into()),
+            message_fields: Some(vec![
+                "name".into(),
+                "count".into(),
+                "query".into(),
+                "samples".into(),
+            ]),
         };
         let mut invalid = input.clone();
         invalid.filters = BTreeMap::from([("message".into(), vec!["x".into()])]);
@@ -4350,13 +5369,25 @@ mod tests {
             .await
             .unwrap();
         let delivery = store.next_alert_delivery().await.unwrap().unwrap();
-        assert!(delivery.message.contains("Алерт на логи: sudo"));
-        assert!(delivery.message.contains("Новых совпадений: 2"));
-        assert!(delivery.message.contains("sudo: eve COMMAND=/tmp/xmrig"));
         assert!(
             delivery
                 .message
-                .contains("https://dock.example/logs?q=service%3Ahost+sudo")
+                .contains("<b>🔴 Алерт на логи сработал</b>")
+        );
+        assert!(
+            delivery
+                .message
+                .contains("sudo &amp; cleanup: 2 hits (service:host sudo) %unknown% &lt;tag&gt;")
+        );
+        assert!(delivery.message.contains("sudo: eve COMMAND=/tmp/xmrig"));
+        assert_eq!(delivery.parse_mode.as_deref(), Some("HTML"));
+        let markup: Value =
+            serde_json::from_str(delivery.reply_markup.as_deref().unwrap()).unwrap();
+        assert!(
+            markup["inline_keyboard"][0][0]["url"]
+                .as_str()
+                .unwrap()
+                .starts_with("https://dock.example/logs?q=service%3Ahost+sudo")
         );
 
         // Выключенное правило не доставляет уже поставленные события.
@@ -4395,11 +5426,13 @@ mod tests {
         assert_eq!(state, None);
 
         match store.delete_group(group).await {
-            Err(AlertStoreError::GroupInUse(_, log_alerts)) => assert_eq!(log_alerts, ["sudo"]),
+            Err(AlertStoreError::GroupInUse(_, log_alerts)) => {
+                assert_eq!(log_alerts, ["sudo & cleanup"])
+            }
             other => panic!("unexpected {other:?}"),
         }
         let settings = store.alert_settings().await.unwrap();
-        assert_eq!(settings.groups[0].log_alerts, ["sudo"]);
+        assert_eq!(settings.groups[0].log_alerts, ["sudo & cleanup"]);
         assert!(store.delete_log_alert(id).await.unwrap());
         assert!(store.log_alerts().await.unwrap().is_empty());
     }
@@ -4421,6 +5454,8 @@ mod tests {
                 threshold: 1,
                 cooldown_seconds: 0,
                 group_ids: vec![],
+                message_template: None,
+                message_fields: None,
             }
         }
 
@@ -4675,6 +5710,8 @@ mod tests {
                 threshold: 1,
                 cooldown_seconds: 0,
                 group_ids: vec![],
+                message_template: None,
+                message_fields: None,
             }
         }
 

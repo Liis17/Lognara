@@ -19,8 +19,8 @@ use uuid::Uuid;
 
 use crate::{
     alerts::{
-        OUTBOX_TTL_MS, append_message_link, finish_single_outbox, insert_deliveries,
-        parse_timestamp_ms,
+        OUTBOX_TTL_MS, RenderedTelegramMessage, finish_single_outbox, insert_deliveries,
+        parse_timestamp_ms, render_telegram_message,
     },
     api::{ApiError, AppState},
     core_client::{AlertSeriesStatus, LogAlertReply, LogAlertRule},
@@ -74,6 +74,10 @@ pub struct LogAlertInput {
     /// Пауза между сообщениями; совпадения паузы приходят одной сводкой.
     pub cooldown_seconds: u32,
     pub group_ids: Vec<String>,
+    #[serde(default)]
+    pub message_template: Option<String>,
+    #[serde(default)]
+    pub message_fields: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -87,6 +91,8 @@ pub struct LogAlert {
     pub threshold: u32,
     pub cooldown_seconds: u32,
     pub group_ids: Vec<String>,
+    pub message_template: Option<String>,
+    pub message_fields: Vec<String>,
     pub revision: i64,
     pub no_recipients: bool,
     pub last_count: u64,
@@ -294,6 +300,39 @@ fn validate(input: &LogAlertInput) -> Result<(), LogAlertError> {
     if input.group_ids.iter().collect::<BTreeSet<_>>().len() != input.group_ids.len() {
         return Err(LogAlertError::Invalid("duplicate alert group"));
     }
+    if input.message_template.as_ref().is_some_and(|template| {
+        template.chars().count() > 2000
+            || template
+                .chars()
+                .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+    }) {
+        return Err(LogAlertError::Invalid(
+            "message template must be printable and at most 2000 characters",
+        ));
+    }
+    if let Some(fields) = &input.message_fields
+        && (fields.iter().any(|field| {
+            ![
+                "name",
+                "title",
+                "description",
+                "service",
+                "server",
+                "environment",
+                "condition",
+                "value",
+                "time",
+                "last_point",
+                "status",
+                "count",
+                "query",
+                "samples",
+            ]
+            .contains(&field.as_str())
+        }) || fields.iter().collect::<BTreeSet<_>>().len() != fields.len())
+    {
+        return Err(LogAlertError::Invalid("invalid message fields"));
+    }
     Ok(())
 }
 
@@ -303,7 +342,7 @@ fn read_log_alerts(conn: &Connection) -> rusqlite::Result<Vec<LogAlert>> {
         let mut statement = conn.prepare(
             "SELECT a.id,a.name,a.enabled,a.query,a.filters,a.text,a.text_mode,a.threshold,
                     a.cooldown_seconds,a.revision,s.last_count,s.last_match_at,s.last_checked_at,
-                    s.last_sent_at
+                    s.last_sent_at,a.message_template,a.message_fields
              FROM log_alerts a LEFT JOIN log_alert_states s ON s.alert_id=a.id
              ORDER BY a.name,a.id",
         )?;
@@ -330,6 +369,9 @@ fn read_log_alerts(conn: &Connection) -> rusqlite::Result<Vec<LogAlert>> {
                 last_match_at: row.get(11)?,
                 last_checked_at: row.get(12)?,
                 last_sent_at: row.get(13)?,
+                message_template: row.get(14)?,
+                message_fields: serde_json::from_str::<Vec<String>>(&row.get::<_, String>(15)?)
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
             })
         })?;
         for alert in rows {
@@ -394,18 +436,18 @@ impl Store {
             .map_err(|_| LogAlertError::Invalid("invalid filters"))?;
         self.call(move |conn| {
             let tx = conn.transaction()?;
-            let old: Option<(i64, i64)> = match &id {
+            let old: Option<(i64, i64, Option<String>, String)> = match &id {
                 Some(id) => tx
                     .query_row(
-                        "SELECT revision,enabled FROM log_alerts WHERE id=?1",
+                        "SELECT revision,enabled,message_template,message_fields FROM log_alerts WHERE id=?1",
                         [id],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                     )
                     .optional()?,
                 None => None,
             };
             if expected_revision.is_some_and(|expected| {
-                old.as_ref().map(|(revision, _)| *revision) != Some(expected)
+                old.as_ref().map(|(revision, _, _, _)| *revision) != Some(expected)
             }) {
                 return Ok(Err(LogAlertError::Conflict("log_alert_changed")));
             }
@@ -427,7 +469,7 @@ impl Store {
                 [],
                 |row| row.get(0),
             )?;
-            let was_enabled = old.is_some_and(|(_, enabled)| enabled != 0);
+            let was_enabled = old.as_ref().is_some_and(|(_, enabled, ..)| *enabled != 0);
             if input.enabled && !was_enabled && enabled >= MAX_LOG_ALERTS {
                 return Ok(Err(LogAlertError::Conflict("log_alert_limit")));
             }
@@ -437,7 +479,7 @@ impl Store {
             };
             let now = now_ms();
             let id = match (id, old) {
-                (Some(id), Some((revision, _))) => {
+                (Some(id), Some((revision, _, old_template, old_fields))) => {
                     // Сообщения прежней версии правила больше не отправляются.
                     tx.execute(
                         "UPDATE metric_alert_deliveries SET status='cancelled',last_error=NULL
@@ -446,21 +488,45 @@ impl Store {
                         [&id],
                     )?;
                     crate::alerts::finish_outbox(&tx, now)?;
+                    let message_template = input
+                        .message_template
+                        .clone()
+                        .map(|value| if value.trim().is_empty() { None } else { Some(value) })
+                        .unwrap_or(old_template);
+                    let fields = input.message_fields.clone().unwrap_or_else(|| {
+                        serde_json::from_str(&old_fields)
+                            .unwrap_or_else(|_| crate::alerts::default_log_message_fields())
+                    });
+                    let fields = serde_json::to_string(&fields).map_err(|error| {
+                        rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                    })?;
                     tx.execute(
                         "UPDATE log_alerts SET name=?2,enabled=?3,query=?4,filters=?5,text=?6,text_mode=?7,
-                         threshold=?8,cooldown_seconds=?9,revision=?10 WHERE id=?1",
+                         threshold=?8,cooldown_seconds=?9,revision=?10,message_template=?11,message_fields=?12 WHERE id=?1",
                         params![id, input.name, input.enabled as i64, input.query, filters, text, mode,
-                            input.threshold, input.cooldown_seconds, revision + 1],
+                            input.threshold, input.cooldown_seconds, revision + 1,message_template,fields],
                     )?;
                     id
                 }
                 _ => {
                     let id = Uuid::new_v4().to_string();
+                    let message_template = input
+                        .message_template
+                        .clone()
+                        .filter(|value| !value.trim().is_empty());
+                    let message_fields = input
+                        .message_fields
+                        .clone()
+                        .unwrap_or_else(crate::alerts::default_log_message_fields);
+                    let message_fields = serde_json::to_string(&message_fields).map_err(|error| {
+                        rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                    })?;
                     tx.execute(
                         "INSERT INTO log_alerts(id,name,enabled,query,filters,text,text_mode,threshold,
-                         cooldown_seconds,revision,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,1,?10)",
+                         cooldown_seconds,revision,created_at,message_template,message_fields)
+                         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,1,?10,?11,?12)",
                         params![id, input.name, input.enabled as i64, input.query, filters, text, mode,
-                            input.threshold, input.cooldown_seconds, now],
+                            input.threshold, input.cooldown_seconds, now,message_template,message_fields],
                     )?;
                     id
                 }
@@ -602,14 +668,14 @@ impl Store {
                 let mut sent_at = last_sent;
                 let mut next_suppressed = suppressed;
                 if matched && cooldown_passed {
-                    let message = log_alert_message(alert, count, suppressed, &result.samples, &public_url);
+                    let message = log_alert_message(alert, count, suppressed, &result.samples, &reply.as_of, &public_url);
                     enqueue_log_event(&tx, alert, &message, now)?;
                     sent_at = Some(now);
                     next_suppressed = 0;
                 } else if matched {
                     next_suppressed = suppressed.saturating_add(count);
                 } else if suppressed > 0 && cooldown_passed {
-                    let message = log_alert_message(alert, 0, suppressed, &[], &public_url);
+                    let message = log_alert_message(alert, 0, suppressed, &[], &reply.as_of, &public_url);
                     enqueue_log_event(&tx, alert, &message, now)?;
                     sent_at = Some(now);
                     next_suppressed = 0;
@@ -713,7 +779,7 @@ pub async fn mcp_delete_log_alert(
 fn enqueue_log_event(
     tx: &rusqlite::Transaction<'_>,
     alert: &LogAlert,
-    message: &str,
+    message: &RenderedTelegramMessage,
     now: i64,
 ) -> rusqlite::Result<()> {
     let event_id = Uuid::new_v4().to_string();
@@ -724,9 +790,10 @@ fn enqueue_log_event(
     )?;
     let created_at = previous.map_or(now, |previous| now.max(previous.saturating_add(1)));
     tx.execute(
-        "INSERT INTO metric_alert_outbox(id,alert_id,log_alert_id,alert_revision,event_kind,message,created_at,expires_at)
-         VALUES(?1,NULL,?2,?3,'log_match',?4,?5,?6)",
-        params![event_id, alert.id, alert.revision, message, created_at, created_at + OUTBOX_TTL_MS],
+        "INSERT INTO metric_alert_outbox(id,alert_id,log_alert_id,alert_revision,event_kind,message,created_at,expires_at,parse_mode,reply_markup)
+         VALUES(?1,NULL,?2,?3,'log_match',?4,?5,?6,?7,?8)",
+        params![event_id, alert.id, alert.revision, message.text, created_at, created_at + OUTBOX_TTL_MS,
+            message.parse_mode,message.reply_markup],
     )?;
     let recipients = {
         let mut statement = tx.prepare(
@@ -759,38 +826,118 @@ fn truncate(text: &str, limit: usize) -> String {
     }
 }
 
-/// Plain text Telegram: имя, число совпадений, до трёх последних строк и ссылка на Logs.
-pub fn log_alert_message(
+/// Формирует HTML-уведомление и сохраняет кнопку вместе с уже отрендеренным текстом outbox.
+pub(crate) fn log_alert_message(
     alert: &LogAlert,
     count: i64,
     suppressed: i64,
     samples: &[Value],
+    as_of: &str,
     public_url: &Url,
-) -> String {
-    let mut body = if count > 0 {
-        format!("Алерт на логи: {}\nНовых совпадений: {count}\n", alert.name)
-    } else {
-        format!("Алерт на логи: {}\n", alert.name)
+) -> RenderedTelegramMessage {
+    let selected = |field: &str| alert.message_fields.iter().any(|value| value == field);
+    let first = samples.first();
+    let sample_field = |event: Option<&Value>, name: &str| {
+        event
+            .and_then(|event| event[name].as_str())
+            .unwrap_or("")
+            .to_owned()
     };
-    if suppressed > 0 {
-        body.push_str(&format!("Совпадений за время паузы: {suppressed}\n"));
+    let server = sample_field(first, "server");
+    let service = sample_field(first, "service");
+    let environment = sample_field(first, "environment");
+    let last_point = sample_field(first, "timestamp");
+    let mut source = Vec::new();
+    if selected("name") || selected("title") {
+        source.push(format!("Имя алерта: {}", alert.name));
     }
-    body.push_str(&format!("Запрос: {}\n", truncate(&alert.query, 500)));
-    for event in samples {
-        let field = |name: &str| event[name].as_str().unwrap_or("");
-        body.push_str(&format!(
-            "\n{} {}/{} {}: {}",
-            field("timestamp"),
-            field("server"),
-            field("service"),
-            field("level"),
-            truncate(field("message"), SAMPLE_CHARS),
-        ));
+    if selected("server") && !server.is_empty() {
+        source.push(format!("Сервер: {server}"));
     }
-    if !samples.is_empty() {
-        body.push('\n');
+    if selected("service") && !service.is_empty() {
+        source.push(format!("Сервис: {service}"));
     }
-    append_message_link(body, logs_link(public_url, alert))
+    if selected("environment") && !environment.is_empty() {
+        source.push(format!("Окружение: {environment}"));
+    }
+    if selected("query") {
+        source.push(format!("Запрос: {}", truncate(&alert.query, 500)));
+    }
+    if selected("samples") {
+        for event in samples.iter().take(3) {
+            let field = |name: &str| event[name].as_str().unwrap_or("");
+            source.push(format!(
+                "{} {}/{} {}: {}",
+                field("timestamp"),
+                field("server"),
+                field("service"),
+                field("level"),
+                truncate(field("message"), SAMPLE_CHARS),
+            ));
+        }
+    }
+    let mut condition = Vec::new();
+    if selected("count") || selected("value") {
+        condition.push(format!("Новых совпадений: {count}"));
+    }
+    if suppressed > 0 && (selected("count") || selected("value")) {
+        condition.push(format!("Совпадений за время паузы: {suppressed}"));
+    }
+    if selected("condition") {
+        condition.push(format!("Порог: не меньше {} за проверку", alert.threshold));
+    }
+    let mut time = Vec::new();
+    if selected("time") {
+        time.push(format!("Время Core: {as_of}"));
+    }
+    if selected("last_point") && !last_point.is_empty() {
+        time.push(format!("Последнее совпадение: {last_point}"));
+    }
+    let status = if count > 0 {
+        "сработал"
+    } else {
+        "сводка совпадений"
+    };
+    let mut placeholders = BTreeMap::new();
+    placeholders.insert("name", alert.name.clone());
+    placeholders.insert("title", alert.name.clone());
+    placeholders.insert("description", String::new());
+    placeholders.insert("service", service);
+    placeholders.insert("server", server);
+    placeholders.insert("environment", environment);
+    placeholders.insert(
+        "condition",
+        format!("не меньше {} совпадений за проверку", alert.threshold),
+    );
+    placeholders.insert("value", count.to_string());
+    placeholders.insert("time", as_of.to_owned());
+    placeholders.insert(
+        "last_point",
+        if last_point.is_empty() {
+            "нет данных".into()
+        } else {
+            last_point
+        },
+    );
+    placeholders.insert("status", status.to_owned());
+    placeholders.insert("count", count.to_string());
+    placeholders.insert("query", alert.query.clone());
+    render_telegram_message(
+        if count > 0 {
+            "Алерт на логи сработал"
+        } else {
+            "Сводка алерта на логи"
+        },
+        "🔴",
+        alert.message_template.as_deref(),
+        &placeholders,
+        vec![
+            ("Источник", source),
+            ("Условие / значение", condition),
+            ("Время", time),
+        ],
+        &logs_link(public_url, alert),
+    )
 }
 
 fn logs_link(public_url: &Url, alert: &LogAlert) -> String {
@@ -940,6 +1087,8 @@ mod tests {
             threshold: 1,
             cooldown_seconds: 0,
             group_ids: vec![],
+            message_template: None,
+            message_fields: crate::alerts::default_log_message_fields(),
             revision: 1,
             no_recipients: false,
             last_count: 0,

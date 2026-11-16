@@ -19,6 +19,9 @@ Lognara-dock/
     token_access.rs           права (логи, метрики, запись алертов) и скоуп узла MCP-токена
     oauth.rs                  OAuth metadata, restricted ChatGPT CIMD, PKCE, token/refresh endpoints
     mcp_access.rs             API страницы MCP-доступа, PAT и OAuth grants/consent
+    alerts.rs                 алерты метрик: общие настройки, правила, состояние и durable-доставка Telegram, `alerts::watch`
+    log_alerts.rs             алерты на логи: правила запроса страницы Logs, проверка по watermark `sequence`
+    version.rs                release_version: LOGNARA_RELEASE_VERSION или версия с коротким commit
     htpasswd.rs               разбор, кэш по stamp, verify, атомарная перезапись
     store.rs                  SQLite, миграции, PAT/OAuth hashes and grants, сессии, passkey, паттерны, проблемы, избранное
     patterns.rs               DTO паттернов, proxy search/details и персональное скрытие
@@ -46,6 +49,7 @@ Lognara-dock/
     infra.rs                  session/no-store, частичные ошибки, TTL/idle/spool, relay_id и relay_silent
     series.rs                 proxy метрик, ошибки core, сессия, Origin и таймаут 35 с
     mcp_scope.rs              права и скоуп MCP: tools/list, forbidden, скоуп в запросах core, курсоры, алерты, OAuth consent
+    mcp_protocol.rs           stateless `/mcp`: initialize, tools/list и вызов get_versions только с Bearer-токеном
     static.rs                 SPA fallback и 404 для /api
   web/
     public/fonts/             локальные Commissioner / IBM Plex Mono, OFL, provenance
@@ -59,7 +63,7 @@ Lognara-dock/
     src/components/PeriodChips.tsx границы периода, часовой пояс и момент снимка
     src/components/Patterns.tsx  режим паттернов: таблица, sparkline, детали, скрытие, переход к событиям
     src/webauthn.ts           base64url ↔ ArrayBuffer для navigator.credentials
-    src/App.tsx               проверка /api/me, верхняя панель и lazy routes включая дерево инфраструктуры, `/mcp-access` и OAuth consent
+    src/App.tsx               проверка /api/me, верхняя панель и lazy routes включая дерево инфраструктуры, `/alerts`, `/hosts`, OAuth consent; `/mcp-access` перенаправляет в `/settings/mcp`, `/log-alerts` в `/alerts`
     src/pages/Login.tsx       пароль, показ пароля, кнопка passkey и анимированный фон
     src/pages/Logs.tsx        история/cursor/Trace, URL, автодогрузка, отдельный Live, детали, экспорт
     src/pages/Errors.tsx      проблемы: вкладки статусов, stack trace, история, решение и переходы
@@ -68,24 +72,38 @@ Lognara-dock/
     src/pages/InfrastructureTree.tsx lazy-страница дерева, выбор пути, sticky-подсказка и измерение карточек
     src/infraTree.ts            чистая группировка по ID, геометрия и правила выбора дерева
     src/infraPresentation.ts    общие подписи статусов, времени, размеров и групп
+    src/infrastructureVersion.ts подпись версии узла: release_version или версия пакета с коротким commit
     src/useInfrastructure.ts    общий опрос сводки, отмена, 401 и stale-снимок
     src/pages/Access.tsx      профили relay/агентов, создание, одноразовый токен, удаление
-    src/pages/McpAccess.tsx   MCP URL, одноразовый PAT с правами и скоупом, срок/last-use и отзыв PAT/grants
+    src/pages/McpAccess.tsx   вкладка `/settings/mcp`: MCP URL, одноразовый PAT с правами и скоупом, срок/last-use и отзыв PAT/grants
     src/components/AccessFields.tsx выбор прав и скоупа узла для PAT и OAuth consent
+    src/components/ServiceCombobox.tsx поиск сервиса с подсказками (Errors, Analytics, MetricCreate, AccessFields); логика в serviceComboboxLogic.ts
+    src/components/DateRangePicker.tsx календарь диапазона в часовом поясе отображения (Logs, Hosts); логика в dateRange.ts
+    src/components/LineChart.tsx многосерийный график с hover, легендой и выбором диапазона (Analytics, MetricDetail, Hosts, EventsChart); вычисления в lineChartUtils.ts
+    src/components/HostIcon.tsx иконка хоста для Access и дерева инфраструктуры
+    src/pages/Alerts.tsx      `/alerts`: вкладки «Правила» (метрики и логи), «Получатели и группы», «Telegram»
+    src/pages/MetricAlertEditor.tsx редактор правила метрики; MetricAlertSettings.tsx получатели и Telegram-настройки, встроены в Alerts
+    src/pages/Hosts.tsx       `/hosts?host=...`: выбор хоста, ряды hwagent, LineChart и DateRangePicker
     src/pages/OAuthConsent.tsx OAuth client/scope/resource и подтверждение пользователя
     src/pages/Metrics.tsx     плитки по серверам/сервисам и очередь миниграфиков
     src/pages/MetricDetail.tsx отдельная страница метрики с серверной областью
     src/pages/MetricCreate.tsx модалка создания, импорт JSON, конфликты и nginx
     src/metricBundles.ts      переносимые наборы, примеры и шаблоны nginx
     src/infraTree.test.ts     группировка, orphan, геометрия и связанные пути
+    src/dateRange.test.ts, serviceCombobox.test.ts, lineChart.test.ts, infrastructureVersion.test.ts, metricBundles.test.ts  чистая логика соответствующих модулей
     src/pages/MetricEditor.tsx определение метрики, предпросмотр regex, сохранение и удаление
     src/components/Chart.tsx  uPlot с цветами осей из общей тёмной палитры
-    src/pages/Settings.tsx    смена пароля, список и добавление passkey
-    playwright.config.ts     Chromium, Vite webServer и сценарии tests/dock.spec.ts и tests/errors.spec.ts
+    src/pages/Settings.tsx    `/settings/<tab>`: вкладки account (пароль), passkeys и mcp (встраивает McpAccess)
+    playwright.config.ts     Chromium, Vite webServer, testDir `tests/` (все сценарии)
     tests/metrics.spec.ts     окружения/разбиение, regex preview/save, навигация и mobile
     tests/infrastructure.spec.ts сводка и дерево: навигация, выбор, polling, ошибка, mobile и 500 узлов
     tests/mcp-access.spec.ts выпуск/копирование PAT с правами и скоупом, отсутствие localStorage, expiry/revoke, OAuth consent и возврат после login
-    tests/dock.spec.ts        вход, аккаунт, поиск, cursor, Trace/ссылка, аналитика, Live, mobile
+    tests/dock.spec.ts        вход, аккаунт, поиск, cursor, Trace (пустой ID — подсказка, неверный или без событий — отдельные состояния), аналитика, Live, mobile
+    tests/access.spec.ts      профили relay/агентов и одноразовые токены
+    tests/alerts.spec.ts      `/alerts`: правила, получатели и Telegram
+    tests/log-alerts.spec.ts  алерты на логи и редирект `/log-alerts`
+    tests/hosts.spec.ts       `/hosts`: список хостов и выбор
+    tests/host-metrics.spec.ts графики хоста из hwagent
 ```
 
 ## Связи модулей

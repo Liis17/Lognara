@@ -96,7 +96,7 @@ Query `GET /v1/status` считает текущее место filesystem, Parq
 
 Поток агрегатов: `metrics/` → `lognara-rollups` → `rollups/1h|12h/` → `POST /v1/series/query` (вместе с сырыми точками вне агрегатов и открытого сегмента) → dock.
 
-Поток алертов: raw `metrics/` + открытый сегмент → `POST /v1/series/alerts/query` → Dock evaluation/state/outbox → Telegram Bot API. Core rollout должен предшествовать Dock; несовместимый Core виден в Settings и не вызывает сообщение о потере Core.
+Поток алертов: raw `metrics/` + открытый сегмент → `POST /v1/series/alerts/query` → Dock evaluation/state/outbox → Telegram Bot API. Core rollout должен предшествовать Dock; несовместимый Core виден на вкладке Telegram и в правилах `/alerts` и не вызывает сообщение о потере Core.
 
 Структура и отличия реализации: [[Core/LognaraCore]], [[Dock/LognaraDock]] и [[Design/Metrics]].
 
