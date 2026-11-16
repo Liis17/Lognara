@@ -59,8 +59,8 @@ Lognara — система сбора логов: агент в контейне
 | Файл | Компонент | Описание |
 |------|-----------|----------|
 | [[Repository/RootFiles]] | Корневые файлы | README, `.env.example`, лицензия и конфигурация исключений. |
-| [[Repository/CI]] | GitHub Actions | Выбор затронутых проверок и образов по путям и зависимостям во всех ветках; полные проверки при ручном запуске. |
-| [[Repository/Images]] | Docker и registry | Выборочные и ручные полные релизы core/relay/dock из master, независимые patch-версии из registry и встраивание agent в контейнер приложения. |
+| [[Repository/CI]] | GitHub Actions | Проверки PR в dev, guard продвижения dev → master и полные ручные проверки. |
+| [[Repository/Images]] | Docker и registry | Сборка core/relay/dock в dev, продвижение manifests по digest в master, независимые стабильные версии и поставка agent. |
 | [[Repository/LocalExample]] | Локальный Docker-стенд | Python HTTP-сервер на 8881 с агентом в контейнере, отдельные relay/core, постоянные volumes и проверка доставки. |
 | [[Repository/Audit]] | Аудит приложений | Исторический отчёт по agent, relay и core для коммита `acddb94`: 27 замечаний по приоритетам и типам, результаты и ограничения проверки. |
 
