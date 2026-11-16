@@ -32,13 +32,14 @@ const MAX_STATUSES: usize = 10_000;
 const PROJECTION: &[&str] = &[
     "environment",
     "service",
-    "backend",
     "action",
     "level",
     "message",
     "attributes",
     "timestamp",
     "server",
+    // Только для скана: is_pattern_eligible отсекает метрики hwagent; recurrences берёт первые 7.
+    "backend",
 ];
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
