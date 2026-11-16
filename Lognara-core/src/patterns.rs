@@ -298,7 +298,9 @@ pub(crate) async fn scan(
         query::check_deadline(deadline)?;
         for row in 0..batch.num_rows() {
             let message = string(&batch, "message", row)?;
-            if !is_pattern_eligible(message) {
+            let service = string(&batch, "service", row)?;
+            let backend = string(&batch, "backend", row)?;
+            if !is_pattern_eligible(message, service, backend) {
                 continue;
             }
             if window
@@ -311,7 +313,7 @@ pub(crate) async fn scan(
             let level = LogLevel::from_code(column::<UInt8Array>(&batch, "level")?.value(row))?;
             let identity = identify(
                 optional_string(&batch, "environment", row)?,
-                string(&batch, "service", row)?,
+                service,
                 level.as_str(),
                 message,
             );
@@ -420,7 +422,14 @@ pub async fn search(core: &Core, request: PatternRequest) -> Result<PatternRespo
         core,
         &state,
         &window,
-        Some(&["environment", "service", "level", "message", "timestamp"]),
+        Some(&[
+            "environment",
+            "service",
+            "backend",
+            "level",
+            "message",
+            "timestamp",
+        ]),
         deadline,
         |row| {
             total_events += u64::from(row.timestamp >= window.filter.from);

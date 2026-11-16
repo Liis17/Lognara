@@ -103,9 +103,12 @@ pub fn identify(environment: Option<&str>, service: &str, level: &str, message: 
     }
 }
 
-/// Встроенные ServiceMetrics v1/v2 остаются логами, но не становятся паттернами.
-pub(crate) fn is_pattern_eligible(message: &str) -> bool {
+/// Встроенные метрики остаются логами, но не становятся паттернами.
+/// Host metrics определяются фиксированными полями источника hwagent, чтобы не читать
+/// и не разбирать JSON attributes в каждом проходе сканирования паттернов.
+pub(crate) fn is_pattern_eligible(message: &str, service: &str, backend: &str) -> bool {
     !message.starts_with("ServiceMetrics {")
+        && !(message == "host metrics" && service == "host" && backend == "host")
 }
 
 pub fn valid_id(id: &str) -> bool {
@@ -808,15 +811,23 @@ mod tests {
     #[test]
     fn service_metrics_v1_and_v2_are_not_pattern_eligible() {
         assert!(!is_pattern_eligible(
-            r#"ServiceMetrics { ServiceName: "api", Metrics: [], Timestamp: 10/23/2026 12:14:47 }"#
+            r#"ServiceMetrics { ServiceName: "api", Metrics: [], Timestamp: 10/23/2026 12:14:47 }"#,
+            "api",
+            "api",
         ));
         assert!(!is_pattern_eligible(
-            r#"ServiceMetrics { SchemaVersion: 2, ServiceName: "api", Counters: [], Gauges: [], Timestamp: 11/15/2026 20:37:51 }"#
+            r#"ServiceMetrics { SchemaVersion: 2, ServiceName: "api", Counters: [], Gauges: [], Timestamp: 11/15/2026 20:37:51 }"#,
+            "api",
+            "api",
         ));
         assert!(is_pattern_eligible(
-            "ServiceMetrics are temporarily unavailable"
+            "ServiceMetrics are temporarily unavailable",
+            "api",
+            "api",
         ));
-        assert!(is_pattern_eligible("payment failed"));
+        assert!(!is_pattern_eligible("host metrics", "host", "host"));
+        assert!(is_pattern_eligible("host metrics", "billing", "payments"));
+        assert!(is_pattern_eligible("payment failed", "billing", "payments"));
     }
 
     #[test]

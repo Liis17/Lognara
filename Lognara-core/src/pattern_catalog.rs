@@ -309,6 +309,7 @@ impl DiskCatalog {
             .select_columns(&[
                 "environment",
                 "service",
+                "backend",
                 "action",
                 "level",
                 "message",
@@ -328,6 +329,7 @@ impl DiskCatalog {
             for row in 0..batch.num_rows() {
                 let environment = optional_string(&batch, "environment", row)?;
                 let service = string(&batch, "service", row)?;
+                let backend = string(&batch, "backend", row)?;
                 let action = optional_string(&batch, "action", row)?;
                 let level = LogLevel::from_code(column::<UInt8Array>(&batch, "level")?.value(row))?;
                 let message = string(&batch, "message", row)?;
@@ -366,7 +368,7 @@ impl DiskCatalog {
                         },
                     )?;
                 }
-                if is_pattern_eligible(message) {
+                if is_pattern_eligible(message, service, backend) {
                     observe(
                         &mut known,
                         &mut changed,

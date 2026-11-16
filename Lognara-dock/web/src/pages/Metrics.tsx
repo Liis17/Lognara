@@ -179,6 +179,7 @@ function Tile({
   alert,
   alertsEnabled,
   onFavorite,
+  showSource = false,
 }: {
   metric: ListedMetric;
   favorite: boolean;
@@ -186,6 +187,7 @@ function Tile({
   alert: MetricAlertSummary["alerts"][number] | undefined;
   alertsEnabled: boolean;
   onFavorite: (metric: ListedMetric) => void;
+  showSource?: boolean;
   loader: ReturnType<typeof chartLoader>;
   to: number;
   period: MiniPeriod;
@@ -284,6 +286,7 @@ function Tile({
           <strong>{metric.definition?.title || metric.name}</strong>
           <span className="tag">{originText[metric.origin]}</span>
         </div>
+        {showSource && <span className="metric-tile-source">{metric.server} · {metric.service}</span>}
         <span className="muted">
           {metric.name}
           {metric.definition?.unit ? " · " + metric.definition.unit : ""}
@@ -333,9 +336,11 @@ type TileContext = {
 function Grid({
   items,
   context,
+  showSource = false,
 }: {
   items: ListedMetric[];
   context: TileContext;
+  showSource?: boolean;
 }) {
   return (
     <div className="metric-grid">
@@ -352,6 +357,7 @@ function Grid({
           alert={context.alerts.get(metricKey(metric))}
           alertsEnabled={context.alertsEnabled}
           onFavorite={context.onFavorite}
+          showSource={showSource}
         />
       ))}
     </div>
@@ -635,7 +641,6 @@ export default function Metrics({
     metric.definition?.description, metric.service, metric.server]
     .some((value) => value?.toLocaleLowerCase().includes(needle));
   const visibleFavorites = items.filter((metric) => (!serverFilter || metric.server === serverFilter) && matches(metric));
-  const favoriteGroups = groupMetrics(visibleFavorites);
   const visibleSources = sources.filter((source) => !serverFilter || source.server === serverFilter);
   const sourceGroups = groupSources(visibleSources);
   const serverOptions = [...new Set([...sources.map((source) => source.server), ...items.map((item) => item.server)])].sort();
@@ -674,14 +679,7 @@ export default function Metrics({
             {items.length ? "По выбранным условиям избранных метрик нет." : "Избранных метрик пока нет. Отметьте звёздочкой нужную карточку в списке."}
           </p>
         )}
-        {favoriteGroups.map(({ server, services }) => (
-          <section className="metric-favorite-group" key={server}>
-            <h3>{server || "Сервер без имени"}</h3>
-            {services.map(({ service, metrics }) => <div key={service}>
-              <h4>{service}</h4><Grid items={metrics} context={context} />
-            </div>)}
-          </section>
-        ))}
+        {visibleFavorites.length > 0 && <Grid items={visibleFavorites} context={context} showSource />}
       </section>
       {needle ? <section className="metric-search-results" aria-label="Результаты поиска">
         <h2>Результаты поиска</h2>

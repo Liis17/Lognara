@@ -157,10 +157,10 @@ test("server tiles link to reloadable detail pages and preserve query scope", as
   await fixture(page);
   await page.goto("/metrics");
   await expect(
-    page.getByRole("heading", { name: "server-a", exact: true }),
+    page.locator(".metric-server-group > summary").filter({ hasText: /^server-a/ }),
   ).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: "server-b", exact: true }),
+    page.locator(".metric-server-group > summary").filter({ hasText: /^server-b/ }),
   ).toBeVisible();
   await expect(page.locator(".metric-tile canvas")).toHaveCount(2);
   await page.screenshot({

@@ -13,6 +13,7 @@ const Logs = lazy(() => import("./pages/Logs"));
 const LogAlerts = lazy(() => import("./pages/LogAlerts"));
 const Metrics = lazy(() => import("./pages/Metrics"));
 const MetricDetail = lazy(() => import("./pages/MetricDetail"));
+const Hosts = lazy(() => import("./pages/Hosts"));
 const McpAccess = lazy(() => import("./pages/McpAccess"));
 const OAuthConsent = lazy(() => import("./pages/OAuthConsent"));
 const Settings = lazy(() => import("./pages/Settings"));
@@ -96,6 +97,7 @@ export default function App() {
           <NavLink to="/analytics">Аналитика</NavLink>
           <NavLink to="/infrastructure">Инфраструктура</NavLink>
           <NavLink to="/metrics">Метрики</NavLink>
+          <NavLink to="/hosts">Хосты</NavLink>
           <NavLink to="/access">Подключения</NavLink>
           <NavLink to="/mcp-access">MCP-доступ</NavLink>
           <NavLink to="/settings">Настройки</NavLink>
@@ -130,6 +132,7 @@ export default function App() {
                 element={<Metrics onUnauthorized={() => setMe(null)} />}
               />
               <Route path="/metrics/detail" element={<MetricDetail onUnauthorized={() => setMe(null)} />} />
+              <Route path="/hosts" element={<Hosts onUnauthorized={() => setMe(null)} />} />
               <Route path="/access" element={<Access onUnauthorized={() => setMe(null)} />} />
               <Route path="/mcp-access" element={<McpAccess />} />
               <Route path="/oauth/consent" element={<OAuthConsent />} />
