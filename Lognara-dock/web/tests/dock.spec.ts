@@ -274,6 +274,18 @@ test('analytics shows real aggregates and drills down to level filter', async ({
   await expect(page.getByRole('heading', { name: 'Аналитика', exact: true })).toBeVisible();
   await expect(page.locator('.metric').filter({ hasText: 'Доля ERROR' })).toContainText('7%');
   await expect(page.getByRole('button', { name: /ERROR.*70.*7%/ })).toBeVisible();
+  const service = page.getByRole('combobox', { name: 'Сервис' });
+  await service.fill('ILL');
+  await expect(page.getByRole('option', { name: 'billing' })).toBeVisible();
+  await service.press('ArrowDown');
+  await service.press('Enter');
+  await expect.poll(() => calls.filter((call) => call.path === '/api/stats/summary').at(-1)?.body.filters)
+    .toEqual({ service: ['billing'] });
+  await page.getByRole('button', { name: 'Очистить сервис' }).click();
+  await expect.poll(() => calls.filter((call) => call.path === '/api/stats/summary').at(-1)?.body.filters).toEqual({});
+  await service.fill('no matching service');
+  await service.press('Escape');
+  await expect(service).toHaveValue('Все сервисы');
   await page.getByRole('button', { name: 'Сравнить с прошлым окном' }).click();
   await expect.poll(() => calls.filter((call) => call.path === '/api/stats/summary').length).toBeGreaterThanOrEqual(3);
   await page.locator('.metric').filter({ hasText: 'Доля ERROR' }).getByRole('button').click();

@@ -163,7 +163,7 @@ export default function LogAlerts({ onUnauthorized }: { onUnauthorized: () => vo
             </label>
           ))}
         </fieldset>
-        <label className="checkbox">
+        <label className="checkbox switch-label">
           <input type="checkbox" checked={form.enabled} onChange={(e) => setForm({ ...form, enabled: e.target.checked })} />
           Включён
         </label>

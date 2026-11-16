@@ -217,7 +217,7 @@ export default function MetricAlertEditor({
               </ul>
             </div>
           )}
-          <label className="alert-enabled-control">
+          <label className="alert-enabled-control switch-label">
             <input
               type="checkbox"
               checked={draft.enabled}

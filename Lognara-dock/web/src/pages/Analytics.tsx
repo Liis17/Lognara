@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import { api, ApiError, errorText } from "../api";
 import Histogram from "../components/Histogram";
+import ServiceCombobox from "../components/ServiceCombobox";
 import type { Duration, GroupResponse, LogLevel, QueryFilters, SummaryResponse } from "../types";
 
 const periods = [
@@ -143,12 +144,7 @@ export default function Analytics({ onUnauthorized }: { onUnauthorized: () => vo
           {periods.map((item, index) => <button key={item.label} type="button" aria-pressed={period === index}
             onClick={() => { setPeriod(index); setRange(rangeFor(item.milliseconds)); }}>{item.label}</button>)}
         </div>
-        <label className="inline-label"><span>Сервис</span><select value={service === null ? "" : JSON.stringify(service)}
-          onChange={(event) => setService(event.target.value === "" ? null : JSON.parse(event.target.value) as string)}>
-          <option value="">Все сервисы</option>
-          {service !== null && !serviceOptions.includes(service) && <option value={JSON.stringify(service)}>{service || "Пустое имя"}</option>}
-          {serviceOptions.map((value) => <option key={value} value={JSON.stringify(value)}>{value || "Пустое имя"}</option>)}
-        </select></label>
+        <ServiceCombobox label="Сервис" value={service} inline options={serviceOptions.map((value) => ({ value }))} onChange={setService} />
         <button type="button" aria-pressed={compare} onClick={() => setCompare((value) => !value)}>Сравнить с прошлым окном</button>
         <button type="button" onClick={() => setRange(rangeFor(periods[period].milliseconds))}>Обновить</button>
         {loading && <span className="muted" role="status">Обновление…</span>}

@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router";
 import { api, ApiError, errorText } from "../api";
+import ServiceCombobox from "../components/ServiceCombobox";
 import { Sparkline, Template } from "../components/Patterns";
 import { contextBounds, sourceQuery, withFilter } from "../logs";
 import type { GroupResponse, Issue, IssueDetailsResponse, IssueResponse, IssueStatus, QueryFilters } from "../types";
@@ -152,11 +153,8 @@ export default function Errors({ onUnauthorized }: { onUnauthorized: () => void 
           title={tab.status === "new" && response?.counts.new === null ? "Новизна не установлена: история индекса неполна" : undefined}>
           {tab.label}<span className="issue-count">{value === null ? "—" : number.format(value)}</span></button>;
       })}</div>
-      <label className="inline-label" htmlFor="issue-service">Сервис <select id="issue-service" value={service ?? ""} onChange={(event) => update("service", event.target.value || null)}>
-        <option value="">Все сервисы</option>
-        {service && !services.includes(service) && <option value={service}>{service}</option>}
-        {services.map((name) => <option key={name} value={name}>{name}</option>)}
-      </select></label>
+      <ServiceCombobox label="Сервис" value={service} inline options={services.map((value) => ({ value }))}
+        onChange={(value) => update("service", value)} />
       <label className="inline-label" htmlFor="issue-period">Период <select id="issue-period" value={period} onChange={(event) => update("period", event.target.value)}>
         {Object.entries(PERIODS).map(([key, value]) => <option key={key} value={key}>{value.label}</option>)}
       </select></label>

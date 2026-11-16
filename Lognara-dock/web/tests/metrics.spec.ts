@@ -147,7 +147,9 @@ async function create(page: Page, server = "server-a", service = "billing") {
     .getByRole("button", { name: "Новая метрика", exact: true })
     .click();
   await page.getByLabel("Выберите сервер").selectOption(server);
-  await page.getByLabel("Выберите сервис").selectOption(service);
+  const serviceInput = page.getByRole("combobox", { name: "Сервис" });
+  await serviceInput.fill(service);
+  await serviceInput.press("Enter");
 }
 test("server tiles link to reloadable detail pages and preserve query scope", async ({
   page,
@@ -260,7 +262,7 @@ test("tile eye follows the global rule when an MCP-scoped rule shares its key", 
   await expect(page.getByRole("link", { name: "Настроить алерт метрики" })).toBeVisible();
   await expect(page.locator(".metric-alert-indicator.paused")).toHaveCount(0);
 });
-test("manual creation uses dependent selects and scoped editor on mobile", async ({
+test("manual creation uses dependent service search and scoped editor on mobile", async ({
   page,
 }, testInfo) => {
   await fixture(page);
@@ -269,15 +271,19 @@ test("manual creation uses dependent selects and scoped editor on mobile", async
   await page
     .getByRole("button", { name: "Новая метрика", exact: true })
     .click();
-  await expect(page.getByLabel("Выберите сервис")).toBeDisabled();
+  const serviceInput = page.getByRole("combobox", { name: "Сервис" });
+  await expect(serviceInput).toBeDisabled();
   await page.getByLabel("Выберите сервер").selectOption("server-b");
+  await serviceInput.focus();
   await expect(
-    page.getByLabel("Выберите сервис").getByRole("option", { name: "billing" }),
+    page.getByRole("listbox", { name: "Сервис: подсказки" }).getByRole("option", { name: /billing/ }),
   ).toHaveCount(0);
-  await page.getByLabel("Выберите сервис").selectOption("nginx");
+  await serviceInput.fill("nginx");
+  await serviceInput.press("Enter");
   await page.getByLabel("Выберите сервер").selectOption("server-a");
-  await expect(page.getByLabel("Выберите сервис")).toHaveValue("");
-  await page.getByLabel("Выберите сервис").selectOption("billing");
+  await expect(serviceInput).toHaveValue("Все сервисы");
+  await serviceInput.fill("billing");
+  await serviceInput.press("Enter");
   await page.getByLabel("Имя", { exact: true }).fill("latency");
   await page.getByLabel("Подстрока для отбора строк").fill("duration=");
   await page.getByLabel("Регулярное выражение").fill("duration=(?<ms>\\d+)");

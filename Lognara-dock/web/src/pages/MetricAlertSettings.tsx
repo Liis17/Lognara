@@ -379,7 +379,7 @@ export default function MetricAlertSettings({
       {settings ? (
         <>
           <div className="alert-global-status">
-            <label>
+            <label className="switch-label">
               <input
                 type="checkbox"
                 checked={settings.enabled}

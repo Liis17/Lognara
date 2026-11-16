@@ -14,6 +14,7 @@ import {
   type MetricBundle,
 } from "../metricBundles";
 import MetricDialog from "../components/MetricDialog";
+import ServiceCombobox from "../components/ServiceCombobox";
 import MetricEditor from "./MetricEditor";
 
 interface CheckReply {
@@ -197,31 +198,17 @@ export default function MetricCreate({
               ))}
             </select>
           </label>
-          <label>
-            Сервис
-            <select
-              aria-label="Выберите сервис"
-              disabled={!server || busy}
-              value={service}
-              onChange={(e) => {
-                setService(e.target.value);
-                reset();
-              }}
-            >
-              <option value="">Выберите сервис</option>
-              {[
-                ...new Set(
-                  sources
-                    .filter((s) => s.server === server)
-                    .map((s) => s.service),
-                ),
-              ]
-                .sort()
-                .map((s) => (
-                  <option key={s}>{s}</option>
-                ))}
-            </select>
-          </label>
+          <ServiceCombobox
+            label="Сервис"
+            value={service || null}
+            options={[...new Set(sources.filter((s) => s.server === server).map((s) => s.service))]
+              .sort().map((value) => ({ value, secondary: server }))}
+            disabled={!server || busy}
+            onChange={(value) => {
+              setService(value ?? "");
+              reset();
+            }}
+          />
         </div>
         {sources.length === 0 && (
           <p className="muted">
