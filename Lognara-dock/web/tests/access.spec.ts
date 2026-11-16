@@ -100,7 +100,7 @@ test("shows Dock → relay → agents and Dock → host branches with heartbeat 
   await expect(page.getByRole("article", { name: "Хост mail-01" })).toContainText("hwagent");
   await expect(page.getByRole("article", { name: "Хост mail-01" })).toContainText("Онлайн");
   await expect(tree.getByRole("button", { name: "Добавить relay" })).toBeVisible();
-  await expect(tree.getByRole("button", { name: "Добавить хост" })).toBeVisible();
+  await expect(tree.getByRole("button", { name: "Добавить hwagent" })).toBeVisible();
   await expect(relay.getByRole("button", { name: "Добавить агента" })).toBeVisible();
 });
 
@@ -163,7 +163,7 @@ test("confirms deletion and token rotation while retaining the one-time secret p
   page.on("dialog", (dialog) => dialog.accept());
   const host = page.getByRole("article", { name: "Хост mail-01" });
   await host.getByRole("button", { name: "Сменить токен" }).click();
-  await expect(page.getByRole("region", { name: "Выданный токен" })).toContainText("Токен хоста «mail-01» перевыпущен");
+  await expect(page.getByRole("region", { name: "Выданный токен" })).toContainText("Токен hwagent «mail-01» перевыпущен");
   await expect(page.getByLabel("Строка для .env")).toHaveValue(`LOGNARA_HOST_TOKEN=${hostToken}`);
   await page.getByRole("button", { name: "Я сохранил токен" }).click();
   const agent = page.getByRole("region", { name: "Relay relay-eu" }).getByRole("article", { name: "Агент worker" });
@@ -176,9 +176,9 @@ test("confirms deletion and token rotation while retaining the one-time secret p
 
 test("host creation uses the Dock branch and returns its token", async ({ page }) => {
   await fixture(page, true);
-  await page.getByRole("button", { name: "Добавить хост" }).click();
-  await page.getByLabel("Имя хост").fill("mail-new");
-  await page.getByRole("form", { name: "Создать хост" }).getByRole("button", { name: "Создать" }).click();
+  await page.getByRole("button", { name: "Добавить hwagent" }).click();
+  await page.getByLabel("Имя hwagent").fill("mail-new");
+  await page.getByRole("form", { name: "Создать hwagent" }).getByRole("button", { name: "Создать" }).click();
   await expect(page.getByLabel("Строка для .env")).toHaveValue(`LOGNARA_HOST_TOKEN=${hostToken}`);
   await expect(page.getByRole("article", { name: "Хост mail-new" })).toContainText("hwagent");
 });
