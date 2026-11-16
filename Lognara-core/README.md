@@ -107,7 +107,7 @@ Admin-списки добавляют `as_of` по часам core и после
 - `POST /v1/series/lookup` с query-токеном принимает `{keys:[{server,service,name,origin}]}` и возвращает `{metrics:[...]}` только для найденных ключей без значений графиков. Повторы объединяются, отсутствующие ключи опускаются. Подробнее: [контракт метрик](../docs/MetricsBundle.md).
 - `POST /v1/series/query` с `service`, `name`, `from`, `to`, `step_seconds` (1..604800), `split` (`none`, `instance` или `labels`, по умолчанию `none`) и необязательными `origin` и `environment` (без `environment` - сумма по всем окружениям) возвращает `kind`, `aggregation`, `unit`, `buckets`, до 20 серий `series` с `values` (`null` без данных), `truncated`, `truncated_count` и `as_of`. Новые поля явно показывают сохранённое ограничение 20 серий; корзин не больше 10000. У `cumulative` значения - приращения; первое приращение считается от предыдущей корзины. Сутки окна читаются суточными агрегатами вместо точек, если шаг кратен их корзине и агрегат актуален (см. [эксплуатация](docs/operations.md)).
 
-Локальный package `version` в `/v1/status` не является версией образа. При публикации Docker CI задаёт `LOGNARA_RELEASE_VERSION` и `LOGNARA_GIT_COMMIT`; без build args оба поля остаются `null`.
+Локальный package `version` в `/v1/status` не является версией образа. При публикации Docker CI задаёт `LOGNARA_RELEASE_VERSION` и `LOGNARA_GIT_COMMIT`; без build args оба поля остаются `null`. При продвижении dev-образа в master по digest `release_version` сохраняет `dev-<SHA сборки>`, а `git_commit` — исходный коммит dev. Числовой стабильный тег registry не меняет встроенные метаданные.
 
 ## Запуск и проверка
 

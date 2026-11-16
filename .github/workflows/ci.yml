@@ -2,8 +2,10 @@ name: CI
 
 on:
   push:
-    branches: ['**']
+    branches: [dev, master]
   pull_request:
+    branches: [dev, master]
+    types: [opened, synchronize, reopened, edited]
   workflow_dispatch:
   workflow_call:
     inputs:
@@ -15,8 +17,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref == 'refs/heads/master' && github.run_id || github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+  queue: max
 
 env:
   CARGO_TERM_COLOR: always
@@ -26,6 +29,25 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  guard:
+    name: Promotion source
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require dev from this repository for master
+        env:
+          BASE: ${{ github.base_ref }}
+          HEAD: ${{ github.head_ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          if [ "$BASE" = master ]; then
+            test "$HEAD" = dev
+            test "$HEAD_REPO" = "$GITHUB_REPOSITORY"
+          else
+            test "$BASE" = dev
+          fi
+
   changes:
     name: Select affected checks
     runs-on: ubuntu-24.04
@@ -47,10 +69,13 @@ jobs:
         id: filter
         if: github.event_name != 'workflow_dispatch' && !inputs.release_all
         with:
-          base: ${{ github.ref == 'refs/heads/master' && github.ref || github.event.repository.default_branch }}
+          base: ${{ github.ref }}
           predicate-quantifier: some-with-excludes
           filters: |
             ci:
+              - '.github/workflows/ci.yml'
+              - '.github/scripts/select_ci.py'
+              - '.github/scripts/check_ci.py'
               - '.cargo/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
@@ -95,6 +120,7 @@ jobs:
               - '.dockerignore'
               - '.github/workflows/publish-images.yml'
               - '.github/scripts/next-image-version.sh'
+              - '.github/scripts/promote_images.py'
       - name: Select Rust matrix, web and .NET checks
         id: select
         env:
@@ -104,6 +130,7 @@ jobs:
 
   automation:
     name: Workflow automation tests
+    if: github.event_name != 'pull_request' || github.base_ref == 'dev'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -115,7 +142,7 @@ jobs:
   rust:
     name: Rust (${{ matrix.crate }})
     needs: [changes]
-    if: needs.changes.outputs.rust != '[]'
+    if: needs.changes.outputs.rust != '[]' && ((github.event_name == 'pull_request' && github.base_ref == 'dev') || github.event_name == 'workflow_dispatch' || inputs.release_all)
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
@@ -154,7 +181,7 @@ jobs:
   web:
     name: Web (TypeScript and build)
     needs: [changes]
-    if: needs.changes.outputs.web == 'true'
+    if: needs.changes.outputs.web == 'true' && ((github.event_name == 'pull_request' && github.base_ref == 'dev') || github.event_name == 'workflow_dispatch' || inputs.release_all)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     defaults:
@@ -186,7 +213,7 @@ jobs:
   dotnet:
     name: .NET Serilog (${{ matrix.os }})
     needs: [changes]
-    if: needs.changes.outputs.dotnet == 'true'
+    if: needs.changes.outputs.dotnet == 'true' && ((github.event_name == 'pull_request' && github.base_ref == 'dev') || github.event_name == 'workflow_dispatch' || inputs.release_all || github.ref == 'refs/heads/master')
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     defaults:
@@ -221,38 +248,20 @@ jobs:
   ci:
     name: CI passed
     if: ${{ always() }}
-    needs: [changes, automation, rust, web, dotnet]
+    needs: [guard, changes, automation, rust, web, dotnet]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
-      CHANGES_RESULT: ${{ needs.changes.result }}
-      AUTOMATION_RESULT: ${{ needs.automation.result }}
-      RUST_REQUIRED: ${{ needs.changes.outputs.rust != '[]' }}
-      WEB_REQUIRED: ${{ needs.changes.outputs.web }}
-      RUST_RESULT: ${{ needs.rust.result }}
-      WEB_RESULT: ${{ needs.web.result }}
-      DOTNET_REQUIRED: ${{ needs.changes.outputs.dotnet }}
-      DOTNET_RESULT: ${{ needs.dotnet.result }}
+      EVENT: ${{ github.event_name }}
+      BASE: ${{ github.base_ref }}
+      FULL: ${{ github.event_name == 'workflow_dispatch' || inputs.release_all }}
+      REF: ${{ github.ref }}
+      NEEDS: ${{ toJSON(needs) }}
     steps:
-      - name: Require all checks to pass
-        run: |
-          test "$CHANGES_RESULT" = success
-          test "$AUTOMATION_RESULT" = success
-          if [ "$RUST_REQUIRED" = true ]; then
-            test "$RUST_RESULT" = success
-          else
-            test "$RUST_RESULT" = skipped
-          fi
-          if [ "$WEB_REQUIRED" = true ]; then
-            test "$WEB_RESULT" = success
-          else
-            test "$WEB_RESULT" = skipped
-          fi
-          if [ "$DOTNET_REQUIRED" = true ]; then
-            test "$DOTNET_RESULT" = success
-          else
-            test "$DOTNET_RESULT" = skipped
-          fi
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: python3 .github/scripts/check_ci.py
 
   publish-nuget:
     name: Publish Serilog to NuGet.org
@@ -296,9 +305,9 @@ jobs:
 
   publish-images:
     # Override implicit success(): optional Rust/web/.NET jobs may be skipped upstream.
-    if: ${{ !cancelled() && needs.ci.result == 'success' && needs.changes.result == 'success' && github.ref == 'refs/heads/master' && (github.event_name == 'push' || inputs.release_all) && needs.changes.outputs.images != '[]' }}
+    if: ${{ !cancelled() && needs.ci.result == 'success' && needs.changes.result == 'success' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/master') && (github.event_name == 'push' || inputs.release_all) && (github.ref == 'refs/heads/master' || needs.changes.outputs.images != '[]') }}
     needs: [ci, changes]
     uses: ./.github/workflows/publish-images.yml
     with:
-      components: ${{ needs.changes.outputs.images }}
+      components: ${{ github.ref == 'refs/heads/master' && '["core","relay","dock"]' || needs.changes.outputs.images }}
     secrets: inherit
