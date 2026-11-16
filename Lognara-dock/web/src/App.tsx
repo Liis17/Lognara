@@ -118,6 +118,7 @@ export default function App() {
         <ChunkBoundary resetKey={pathname}>
           <Suspense fallback={loadingPage}>
             <Routes>
+              <Route path="/login" element={<Login onLogin={refresh} authenticated />} />
               <Route path="/logs" element={<Logs onUnauthorized={() => setMe(null)} />} />
               <Route path="/errors" element={<Errors onUnauthorized={() => setMe(null)} />} />
               <Route path="/log-alerts" element={<LogAlerts onUnauthorized={() => setMe(null)} />} />

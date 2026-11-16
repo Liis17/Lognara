@@ -195,6 +195,22 @@ test("consent offers write only when the client asked for it and posts the chose
   expect(posted).toEqual({ allow: true, logs: true, metrics: true, alerts_write: true, node_scope: { kind: "agent", id: 9 } });
 });
 
+test("an active session resumes OAuth from the login return path", async ({ page }) => {
+  await page.route("**/api/**", (route) => route.fulfill({ json: { username: "liis", passkeys: 0 } }));
+  await page.route("**/oauth/authorize?**", (route) => route.fulfill({ contentType: "text/html", body: "Authorization endpoint" }));
+  await page.goto("/login?return_to=%2Foauth%2Fauthorize%3Fresponse_type%3Dcode%26state%3Dstate-1");
+  await expect(page.getByText("Authorization endpoint", { exact: true })).toBeVisible();
+  await expect(page).toHaveURL(/\/oauth\/authorize\?response_type=code&state=state-1/u);
+});
+
+for (const returnTo of ["https://evil.example/oauth/authorize?state=1", "//evil.example/oauth/authorize?state=1", "/logs?state=1", ""]) {
+  test(`an active login rejects a non-OAuth return path: ${returnTo}`, async ({ page }) => {
+    await page.route("**/api/**", (route) => route.fulfill({ json: { username: "liis", passkeys: 0 } }));
+    await page.goto(`/login?return_to=${encodeURIComponent(returnTo)}`);
+    await expect(page).toHaveURL(/\/logs$/u);
+  });
+}
+
 test("login preserves a local OAuth authorization return path", async ({ page }) => {
   let authenticated = false;
   await page.route("**/api/**", async (route) => {
