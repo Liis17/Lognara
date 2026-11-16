@@ -59,4 +59,4 @@ Cargo ограничен двумя параллельными заданиям�
 
 ## Хост-агент
 
-`Lognara-hwagent` выбирается фильтром по путям hwagent, agent, relay и spool и проверяется тем же Rust-набором. Отдельный workflow `.github/workflows/build-hwagent.yml` (PR, push в `master`, ручной запуск) собирает static musl `lognara-hwagent` для amd64/arm64, проверяет отсутствие динамического загрузчика, упаковывает бинарник с примерами и systemd unit и загружает архивы как artifacts. Публикации в GitHub Releases для hwagent нет.
+`Lognara-hwagent` выбирается фильтром по путям hwagent, agent, relay и spool и проверяется тем же Rust-набором. Отдельный workflow `.github/workflows/build-hwagent.yml` (PR, push в `master`, ручной запуск) собирает static musl `lognara-hwagent` для amd64/arm64, проверяет отсутствие динамического загрузчика, упаковывает бинарник с примерами и systemd unit и загружает архивы как artifacts. Для `master` job `publish` выпускает их в GitHub Releases ([[Repository/Images#Архивы хост-агента]]).

@@ -23,4 +23,4 @@ Parent: [[Index]]
 
 ## Проверка
 
-Unit-тесты на фикстурах `/proc` и `/sys`, разбор journald и cursor, маскирование cmdline; `tests/e2e.rs` с фейковым core проверяет файл → нормализацию → доставку, точный повтор после 503, подпись группы и heartbeat. Static musl-сборка проверяется `.github/workflows/build-hwagent.yml` ([[Repository/CI]]).
+Unit-тесты на фикстурах `/proc` и `/sys`, разбор journald и cursor, маскирование cmdline; `tests/e2e.rs` с фейковым core проверяет файл → нормализацию → доставку, точный повтор после 503, подпись группы и heartbeat. Static musl-сборка проверяется `.github/workflows/build-hwagent.yml` ([[Repository/CI]]); архивы из `master` публикуются в GitHub Releases ([[Repository/Images#Архивы хост-агента]]).
