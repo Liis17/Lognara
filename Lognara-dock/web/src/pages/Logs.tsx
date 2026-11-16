@@ -104,6 +104,7 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
   }, [queryKey]);
   const coreOnly = !!(parsed.query.filters.pattern_id || parsed.query.filters.fingerprint);
   const traceInputEmpty = location.view === "trace" && !location.traceId;
+  const traceWithoutQuery = location.view === "trace" && (traceInputEmpty || !!parsed.error);
   const requestedLevels = parsed.query.filters.level as LogLevel[] | undefined;
   const effectiveLevels = location.view === "events" ? LOG_LEVELS.filter((level) =>
     location.visibleLevels.has(level) && (!requestedLevels || requestedLevels.includes(level))) : [];
@@ -492,7 +493,6 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
     {(parsed.error || searchError) && <div className="error" role="alert">{parsed.error || searchError}
       {expired && <button type="button" className="button" onClick={restart}>Начать поиск заново</button>}
     </div>}
-    {traceInputEmpty && <p className="page-note" role="status">Введите Trace ID, чтобы показать связанные логи.</p>}
     {!liveEnabled && !parsed.error && summaryUnavailable && <p className="page-note" role="status">
       Сводка недоступна для такого длинного диапазона, сузьте период. Показаны только загруженные строки.
     </p>}
@@ -544,18 +544,19 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
         {selectedIndex === index && <tr className="event-details"><td colSpan={4}>{details(event)}</td></tr>}
       </Fragment>)}</tbody></table></div>
       {!visibleCount && <p className="empty-state" role="status">{!liveEnabled && loading ? "Загружаем события…" :
+        traceInputEmpty ? "Введите Trace ID, чтобы показать связанные логи." :
         emptyLevelIntersection ? "Включите хотя бы один уровень в легенде." :
         liveEnabled ? "Ожидаем события Live, соответствующие запросу." : parsed.error || searchError ? "Поиск не выполнен." : "В выбранном диапазоне событий нет."}</p>}
       <div ref={moreSentinel} aria-hidden="true" />
       {paging && <div className="loading-more" role="status">
         <svg className="spinner" viewBox="0 0 28 28" aria-hidden="true"><circle cx="14" cy="14" r="11" /></svg>Загружаем ещё строки…
       </div>}
-      <div className="table-footer"><span>Показано {visibleCount} из {rows.length} загруженных строк{!liveEnabled && page.next_cursor ? " · есть следующая страница" : ""}.</span>
+      {!traceWithoutQuery && <div className="table-footer"><span>Показано {visibleCount} из {rows.length} загруженных строк{!liveEnabled && page.next_cursor ? " · есть следующая страница" : ""}.</span>
         {!liveEnabled && <div className="footer-actions">
           {page.next_cursor && <button type="button" className="button" disabled={paging || expired} onClick={loadMore}>{paging ? "Загрузка…" : "Загрузить ещё 50"}</button>}
           <button type="button" className="button" disabled={loading || paging || !!parsed.error} onClick={restart}>Обновить поиск</button>
         </div>}
-      </div>
+      </div>}
     </section></>}
   </section>;
 }

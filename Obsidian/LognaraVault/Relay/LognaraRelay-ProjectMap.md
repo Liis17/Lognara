@@ -8,7 +8,7 @@ Parent: [[Relay/LognaraRelay]]
 Lognara-relay/
 ├── Cargo.toml              crate lognara-relay, edition 2024, MIT
 ├── Cargo.lock
-├── Dockerfile              release из корневого контекста, Debian slim от 1000:1000
+├── Dockerfile              release из корневого контекста, LOGNARA_RELEASE_VERSION/LOGNARA_GIT_COMMIT как build args, Debian slim от 1000:1000
 ├── src/
 │   ├── main.rs             точка входа: логирование, конфиг, spool, bind, SIGTERM/SIGINT
 │   ├── lib.rs              сборка компонентов и run()
@@ -19,6 +19,7 @@ Lognara-relay/
 │   ├── normalize.rs        разбор Record в Event
 │   ├── agents.rs           список SHA-256 из core, атомарный кеш .agents, sync 10s
 │   ├── heartbeat.rs        версия/spool/rate relay, последние отчёты агентов → core
+│   ├── version.rs          release_version для heartbeat: LOGNARA_RELEASE_VERSION или версия с коротким commit
 │   ├── ingest.rs           Bearer-аутентификация до чтения тела, POST /v1/batches и /v1/heartbeat
 │   ├── memory.rs           резервы, admission и ожидание blocking-работников
 │   ├── model_budget.rs     общий бюджет Batch и нормализации JSON/base64
@@ -61,6 +62,7 @@ Lognara-relay/
 | `ingest.rs` | отказ до чтения непрочитываемого тела, неверная/дублированная авторизация, приоритет `401` над лимитом тела, сохранение проверок типа и тела при верном ключе, атомарный отказ группы, квоту и границы одной записи |
 | `agent_wire.rs` | разбор фикстуры агента, лимит распаковки, невалидное тело |
 | `core_wire.rs` | кодирование `CoreBatch`, оба лимита, обратный разбор, порядок/ID/dropped при разделении |
+| `version.rs` | приоритет LOGNARA_RELEASE_VERSION, пустые значения и усечение commit до 7 символов |
 | `normalize.rs` | пример лога из задачи, неверные значения в `attributes`, text, binary, не-объекты JSON |
 | `spool.rs` | порядок, восстановление после `open`, квоты без вытеснения, атомарные группы и удержание нечитаемого файла |
 | `tests/e2e.rs` | группы на тике, ранняя отправка, spool при `503` и порядок после восстановления, spool с прошлого запуска, сохранение при остановке, отказ core `400`, ответы `415`/`400`/`503`, отказ без ключа и пустые пачки не попадают в core/spool |

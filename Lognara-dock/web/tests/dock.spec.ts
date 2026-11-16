@@ -195,11 +195,21 @@ test('calendar selection updates the exact range in the displayed timezone', asy
 test('empty Trace input is neutral and invalid IDs are errors', async ({ page }) => {
   await fixture(page);
   await page.goto('/logs?view=trace');
-  await expect(page.getByText('Введите Trace ID, чтобы показать связанные логи.', { exact: true })).toBeVisible();
+  await expect(page.getByText('Введите Trace ID, чтобы показать связанные логи.', { exact: true })).toHaveCount(1);
+  await expect(page.getByText('В выбранном диапазоне событий нет.', { exact: true })).toHaveCount(0);
+  await expect(page.getByText(/Показано 0 из 0/)).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Обновить поиск', exact: true })).toHaveCount(0);
   await expect(page.getByRole('alert')).toHaveCount(0);
   await page.getByLabel('Trace ID', { exact: true }).fill('invalid');
   await page.getByRole('button', { name: 'Найти', exact: true }).click();
   await expect(page.getByRole('alert')).toContainText('32 шестнадцатеричных символа');
+  await expect(page.getByText(/Показано 0 из 0/)).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Обновить поиск', exact: true })).toHaveCount(0);
+  await page.route('**/api/traces/**', route => route.fulfill({ json: { events: [], next_cursor: null, as_of: new Date().toISOString() } }));
+  await page.goto(`/logs?view=trace&trace_id=${traceId}`);
+  await expect(page.getByText('В выбранном диапазоне событий нет.', { exact: true })).toBeVisible();
+  await expect(page.getByText(/Показано 0 из 0/)).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Обновить поиск', exact: true })).toBeVisible();
 });
 
 test('failed auto-load does not retry by itself and the button retries once', async ({ page }) => {

@@ -89,7 +89,7 @@ API: `POST /api/issues/search`, `POST /api/issues/{fingerprint}/details`, `POST 
 | `sourceQuery(event: LogEvent): string` | Строит точные условия источника для контекста события. |
 | `contextBounds(timestamp: string): {from: string, to: string}` | Строит окно контекста ±5 минут. |
 | `eventsToCsv(events: LogEvent[]): string` | Формирует CSV загруженных событий с BOM, multiline и защитой формул. |
-| `LineChart(props: LineChartProps): ReactElement` | Многосерийный график с общим hover, легендой, выбором диапазона и таблицей значений; используется в аналитике, логах и деталях метрики. |
+| `LineChart(props: LineChartProps): ReactElement` | Многосерийный график с общим hover, легендой, выбором диапазона и таблицей значений; используется в аналитике, деталях метрики, `/hosts` и `EventsChart` логов. |
 | `EventsChart(props): ReactElement` | График событий и Trace: выделение диапазона, масштаб колесом, фильтр уровней графика, таблица чисел. |
 
 ## Инфраструктура
