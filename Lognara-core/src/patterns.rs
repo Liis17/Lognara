@@ -281,6 +281,8 @@ pub(crate) async fn scan(
     state: &State,
     window: &Window,
     projection: Option<&[&str]>,
+    // Паттерны пропускают встроенные метрики; проблемы видят все события.
+    skip_metrics: bool,
     deadline: Instant,
     mut visit: impl FnMut(Row<'_>) -> Result<(), QueryError>,
 ) -> Result<(), QueryError> {
@@ -299,8 +301,9 @@ pub(crate) async fn scan(
         for row in 0..batch.num_rows() {
             let message = string(&batch, "message", row)?;
             let service = string(&batch, "service", row)?;
-            let backend = string(&batch, "backend", row)?;
-            if !is_pattern_eligible(message, service, backend) {
+            if skip_metrics
+                && !is_pattern_eligible(message, service, string(&batch, "backend", row)?)
+            {
                 continue;
             }
             if window
@@ -430,6 +433,7 @@ pub async fn search(core: &Core, request: PatternRequest) -> Result<PatternRespo
             "message",
             "timestamp",
         ]),
+        true,
         deadline,
         |row| {
             total_events += u64::from(row.timestamp >= window.filter.from);
@@ -537,7 +541,7 @@ pub async fn details(
     let mut values: Vec<HashMap<String, u64>> = vec![];
     let (mut distinct, mut bytes) = (0_usize, 0_usize);
     let mut examples: Vec<(i64, u64, StoredEvent)> = vec![];
-    scan(core, &state, &window, None, deadline, |row| {
+    scan(core, &state, &window, None, true, deadline, |row| {
         let current = row.timestamp >= window.filter.from;
         total_events += u64::from(current);
         if row.identity.id != pattern_id {

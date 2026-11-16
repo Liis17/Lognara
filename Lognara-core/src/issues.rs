@@ -38,8 +38,6 @@ const PROJECTION: &[&str] = &[
     "attributes",
     "timestamp",
     "server",
-    // Только для скана: is_pattern_eligible отсекает метрики hwagent; recurrences берёт первые 7.
-    "backend",
 ];
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -372,27 +370,35 @@ pub async fn search(core: &Core, request: IssueRequest) -> Result<IssueResponse,
     let state = core.patterns.view()?;
     let mut issues: HashMap<String, IssueTotals> = HashMap::new();
     let mut bytes = 0_usize;
-    scan(core, &state, &window, Some(PROJECTION), deadline, |row| {
-        let Some(id) = row_fingerprint(&row)? else {
-            return Ok(());
-        };
-        if !issues.contains_key(&id) {
-            bytes += 256;
-        }
-        let entry = issues.entry(id).or_default();
-        if entry.totals.add(&window, row.timestamp) {
-            bytes += 48;
-        }
-        let server = string(row.batch, "server", row.row)?;
-        if !entry.servers.contains(server) {
-            bytes += server.len() + 32;
-            entry.servers.insert(server.to_owned());
-        }
-        if bytes > budget {
-            return Err(QueryError::Busy);
-        }
-        Ok(())
-    })
+    scan(
+        core,
+        &state,
+        &window,
+        Some(PROJECTION),
+        false,
+        deadline,
+        |row| {
+            let Some(id) = row_fingerprint(&row)? else {
+                return Ok(());
+            };
+            if !issues.contains_key(&id) {
+                bytes += 256;
+            }
+            let entry = issues.entry(id).or_default();
+            if entry.totals.add(&window, row.timestamp) {
+                bytes += 48;
+            }
+            let server = string(row.batch, "server", row.row)?;
+            if !entry.servers.contains(server) {
+                bytes += server.len() + 32;
+                entry.servers.insert(server.to_owned());
+            }
+            if bytes > budget {
+                return Err(QueryError::Busy);
+            }
+            Ok(())
+        },
+    )
     .await?;
     let open: Vec<&String> = issues.keys().filter(|id| !resolved.contains(id)).collect();
     let (mut new, mut returning) = (vec![], vec![]);
@@ -483,7 +489,7 @@ pub async fn details(
     let mut servers: HashMap<String, u64> = HashMap::new();
     let mut bytes = 0_usize;
     let mut examples: Vec<(i64, u64, StoredEvent)> = vec![];
-    scan(core, &state, &window, None, deadline, |row| {
+    scan(core, &state, &window, None, false, deadline, |row| {
         if row_fingerprint(&row)?.as_deref() != Some(fingerprint) {
             return Ok(());
         }
