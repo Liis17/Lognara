@@ -122,7 +122,7 @@ curl -X POST http://127.0.0.1:7402/v1/logs/search \
 
 ## Образы контейнеров
 
-Core, relay и dock публикуются из `master` после CI в `docker.barkfluff.com`:
+Core, relay и dock собираются после merge в `dev`, а при продвижении `dev → master` публикуются под стабильными тегами в `docker.barkfluff.com` без пересборки, с сохранением digest:
 
 - `docker.barkfluff.com/lognara-core`
 - `docker.barkfluff.com/lognara-relay`
@@ -221,7 +221,7 @@ Core работает одним процессом на каталог на л�
 
 ## Разработка
 
-GitHub Actions [CI](.github/workflows/ci.yml) запускается на push/PR во всех ветках и проверяет затронутые crate и веб-клиент: `fmt`, `clippy` с `-D warnings`, `cargo build --locked`, `cargo test --locked --all-features` (у core `--all-features` включает `crash-tests`), профили памяти agent/relay, сборку и тесты React-клиента. Итоговая проверка — `CI passed`. Локально то же самое из каталога crate:
+GitHub Actions [CI](.github/workflows/ci.yml) проверяет затронутые компоненты в PR в `dev`. В `master` принимаются только PR из `dev` этого репозитория с merge commit; push в `dev` собирает контейнеры, push в `master` продвигает готовые образы по digest. Прикладные проверки PR: `fmt`, `clippy` с `-D warnings`, `cargo build --locked`, `cargo test --locked --all-features` (у core `--all-features` включает `crash-tests`), профили памяти agent/relay, сборку и тесты React-клиента. Итоговая проверка — `CI passed`. Локально то же самое из каталога crate:
 
 ```sh
 cargo fmt --all --check && cargo clippy --locked --all-targets --all-features -- -D warnings && cargo build --locked && cargo test --locked --all-features
