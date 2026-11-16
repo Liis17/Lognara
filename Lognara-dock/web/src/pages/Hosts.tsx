@@ -25,7 +25,7 @@ const periodPresets = [
   { label: "1 год", milliseconds: 365 * DAY },
 ];
 
-type Host = { id: number; name: string };
+type Host = { name: string; hasData: boolean };
 type Scale = "identity" | "gibibytes" | "mebibytes-per-second";
 type Presentation = { section: string; chart: string; unit: string; label: string; scale: Scale };
 type HostChart = { section: string; title: string; unit: string; buckets: string[]; series: SeriesLine[] };
@@ -112,6 +112,10 @@ function presentation(metric: SeriesMetric): Presentation {
   };
 }
 
+function hasSeriesData(metric: SeriesMetric): boolean {
+  return metric.first_seen !== null && metric.origin !== "rule";
+}
+
 function chartStep(from: string, to: string): number {
   const seconds = (Date.parse(to) - Date.parse(from)) / 1000;
   return STEP_SECONDS.find((step) => seconds / step <= 1000) ?? 604800;
@@ -176,19 +180,26 @@ export default function Hosts({ onUnauthorized }: { onUnauthorized: () => void }
 
   useEffect(() => {
     const controller = new AbortController();
-    api<{ relays: { id: number; name: string; kind?: string }[] }>("GET", "/api/relays", undefined, { signal: controller.signal })
-      .then((reply) => {
-        if (!controller.signal.aborted) {
-          setHosts(reply.relays.filter((relay) => relay.kind === "host").map(({ id, name }) => ({ id, name })));
-          setHostsReady(true);
-        }
-      })
-      .catch((cause) => {
-        if (controller.signal.aborted) return;
-        if (cause instanceof ApiError && cause.status === 401) onUnauthorized();
-        else setError(errorText(cause));
-        setHostsReady(true);
-      });
+    const { signal } = controller;
+    const registry = api<{ relays: { name: string; kind?: string }[] }>("GET", "/api/relays", undefined, { signal });
+    const series = api<{ metrics: SeriesMetric[] }>("GET", `/api/series?${new URLSearchParams({ group_by: "server", service: "host" })}`, undefined, { signal });
+    Promise.allSettled([registry, series]).then(([registryReply, seriesReply]) => {
+      if (signal.aborted) return;
+      const registered = registryReply.status === "fulfilled"
+        ? registryReply.value.relays.filter((relay) => relay.kind === "host").map((relay) => relay.name)
+        : [];
+      const withData = new Set(seriesReply.status === "fulfilled"
+        ? seriesReply.value.metrics.filter(hasSeriesData).map((metric) => metric.server)
+        : []);
+      const names = new Set([...registered, ...withData]);
+      setHosts([...names]
+        .map((name) => ({ name, hasData: withData.has(name) }))
+        .sort((a, b) => Number(b.hasData) - Number(a.hasData) || a.name.localeCompare(b.name, "ru")));
+      const failures = [registryReply, seriesReply].flatMap((reply) => reply.status === "rejected" ? [reply.reason] : []);
+      if (failures.some((cause) => cause instanceof ApiError && cause.status === 401)) onUnauthorized();
+      else if (failures.length > 0) setError(errorText(failures[0]));
+      setHostsReady(true);
+    });
     return () => controller.abort();
   }, [onUnauthorized]);
 
@@ -213,7 +224,7 @@ export default function Hosts({ onUnauthorized }: { onUnauthorized: () => void }
       try {
         const reply = await api<{ metrics: SeriesMetric[] }>("GET", `/api/series?${query}`, undefined, { signal: controller.signal });
         if (controller.signal.aborted) return;
-        const rows = reply.metrics.filter((metric) => metric.first_seen !== null && metric.origin !== "rule");
+        const rows = reply.metrics.filter(hasSeriesData);
         setMetrics(rows);
         const results: { metric: SeriesMetric; reply: SeriesReply }[] = [];
         let next = 0;
@@ -281,11 +292,11 @@ export default function Hosts({ onUnauthorized }: { onUnauthorized: () => void }
   return <section className="hosts-page">
     <div className="toolbar hosts-toolbar">
       <div><p className="eyebrow">Системные метрики hwagent</p><h1>Хосты</h1></div>
-      {host && <label className="host-picker">Хост
+      {host && (hosts.length > 1 ? <label className="host-picker">Хост
         <select aria-label="Хост" value={host.name} onChange={(event) => setSearchParams({ host: event.target.value })}>
-          {hosts.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}
+          {hosts.map((item) => <option key={item.name} value={item.name}>{item.hasData ? item.name : `${item.name} · нет данных`}</option>)}
         </select>
-      </label>}
+      </label> : <p className="muted">Хост <code>{host.name}</code>{host.hasData ? null : " · нет данных"}</p>)}
     </div>
     {error && <p className="error" role="alert">{error}</p>}
     {hostsReady && hosts.length === 0 && <div className="host-empty-state">
@@ -305,7 +316,7 @@ export default function Hosts({ onUnauthorized }: { onUnauthorized: () => void }
       {!metricsReady && <p className="muted" role="status">Загружаем метрики хоста…</p>}
       {metricsReady && metrics.length === 0 && !error && <div className="host-empty-state">
         <h2>Метрик пока нет</h2>
-        <p className="muted">Core пока не получил ряды hwagent для этого хоста. Имя <code>LOGNARA_SERVER</code> должно совпадать с именем хоста в реестре; hwagent отправляет их с service <code>host</code>.</p>
+        <p className="muted">Core пока не получил ряды hwagent для этого хоста. hwagent отправляет метрики под именем из <code>LOGNARA_SERVER</code> или hostname машины; такие серверы появляются в списке хостов автоматически.</p>
         <Link className="button" to="/access">Проверить «Подключения»</Link>
       </div>}
       {metricsReady && metrics.length > 0 && charts.length === 0 && !error && <div className="host-empty-state">

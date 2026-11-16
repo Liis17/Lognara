@@ -113,6 +113,23 @@ test("host metrics page selects a registered host, queries hwagent series and op
   expect(logs.searchParams.get("q")).toContain('service:"host"');
 });
 
+test("host page shows series reported under a different server name than the registry host", async ({ page }) => {
+  await fixture(page, { series: [{ ...metrics[0], server: "mail-01.example" }, { ...metrics[1], server: "mail-01.example" }] });
+  const seriesRequests: { server: string; service: string }[] = [];
+  page.on("request", (request) => {
+    if (request.url().endsWith("/api/series/query")) seriesRequests.push(request.postDataJSON());
+  });
+  await page.goto("/hosts");
+  await expect(page).toHaveURL(/\/hosts\?host=mail-01\.example/);
+  await expect(page.getByRole("region", { name: "CPU" })).toBeVisible();
+  await expect.poll(() => seriesRequests.length).toBeGreaterThan(0);
+  expect(seriesRequests.every((request) => request.server === "mail-01.example" && request.service === "host")).toBe(true);
+  const picker = page.getByRole("combobox", { name: "Хост" });
+  await expect(picker.locator("option", { hasText: "mail-01 · нет данных" })).toHaveCount(1);
+  await picker.selectOption("mail-01");
+  await expect(page.getByText("Метрик пока нет")).toBeVisible();
+});
+
 test("Linux host template creates observed definitions without replacing existing ones", async ({ page }) => {
   const existing = { ...metrics[3], definition: { id: "existing", title: "Существующее определение" } };
   const created: Record<string, unknown>[] = [];
