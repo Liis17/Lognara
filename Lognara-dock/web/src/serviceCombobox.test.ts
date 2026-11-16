@@ -20,4 +20,3 @@ test("service match splits the label for highlighted rendering", () => {
   assert.equal(serviceMatch("billing", "missing"), null);
   assert.deepEqual(serviceMatch("server-a", "server"), { before: "", match: "server", after: "-a" });
 });
-

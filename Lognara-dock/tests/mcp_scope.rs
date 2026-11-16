@@ -452,6 +452,47 @@ async fn alerts_over_mcp_are_created_within_scope_and_hidden_outside_it() {
     let created_all = payload(&call(&t.router, &all, "create_alert", rule("s1", "requests")).await);
     let all_id = created_all["alert"]["id"].as_str().unwrap().to_owned();
     assert_eq!(created_all["alert"]["node_scope"]["kind"], "all");
+    assert_eq!(
+        created_all["alert"]["message_fields"],
+        json!([
+            "name",
+            "description",
+            "service",
+            "server",
+            "origin",
+            "node",
+            "environment",
+            "condition",
+            "value",
+            "time",
+            "last_point",
+            "status"
+        ])
+    );
+    assert!(created_all["alert"]["message_template"].is_null());
+
+    let mut custom_rule = rule("s1", "custom");
+    custom_rule["message_template"] = json!("Значение: %value%");
+    custom_rule["message_fields"] = json!(["name", "value"]);
+    let custom = payload(&call(&t.router, &all, "create_alert", custom_rule).await);
+    let custom_id = custom["alert"]["id"].as_str().unwrap().to_owned();
+    let legacy_update = payload(
+        &call(
+            &t.router,
+            &all,
+            "update_alert",
+            json!({"id": custom_id, "alert": rule("s1", "custom")}),
+        )
+        .await,
+    );
+    assert_eq!(
+        legacy_update["alert"]["message_template"],
+        "Значение: %value%"
+    );
+    assert_eq!(
+        legacy_update["alert"]["message_fields"],
+        json!(["name", "value"])
+    );
 
     let created_relay =
         payload(&call(&t.router, &relay, "create_alert", rule("s1", "errors")).await);

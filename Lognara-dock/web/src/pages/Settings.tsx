@@ -1,7 +1,6 @@
 import { type FormEvent, useEffect, useState } from "react";
 import { api, errorText, type PasskeyInfo } from "../api";
 import { createPasskey } from "../webauthn";
-import MetricAlertSettings from "./MetricAlertSettings";
 
 function formatTime(ms: number | null): string {
   return ms === null ? "не использовался" : new Date(ms).toLocaleString();
@@ -141,16 +140,13 @@ function Passkeys({ onChange }: { onChange: () => void }) {
 
 export default function Settings({
   onChange,
-  onUnauthorized,
 }: {
   onChange: () => void;
-  onUnauthorized: () => void;
 }) {
   return (
     <section className="settings">
       <PasswordForm />
       <Passkeys onChange={onChange} />
-      <MetricAlertSettings onUnauthorized={onUnauthorized} />
     </section>
   );
 }

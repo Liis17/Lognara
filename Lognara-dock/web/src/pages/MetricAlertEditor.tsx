@@ -4,6 +4,7 @@ import {
   ApiError,
   errorText,
   nodeScopeLabel,
+  type AlertMessagePreviewReply,
   type AlertAggregate,
   type MetricAlertDefinition,
   type MetricAlertDefinitionInput,
@@ -15,6 +16,29 @@ import {
 } from "../api";
 
 const aggregates: AlertAggregate[] = ["avg", "min", "max", "sum", "count", "increase"];
+const defaultMessageFields = [
+  "name", "description", "service", "server", "origin", "node", "environment", "condition", "value", "time", "last_point", "status",
+];
+const messageFieldOptions = [
+  ["name", "Техническое имя"], ["title", "Название"], ["description", "Описание"],
+  ["service", "Сервис"], ["server", "Сервер"], ["origin", "Источник"], ["node", "Узел"],
+  ["environment", "Окружение"], ["condition", "Условие"], ["value", "Значение"],
+  ["time", "Время"], ["last_point", "Последняя точка"], ["status", "Статус"],
+] as const;
+const aggregateLabels: Record<AlertAggregate, string> = {
+  avg: "среднее", min: "минимум", max: "максимум", sum: "сумма", count: "число точек", increase: "прирост",
+};
+const unitSeconds = { sec: 1, min: 60, hour: 3600, day: 86400 } as const;
+type WindowUnit = keyof typeof unitSeconds;
+
+function windowParts(seconds: number): { amount: number; unit: WindowUnit } {
+  if (seconds % 86400 === 0) return { amount: seconds / 86400, unit: "day" };
+  if (seconds % 3600 === 0) return { amount: seconds / 3600, unit: "hour" };
+  if (seconds % 60 === 0) return { amount: seconds / 60, unit: "min" };
+  return { amount: seconds, unit: "sec" };
+}
+
+const fieldList = (fields: string[] | undefined) => fields ?? defaultMessageFields;
 const emptyTrigger = (): MetricAlertTrigger => ({
   window_seconds: 300,
   aggregate: "avg",
@@ -22,7 +46,7 @@ const emptyTrigger = (): MetricAlertTrigger => ({
   threshold: 0,
 });
 
-function initialDraft(key: MetricAlertKey): MetricAlertDefinitionInput {
+function initialDraft(key: MetricAlertKey, metric: SeriesMetric | null): MetricAlertDefinitionInput {
   return {
     key,
     enabled: false,
@@ -31,6 +55,10 @@ function initialDraft(key: MetricAlertKey): MetricAlertDefinitionInput {
     combine: "and",
     group_ids: [],
     triggers: [emptyTrigger()],
+    title: metric?.definition?.title ?? null,
+    description: metric?.definition?.description ?? null,
+    message_template: null,
+    message_fields: [...defaultMessageFields],
   };
 }
 
@@ -43,6 +71,10 @@ function definitionDraft(alert: MetricAlertDefinition): MetricAlertDefinitionInp
     combine: alert.combine,
     group_ids: alert.group_ids,
     triggers: alert.triggers,
+    title: alert.title ?? null,
+    description: alert.description ?? null,
+    message_template: alert.message_template ?? null,
+    message_fields: fieldList(alert.message_fields),
   };
 }
 
@@ -61,19 +93,24 @@ export default function MetricAlertEditor({
   keyValue,
   metric,
   onUnauthorized,
+  onDone,
+  onCancel,
 }: {
   keyValue: MetricAlertKey;
   metric: SeriesMetric | null;
   onUnauthorized: () => void;
+  onDone?: () => void;
+  onCancel?: () => void;
 }) {
   const identity = JSON.stringify(keyValue);
   const [alert, setAlert] = useState<MetricAlertDefinition | null>(null);
   const [settings, setSettings] = useState<MetricAlertSettings | null>(null);
-  const [draft, setDraft] = useState(() => initialDraft(keyValue));
+  const [draft, setDraft] = useState(() => initialDraft(keyValue, metric));
   const [ready, setReady] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [preview, setPreview] = useState<AlertMessagePreviewReply | null>(null);
   const fail = (cause: unknown) => {
     if (cause instanceof ApiError && cause.status === 401) onUnauthorized();
     setError(errorText(cause));
@@ -103,7 +140,7 @@ export default function MetricAlertEditor({
       .then(([definition, global]) => {
         if (controller.signal.aborted) return;
         setAlert(definition.alert);
-        setDraft(definition.alert ? definitionDraft(definition.alert) : initialDraft(keyValue));
+        setDraft(definition.alert ? definitionDraft(definition.alert) : initialDraft(keyValue, metric));
         setSettings(global);
       })
       .catch((cause) => {
@@ -113,7 +150,7 @@ export default function MetricAlertEditor({
         if (!controller.signal.aborted) setReady(true);
       });
     return () => controller.abort();
-  }, [identity]);
+  }, [identity, metric]);
 
   const save = async (event: FormEvent) => {
     event.preventDefault();
@@ -129,6 +166,7 @@ export default function MetricAlertEditor({
       setAlert(reply.alert);
       setDraft(definitionDraft(reply.alert));
       setMessage("Алерт сохранён.");
+      onDone?.();
     } catch (cause) {
       fail(cause);
     } finally {
@@ -142,8 +180,9 @@ export default function MetricAlertEditor({
     try {
       await api("DELETE", "/api/alerts/definition", keyValue);
       setAlert(null);
-      setDraft(initialDraft(keyValue));
+      setDraft(initialDraft(keyValue, metric));
       setMessage("Алерт удалён.");
+      onDone?.();
     } catch (cause) {
       fail(cause);
     } finally {
@@ -167,6 +206,49 @@ export default function MetricAlertEditor({
     }));
   };
 
+  const previewMessage = async () => {
+    setError("");
+    try {
+      const conditions = draft.triggers.map((trigger) => {
+        const window = windowParts(trigger.window_seconds);
+        const units: Record<WindowUnit, string> = { sec: "сек", min: "мин", hour: "ч", day: "дн" };
+        return `${aggregateLabels[trigger.aggregate]} за ${window.amount} ${units[window.unit]} ${trigger.comparator} ${trigger.threshold}`;
+      });
+      const reply = await api<AlertMessagePreviewReply>("POST", "/api/alerts/preview", {
+        kind: "metric",
+        name: keyValue.name,
+        title: draft.title ?? metric?.definition?.title ?? keyValue.name,
+        description: draft.description ?? metric?.definition?.description ?? "",
+        server: keyValue.server,
+        service: keyValue.service,
+        origin: keyValue.origin,
+        environment: draft.environment,
+        condition: `${draft.combine === "and" ? "Все условия" : "Любое условие"}: ${conditions.join("; ")}`,
+        value: "5",
+        time: new Date().toISOString(),
+        last_point: metric?.last_seen ?? "нет данных",
+        status: "firing",
+        message_template: draft.message_template,
+        message_fields: fieldList(draft.message_fields),
+      });
+      setPreview(reply);
+    } catch (cause) {
+      fail(cause);
+    }
+  };
+
+  const toggleMessageField = (field: string, checked: boolean) => {
+    setDraft((current) => {
+      const fields = fieldList(current.message_fields);
+      return {
+        ...current,
+        message_fields: checked
+          ? [...fields, field]
+          : fields.filter((item) => item !== field),
+      };
+    });
+  };
+
   const groups: MetricAlertGroup[] = settings?.groups ?? [];
   // Скоупленные правила этого ключа созданы через MCP: здесь их только показываем.
   const scopedRules = (settings?.alerts ?? []).filter(
@@ -185,7 +267,7 @@ export default function MetricAlertEditor({
     <section className="metric-alert-editor" aria-labelledby="metric-alert-editor-title">
       <div className="metric-alert-editor-heading">
         <div>
-          <h2 id="metric-alert-editor-title">Алерт метрики</h2>
+          <h2 id="metric-alert-editor-title">Редактор алерта метрики</h2>
           <p className="muted">{keyValue.server} / {keyValue.service} / {keyValue.name} ({keyValue.origin})</p>
         </div>
         {alert && <span className={`tag alert-state-${alert.state}`}>{alert.state}</span>}
@@ -196,7 +278,7 @@ export default function MetricAlertEditor({
         <form onSubmit={save}>
           {settings && !settings.enabled && (
             <p className="muted" role="status">
-              Глобальная отправка выключена. Настройки можно редактировать; включить новое правило можно после включения алертов в настройках.
+              Глобальная отправка выключена. Настройки можно редактировать; включите Telegram во вкладке «Алерты».
             </p>
           )}
           {alert?.no_recipients && (
@@ -249,16 +331,6 @@ export default function MetricAlertEditor({
                 <option value="loss">Отдельно сообщать о потере данных</option>
               </select>
             </label>
-            <label>
-              Объединение условий
-              <select
-                value={draft.combine}
-                onChange={(event) => setDraft((current) => ({ ...current, combine: event.target.value as "and" | "or" }))}
-              >
-                <option value="and">Все условия (AND)</option>
-                <option value="or">Любое условие (OR)</option>
-              </select>
-            </label>
           </div>
           <fieldset className="alert-group-picker">
             <legend>Группы получателей</legend>
@@ -273,52 +345,73 @@ export default function MetricAlertEditor({
                 {group.recipient_ids.length === 0 ? " · пустая" : ""}
               </label>
             ))}
-            {!groups.length && <span className="muted">Создайте группы в настройках.</span>}
+            {!groups.length && <span className="muted">Создайте группы во вкладке «Получатели и группы».</span>}
           </fieldset>
           <fieldset className="alert-triggers">
             <legend>Условия</legend>
-            {draft.triggers.map((trigger, index) => (
-              <div className="alert-trigger-row" key={index}>
-                <label>
-                  Окно, сек
-                  <input
-                    type="number"
-                    min={60}
-                    max={604800}
-                    value={trigger.window_seconds}
-                    onChange={(event) => updateTrigger(index, "window_seconds", event.target.value)}
-                    required
-                  />
-                </label>
-                <label>
-                  Агрегат
-                  <select
-                    value={trigger.aggregate}
-                    onChange={(event) => updateTrigger(index, "aggregate", event.target.value)}
-                  >
-                    {aggregates.map((aggregate) => <option value={aggregate} key={aggregate}>{aggregate}</option>)}
-                  </select>
-                </label>
-                <label>
-                  Сравнение
-                  <select
-                    value={trigger.comparator}
-                    onChange={(event) => updateTrigger(index, "comparator", event.target.value)}
-                  >
-                    <option value=">">строго больше (&gt;)</option>
-                    <option value="<">строго меньше (&lt;)</option>
-                  </select>
-                </label>
-                <label>
-                  Порог
-                  <input
-                    type="number"
-                    step="any"
-                    value={trigger.threshold}
-                    onChange={(event) => updateTrigger(index, "threshold", event.target.value)}
-                    required
-                  />
-                </label>
+            <label className="alert-combine-control">
+              Как объединить строки
+              <select
+                value={draft.combine}
+                onChange={(event) => setDraft((current) => ({ ...current, combine: event.target.value as "and" | "or" }))}
+              >
+                <option value="and">Все условия одновременно</option>
+                <option value="or">Достаточно любого условия</option>
+              </select>
+            </label>
+            {draft.triggers.map((trigger, index) => {
+              const window = windowParts(trigger.window_seconds);
+              return <div className="alert-trigger-sentence" key={index}>
+                <span>Если</span>
+                <select
+                  aria-label={`Агрегат условия ${index + 1}`}
+                  value={trigger.aggregate}
+                  onChange={(event) => updateTrigger(index, "aggregate", event.target.value)}
+                >
+                  {aggregates.map((aggregate) => <option value={aggregate} key={aggregate}>{aggregateLabels[aggregate]}</option>)}
+                </select>
+                <span>за</span>
+                <input
+                  aria-label={`Длина окна условия ${index + 1}`}
+                  type="number"
+                  min={60 / unitSeconds[window.unit]}
+                  max={604800 / unitSeconds[window.unit]}
+                  step="any"
+                  value={window.amount}
+                  onChange={(event) => updateTrigger(index, "window_seconds", String(Number(event.target.value) * unitSeconds[window.unit]))}
+                  required
+                />
+                <select
+                  aria-label={`Единица окна условия ${index + 1}`}
+                  value={window.unit}
+                  onChange={(event) => {
+                    const unit = event.target.value as WindowUnit;
+                    const seconds = Math.max(60, Math.min(604800, window.amount * unitSeconds[unit]));
+                    updateTrigger(index, "window_seconds", String(seconds));
+                  }}
+                >
+                  <option value="sec">секунд</option>
+                  <option value="min">минут</option>
+                  <option value="hour">часов</option>
+                  <option value="day">дней</option>
+                </select>
+                <select
+                  aria-label={`Сравнение условия ${index + 1}`}
+                  value={trigger.comparator}
+                  onChange={(event) => updateTrigger(index, "comparator", event.target.value)}
+                >
+                  <option value=">">строго больше</option>
+                  <option value="<">строго меньше</option>
+                </select>
+                <input
+                  aria-label={`Порог условия ${index + 1}`}
+                  type="number"
+                  step="any"
+                  value={trigger.threshold}
+                  onChange={(event) => updateTrigger(index, "threshold", event.target.value)}
+                  required
+                />
+                <span>порога</span>
                 <button
                   type="button"
                   aria-label={`Удалить условие ${index + 1}`}
@@ -330,8 +423,8 @@ export default function MetricAlertEditor({
                 >
                   Удалить
                 </button>
-              </div>
-            ))}
+              </div>;
+            })}
             <button
               type="button"
               disabled={draft.triggers.length >= 20}
@@ -340,6 +433,40 @@ export default function MetricAlertEditor({
               Добавить условие ({draft.triggers.length}/20)
             </button>
           </fieldset>
+          <label>
+            Свой текст сообщения Telegram
+            <textarea
+              rows={3}
+              maxLength={2000}
+              value={draft.message_template ?? ""}
+              onChange={(event) => {
+                setPreview(null);
+                setDraft((current) => ({ ...current, message_template: event.target.value }));
+              }}
+              placeholder="Например: %title%: текущее значение %value%"
+            />
+            <span className="muted">Плейсхолдеры: %value%, %name%, %title%, %description%, %service%, %server%, %environment%, %condition%, %time%, %last_point%, %status%.</span>
+          </label>
+          <fieldset className="alert-message-fields">
+            <legend>Поля сообщения</legend>
+            {messageFieldOptions.map(([field, label]) => (
+              <label key={field}>
+                <input
+                  type="checkbox"
+                  checked={fieldList(draft.message_fields).includes(field)}
+                  onChange={(event) => toggleMessageField(field, event.target.checked)}
+                />
+                {label}
+              </label>
+            ))}
+          </fieldset>
+          <div className="toolbar">
+            <button type="button" disabled={busy} onClick={previewMessage}>Предпросмотр Telegram</button>
+          </div>
+          {preview && <div className="telegram-preview" aria-label="Предпросмотр Telegram">
+            <div dangerouslySetInnerHTML={{ __html: preview.html }} />
+            {preview.button && <span className="telegram-preview-button">Открыть в Dock</span>}
+          </div>}
           <div className="toolbar">
             <button type="submit" disabled={busy || draft.triggers.length === 0}>
               Сохранить алерт
@@ -349,6 +476,7 @@ export default function MetricAlertEditor({
                 Удалить алерт
               </button>
             )}
+            {onCancel && <button type="button" onClick={onCancel} disabled={busy}>Отмена</button>}
           </div>
           {message && <p className="ok" role="status">{message}</p>}
           {error && <p className="error" role="alert">{error}</p>}

@@ -27,7 +27,7 @@ function eventTime(timestamp: string): string {
 }
 
 function logAlertParams(query: string, nodeFilters: { relay_id: string[]; agent_id: string[] }): URLSearchParams {
-  const params = new URLSearchParams({ q: query });
+  const params = new URLSearchParams({ tab: "rules", type: "logs", q: query });
   for (const field of ["relay_id", "agent_id"] as const) {
     for (const value of nodeFilters[field]) params.append(field, value);
   }
@@ -452,7 +452,7 @@ export default function Logs({ onUnauthorized }: { onUnauthorized: () => void })
         <button type="button" className="button" aria-expanded={exportsOpen} disabled={!rows.length}
           onClick={() => setExportsOpen((current) => !current)}>Экспорт</button>
         {location.view === "events" && location.q.trim() && !parsed.error && (
-          <Link className="button" to={`/log-alerts?${logAlertParams(location.q, location.nodeFilters)}`}>Создать алерт</Link>
+          <Link className="button" to={`/alerts?${logAlertParams(location.q, location.nodeFilters)}`}>Создать алерт</Link>
         )}
       </>}
     </div>

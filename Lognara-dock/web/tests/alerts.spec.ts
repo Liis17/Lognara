@@ -37,8 +37,13 @@ async function settingsFixture(page: Page) {
     const body = method === "GET" || method === "DELETE" ? null : request.postDataJSON();
     if (path === "/api/me") return route.fulfill({ json: { username: "liis", passkeys: 0 } });
     if (path === "/api/account/passkeys") return route.fulfill({ json: { passkeys: [] } });
+    if (path === "/api/log-alerts" && method === "GET")
+      return route.fulfill({ json: { alerts: [], core_status: "available" } });
+    if (path === "/api/series") return route.fulfill({ json: { metrics: [] } });
     if (path === "/api/alerts" && method === "GET")
       return route.fulfill({ json: structuredClone(state) });
+    if (path === "/api/alerts/definition" && method === "GET")
+      return route.fulfill({ json: { alert: null } });
     if (path === "/api/alerts/token" && method === "PUT") {
       writes.push({ method, path, body });
       state.token_configured = true;
@@ -107,53 +112,65 @@ async function settingsFixture(page: Page) {
   return { state, writes };
 }
 
-test("settings validate Telegram first and provide recipient and group CRUD", async ({ page }) => {
+test("alerts tabs validate Telegram first and provide recipient and group CRUD", async ({ page }) => {
   const { state, writes } = await settingsFixture(page);
-  await page.goto("/settings");
-  const alerts = page.getByRole("region", { name: "Алерты метрик" });
-  await expect(alerts.getByText("Core: unknown")).toBeVisible();
+  await page.goto("/alerts?tab=telegram");
+  const telegram = page.getByRole("region", { name: "Telegram" });
+  await expect(telegram.getByText("Core: unknown")).toBeVisible();
 
-  await alerts.getByLabel("Токен бота").fill("123456:abcdefghijklmnopqrstuvwxyz0123456789");
-  await alerts.getByRole("button", { name: "Проверить и сохранить токен" }).click();
-  await expect(alerts.getByText("Токен проверен и сохранён на сервере.")).toBeVisible();
+  await telegram.getByLabel("Токен бота").fill("123456:abcdefghijklmnopqrstuvwxyz0123456789");
+  await telegram.getByRole("button", { name: "Проверить и сохранить токен" }).click();
+  await expect(telegram.getByText("Токен проверен и сохранён на сервере.")).toBeVisible();
   expect(state.token_configured).toBe(true);
   expect(JSON.stringify(state)).not.toContain("123456:abcdefghijklmnopqrstuvwxyz0123456789");
-  await expect(alerts.getByLabel("Включить алерты глобально")).toBeEnabled();
-  await alerts.getByLabel("Включить алерты глобально").click();
-  await expect(alerts.getByLabel("Включить алерты глобально")).toBeChecked();
+  await expect(telegram.getByLabel("Включить отправку алертов")).toBeEnabled();
+  await telegram.getByLabel("Включить отправку алертов").click();
+  await expect(telegram.getByLabel("Включить отправку алертов")).toBeChecked();
 
-  await alerts.getByLabel("Название", { exact: true }).first().fill("On-call");
-  await alerts.getByLabel("Numeric Telegram chat ID").fill("-1001234567890");
-  await alerts.getByRole("button", { name: "Добавить получателя" }).click();
-  await expect(alerts.getByText("On-call", { exact: true })).toBeVisible();
-  await alerts.getByRole("button", { name: "Изменить" }).first().click();
-  await alerts.getByLabel("Название", { exact: true }).first().fill("Primary on-call");
-  await alerts.getByRole("button", { name: "Сохранить получателя" }).click();
-  await expect(alerts.getByText("Primary on-call", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Получатели и группы" }).click();
+  const recipients = page.getByRole("region", { name: "Получатели", exact: true });
+  await recipients.getByRole("button", { name: "Добавить получателя" }).click();
+  const recipientDialog = page.getByRole("dialog", { name: "Добавить получателя" });
+  await recipientDialog.getByLabel("Название", { exact: true }).fill("On-call");
+  await recipientDialog.getByLabel("Numeric Telegram chat ID").fill("-1001234567890");
+  await recipientDialog.getByRole("button", { name: "Добавить получателя" }).click();
+  await expect(recipients.getByText("On-call", { exact: true })).toBeVisible();
+  await recipients.getByRole("button", { name: "Изменить" }).click();
+  const editRecipientDialog = page.getByRole("dialog", { name: "Изменить получателя" });
+  await editRecipientDialog.getByLabel("Название", { exact: true }).fill("Primary on-call");
+  await editRecipientDialog.getByRole("button", { name: "Сохранить получателя" }).click();
+  await expect(recipients.getByText("Primary on-call", { exact: true })).toBeVisible();
 
-  const groupPanel = alerts.getByRole("region", { name: "Группы получателей" });
-  await groupPanel.getByLabel("Название", { exact: true }).fill("Primary");
-  await groupPanel.getByLabel(/Primary on-call/).check();
+  const groupPanel = page.getByRole("region", { name: "Группы получателей" });
   await groupPanel.getByRole("button", { name: "Добавить группу" }).click();
+  let groupDialog = page.getByRole("dialog", { name: "Добавить группу" });
+  await groupDialog.getByLabel("Название", { exact: true }).fill("Primary");
+  await groupDialog.getByLabel(/Primary on-call/).check();
+  await groupDialog.getByRole("button", { name: "Добавить группу" }).click();
   await expect(groupPanel.getByText("Primary", { exact: true })).toBeVisible();
   await groupPanel.getByRole("button", { name: "Изменить" }).click();
-  await groupPanel.getByLabel("Название", { exact: true }).fill("Primary team");
-  await groupPanel.getByRole("button", { name: "Сохранить группу" }).click();
+  groupDialog = page.getByRole("dialog", { name: "Изменить группу" });
+  await groupDialog.getByLabel("Название", { exact: true }).fill("Primary team");
+  await groupDialog.getByRole("button", { name: "Сохранить группу" }).click();
   await expect(groupPanel.getByText("Primary team", { exact: true })).toBeVisible();
   await groupPanel.getByRole("button", { name: "Удалить" }).click();
   await expect(groupPanel.getByText(/Сначала отсоедините группу от алертов: server-a \/ billing \/ requests/)).toBeVisible();
 
-  await alerts.getByRole("button", { name: "Удалить" }).first().click();
-  await expect(alerts.getByText("Получателей пока нет")).toBeVisible();
-  await alerts.getByLabel("Тип получателя").selectOption("channel");
-  await alerts.getByLabel("Название", { exact: true }).first().fill("Announcements");
-  await alerts.getByLabel("Numeric Telegram chat ID").fill("-1009876543210");
-  await alerts.getByRole("button", { name: "Добавить получателя" }).click();
-  await expect(alerts.getByText("Announcements", { exact: true })).toBeVisible();
-  await groupPanel.getByLabel("Тип группы").selectOption("channel");
-  await groupPanel.getByLabel("Название", { exact: true }).fill("Announcements group");
-  await groupPanel.getByLabel(/Announcements/).check();
+  await recipients.getByRole("button", { name: "Удалить" }).click();
+  await expect(recipients.getByText("Получателей пока нет")).toBeVisible();
+  await recipients.getByRole("button", { name: "Добавить получателя" }).click();
+  const channelDialog = page.getByRole("dialog", { name: "Добавить получателя" });
+  await channelDialog.getByLabel("Тип получателя").selectOption("channel");
+  await channelDialog.getByLabel("Название", { exact: true }).fill("Announcements");
+  await channelDialog.getByLabel("Numeric Telegram chat ID").fill("-1009876543210");
+  await channelDialog.getByRole("button", { name: "Добавить получателя" }).click();
+  await expect(recipients.getByText("Announcements", { exact: true })).toBeVisible();
   await groupPanel.getByRole("button", { name: "Добавить группу" }).click();
+  groupDialog = page.getByRole("dialog", { name: "Добавить группу" });
+  await groupDialog.getByLabel("Тип группы").selectOption("channel");
+  await groupDialog.getByLabel("Название", { exact: true }).fill("Announcements group");
+  await groupDialog.getByLabel(/Announcements/).check();
+  await groupDialog.getByRole("button", { name: "Добавить группу" }).click();
   await expect(groupPanel.getByText("Announcements group", { exact: true })).toBeVisible();
   expect(writes.map((write) => `${write.method} ${write.path}`)).toEqual([
     "PUT /api/alerts/token",
@@ -177,7 +194,8 @@ test("missing metrics still allow alert editing and show global pause and no rec
     const path = new URL(request.url()).pathname;
     const method = request.method();
     if (path === "/api/me") return route.fulfill({ json: { username: "liis", passkeys: 0 } });
-    if (path === "/api/series/lookup") return route.fulfill({ json: { metrics: [] } });
+    if (path === "/api/series") return route.fulfill({ json: { metrics: [] } });
+    if (path === "/api/log-alerts") return route.fulfill({ json: { alerts: [], core_status: "available" } });
     if (path === "/api/alerts")
       return route.fulfill({
         json: {
@@ -221,24 +239,21 @@ test("missing metrics still allow alert editing and show global pause and no rec
     }
     return route.fulfill({ status: 404, json: { error: "not_found" } });
   });
-  await page.goto("/metrics/detail?server=server-a&service=billing&name=requests&origin=counter");
-  await expect(page.getByText("Метрика не найдена на выбранном сервере.")).toBeVisible();
-  const editor = page.getByRole("region", { name: "Алерт метрики" });
-  await expect(editor.getByRole("heading", { name: "Алерт метрики" })).toBeVisible();
+  await page.goto("/alerts?tab=rules&type=metric&server=server-a&service=billing&name=requests&origin=counter");
+  const editor = page.getByRole("region", { name: "Редактор алерта метрики" });
+  await expect(editor.getByRole("heading", { name: "Редактор алерта метрики" })).toBeVisible();
   await expect(editor.getByRole("status")).toContainText("Глобальная отправка выключена");
   await expect(editor.getByLabel("Включить это правило")).toBeDisabled();
   await expect(editor.getByLabel("Обработка отсутствия данных")).toHaveValue("loss");
-  await editor.getByLabel("Обработка отсутствия данных").selectOption("loss");
   await editor.getByRole("group", { name: "Группы получателей" }).getByLabel(/Empty/).check();
   await editor.getByRole("group", { name: "Группы получателей" }).getByLabel(/Announcements/).check();
   await editor.getByRole("button", { name: "Сохранить алерт" }).click();
-  await expect(editor.getByText("Алерт сохранён.")).toBeVisible();
-  await expect(editor.getByText(/нет групп с получателями/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Новый алерт" })).toBeVisible();
   expect(saved).toBe(true);
   expect(savedGroupIds).toEqual(["empty", "announcements"]);
 
-  await page.goto("/metrics/detail?server=server-a&service=billing&name=custom&origin=rule");
-  const ruleEditor = page.getByRole("region", { name: "Алерт метрики" });
+  await page.goto("/alerts?tab=rules&type=metric&server=server-a&service=billing&name=custom&origin=rule");
+  const ruleEditor = page.getByRole("region", { name: "Редактор алерта метрики" });
   await expect(ruleEditor.getByLabel("Обработка отсутствия данных")).toHaveValue("normal");
 });
 
@@ -265,29 +280,83 @@ test("MCP-scoped rule is shown beside the global rule and can only be deleted fr
     { ...base, id: "alert-global", node_scope: { kind: "all" } },
     { ...base, id: "alert-mcp", enabled: false, node_scope: { kind: "relay", id: 4 } },
   ];
-  await page.goto("/settings");
-  const rules = page.getByRole("region", { name: "Все правила" });
-  await expect(rules.getByRole("listitem")).toHaveCount(2);
+  await page.goto("/alerts");
+  const rules = page.locator(".alert-rule-list");
+  await expect(rules.locator(".alert-rule-row")).toHaveCount(2);
   await expect(rules.getByText("Создано через MCP · relay 4 · изменяется через MCP", { exact: true })).toBeVisible();
-  await expect(rules.getByRole("link", { name: "Настроить", exact: true })).toHaveCount(1);
+  await expect(rules.getByRole("button", { name: "Изменить", exact: true })).toHaveCount(1);
   await expect(rules.getByRole("button", { name: "Удалить", exact: true })).toHaveCount(1);
 
   page.once("dialog", (dialog) => dialog.dismiss());
   await rules.getByRole("button", { name: "Удалить", exact: true }).click();
-  await expect(rules.getByRole("listitem")).toHaveCount(2);
+  await expect(rules.locator(".alert-rule-row")).toHaveCount(2);
   page.once("dialog", (dialog) => dialog.accept());
   await rules.getByRole("button", { name: "Удалить", exact: true }).click();
-  await expect(rules.getByRole("listitem")).toHaveCount(1);
+  await expect(rules.locator(".alert-rule-row")).toHaveCount(1);
   expect(writes).toContainEqual({ method: "DELETE", path: "/api/alerts/rules/alert-mcp", body: null });
   state.alerts = [
     { ...base, id: "alert-global", node_scope: { kind: "all" } },
     { ...base, id: "alert-mcp", enabled: false, node_scope: { kind: "relay", id: 4 } },
   ];
 
-  await page.route("**/api/alerts/definition**", (route) => route.fulfill({ json: { alert: null } }));
-  await page.goto("/metrics/detail?server=server-a&service=billing&name=requests&origin=counter");
-  const editor = page.getByRole("region", { name: "Алерт метрики" });
+  await page.goto("/alerts?tab=rules&type=metric&server=server-a&service=billing&name=requests&origin=counter");
+  const editor = page.getByRole("region", { name: "Редактор алерта метрики" });
   await expect(editor.getByText("Создано через MCP · relay 4", { exact: true })).toBeVisible();
+});
+
+test("metric picker exposes technical key, server, service, and description", async ({ page }) => {
+  const metric = {
+    server: "relay-eu-1", service: "network", name: "http_5xx", origin: "counter",
+    first_seen: "2026-11-16T09:00:00Z", last_seen: "2026-11-16T09:29:00Z", environments: ["prod"],
+    definition: {
+      server: "relay-eu-1", id: "http_5xx", service: "network", name: "http_5xx", title: "Ошибки HTTP",
+      description: "Ответы сервера с кодом 5xx", unit: "requests", kind: "delta", aggregation: "sum",
+      enabled: true, rule: null, updated_at: "2026-11-16T09:00:00Z",
+    },
+  };
+  await page.route("**/api/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/me") return route.fulfill({ json: { username: "liis", passkeys: 0 } });
+    if (path === "/api/alerts") return route.fulfill({ json: initialSettings() });
+    if (path === "/api/log-alerts") return route.fulfill({ json: { alerts: [], core_status: "available" } });
+    if (path === "/api/series") return route.fulfill({ json: { metrics: [metric] } });
+    if (path === "/api/alerts/definition") return route.fulfill({ json: { alert: null } });
+    return route.fulfill({ status: 404, json: { error: "not_found" } });
+  });
+  await page.goto("/alerts");
+  await page.getByRole("button", { name: "Новый алерт" }).click();
+  await page.getByRole("button", { name: "Алерт метрики" }).click();
+  const search = page.getByRole("combobox", { name: "Метрика" });
+  await search.fill("Ошибки HTTP");
+  const option = page.getByRole("listbox").getByRole("option");
+  await expect(option).toContainText("http_5xx");
+  await expect(option).toContainText("relay-eu-1 · network");
+  await expect(option).toContainText("Ответы сервера с кодом 5xx");
+  await option.click();
+  await expect(page.getByRole("region", { name: "Редактор алерта метрики" })).toBeVisible();
+});
+
+test("metric detail opens the selected rule in the unified alerts editor", async ({ page }) => {
+  const metric = {
+    server: "server-a", service: "billing", name: "requests", origin: "counter",
+    first_seen: null, last_seen: null, environments: [], definition: null,
+  };
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (path === "/api/me") return route.fulfill({ json: { username: "liis", passkeys: 0 } });
+    if (path === "/api/series/lookup") return route.fulfill({ json: { metrics: [metric] } });
+    if (path === "/api/series/query") return route.fulfill({ json: { kind: "delta", aggregation: "sum", unit: "requests", buckets: [], series: [] } });
+    if (path === "/api/series") return route.fulfill({ json: { metrics: [metric] } });
+    if (path === "/api/alerts") return route.fulfill({ json: initialSettings() });
+    if (path === "/api/log-alerts") return route.fulfill({ json: { alerts: [], core_status: "available" } });
+    if (path === "/api/alerts/definition") return route.fulfill({ json: { alert: null } });
+    return route.fulfill({ status: 404, json: { error: "not_found" } });
+  });
+  await page.goto("/metrics/detail?server=server-a&service=billing&name=requests&origin=counter");
+  await page.getByRole("button", { name: "Алерт" }).click();
+  await expect(page).toHaveURL(/\/alerts\?tab=rules&type=metric/);
+  await expect(page.getByRole("region", { name: "Редактор алерта метрики" })).toBeVisible();
 });
 
 test("token validation error is visible and does not enable global alerts", async ({ page }) => {
@@ -298,14 +367,16 @@ test("token validation error is visible and does not enable global alerts", asyn
     if (path === "/api/account/passkeys") return route.fulfill({ json: { passkeys: [] } });
     if (path === "/api/alerts" && request.method() === "GET")
       return route.fulfill({ json: initialSettings() });
+    if (path === "/api/log-alerts") return route.fulfill({ json: { alerts: [], core_status: "available" } });
+    if (path === "/api/series") return route.fulfill({ json: { metrics: [] } });
     if (path === "/api/alerts/token")
       return route.fulfill({ status: 400, json: { error: "invalid_bot_token" } });
     return route.fulfill({ status: 404, json: { error: "not_found" } });
   });
-  await page.goto("/settings");
-  const alerts = page.getByRole("region", { name: "Алерты метрик" });
-  await alerts.getByLabel("Токен бота").fill("bad-token");
-  await alerts.getByRole("button", { name: "Проверить и сохранить токен" }).click();
-  await expect(alerts.getByRole("alert")).toHaveText("Telegram отклонил токен. Проверьте его и повторите");
-  await expect(alerts.getByLabel("Включить алерты глобально")).toBeDisabled();
+  await page.goto("/alerts?tab=telegram");
+  const telegram = page.getByRole("region", { name: "Telegram" });
+  await telegram.getByLabel("Токен бота").fill("bad-token");
+  await telegram.getByRole("button", { name: "Проверить и сохранить токен" }).click();
+  await expect(telegram.getByRole("alert")).toHaveText("Telegram отклонил токен. Проверьте его и повторите");
+  await expect(telegram.getByLabel("Включить отправку алертов")).toBeDisabled();
 });

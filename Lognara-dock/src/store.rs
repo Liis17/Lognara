@@ -305,6 +305,17 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE metric_alert_outbox ADD COLUMN log_alert_id TEXT REFERENCES log_alerts(id) ON DELETE CASCADE;
     ALTER TABLE metric_alert_global ADD COLUMN log_core_status TEXT NOT NULL DEFAULT 'unknown';
     ",
+    // Параметры текста и формат уже подготовленных уведомлений.
+    "
+    ALTER TABLE metric_alerts ADD COLUMN title TEXT;
+    ALTER TABLE metric_alerts ADD COLUMN description TEXT;
+    ALTER TABLE metric_alerts ADD COLUMN message_template TEXT;
+    ALTER TABLE metric_alerts ADD COLUMN message_fields TEXT NOT NULL DEFAULT '[\"name\",\"description\",\"service\",\"server\",\"origin\",\"node\",\"environment\",\"condition\",\"value\",\"time\",\"last_point\",\"status\"]';
+    ALTER TABLE log_alerts ADD COLUMN message_template TEXT;
+    ALTER TABLE log_alerts ADD COLUMN message_fields TEXT NOT NULL DEFAULT '[\"name\",\"count\",\"query\",\"samples\",\"time\",\"status\"]';
+    ALTER TABLE metric_alert_outbox ADD COLUMN parse_mode TEXT;
+    ALTER TABLE metric_alert_outbox ADD COLUMN reply_markup TEXT;
+    ",
 ];
 
 /// Предел строк статусов: Dock передаёт решённые и вернувшиеся fingerprint в core.
@@ -1421,7 +1432,7 @@ mod tests {
         {
             let conn = Connection::open(dir.path().join("dock.sqlite3")).unwrap();
             // Схема до прав токенов и скоупа алертов: без них и последующих миграций.
-            let before = MIGRATIONS.len() - 3;
+            let before = MIGRATIONS.len() - 4;
             for sql in &MIGRATIONS[..before] {
                 conn.execute_batch(sql).unwrap();
             }
@@ -1505,5 +1516,68 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         drop(Store::open(dir.path()).unwrap());
         drop(Store::open(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn alert_message_migration_keeps_prepared_outbox_and_defaults_old_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let conn = Connection::open(dir.path().join("dock.sqlite3")).unwrap();
+            for sql in &MIGRATIONS[..MIGRATIONS.len() - 1] {
+                conn.execute_batch(sql).unwrap();
+            }
+            conn.execute_batch(
+                "INSERT INTO metric_alerts(id,server,service,name,origin,enabled,environment,no_data,combine_mode,revision,enabled_at)
+                     VALUES('metric-1','s','api','runs','counter',1,NULL,'normal','and',1,1);
+                 INSERT INTO log_alerts(id,name,enabled,query,filters,text,text_mode,threshold,cooldown_seconds,revision,created_at)
+                     VALUES('logs-1','errors',1,'level:error','{}',NULL,'all',1,300,1,1);
+                 INSERT INTO metric_alert_outbox(id,alert_id,alert_revision,event_kind,message,created_at,expires_at)
+                     VALUES('event-1','metric-1',1,'firing','old & <message>',1,1000);",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", MIGRATIONS.len() as i64 - 1)
+                .unwrap();
+        }
+
+        let _store = Store::open(dir.path()).unwrap();
+        let conn = Connection::open(dir.path().join("dock.sqlite3")).unwrap();
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, MIGRATIONS.len() as i64);
+        let (metric_fields, log_fields, message, parse_mode, reply_markup): (
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT a.message_fields,l.message_fields,o.message,o.parse_mode,o.reply_markup
+                 FROM metric_alerts a,log_alerts l,metric_alert_outbox o
+                 WHERE a.id='metric-1' AND l.id='logs-1' AND o.id='event-1'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Vec<String>>(&metric_fields).unwrap(),
+            crate::alerts::default_metric_message_fields()
+        );
+        assert_eq!(
+            serde_json::from_str::<Vec<String>>(&log_fields).unwrap(),
+            crate::alerts::default_log_message_fields()
+        );
+        assert_eq!(message, "old & <message>");
+        assert_eq!(parse_mode, None);
+        assert_eq!(reply_markup, None);
     }
 }

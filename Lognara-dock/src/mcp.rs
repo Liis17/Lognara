@@ -505,6 +505,15 @@ struct AlertInput {
     /// ID существующих групп получателей; создать группу через MCP нельзя.
     group_ids: Vec<String>,
     triggers: Vec<AlertTriggerInput>,
+    /// Необязательные подписи и настройки Telegram. Старые вызовы продолжают использовать значения по умолчанию.
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    message_template: Option<String>,
+    #[serde(default)]
+    message_fields: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
@@ -546,6 +555,10 @@ struct McpLogAlertInput {
     threshold: u32,
     cooldown_seconds: u32,
     group_ids: Vec<String>,
+    #[serde(default)]
+    message_template: Option<String>,
+    #[serde(default)]
+    message_fields: Option<Vec<String>>,
 }
 
 impl From<McpLogAlertInput> for crate::log_alerts::LogAlertInput {
@@ -562,6 +575,8 @@ impl From<McpLogAlertInput> for crate::log_alerts::LogAlertInput {
             threshold: input.threshold,
             cooldown_seconds: input.cooldown_seconds,
             group_ids: input.group_ids,
+            message_template: input.message_template,
+            message_fields: input.message_fields,
         }
     }
 }
@@ -1139,7 +1154,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Create a log alert using the Dock log alert schema. Recipients must be existing group IDs from list_alert_groups. For a relay or agent token, Dock adds its node filter; a different value for that node is rejected.",
+        description = "Create a log alert using the Dock log alert schema. Recipients must be existing group IDs from list_alert_groups. Optional message_template and message_fields customize the Telegram message. For a relay or agent token, Dock adds its node filter; a different value for that node is rejected.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1161,7 +1176,7 @@ impl McpServer {
     }
 
     #[tool(
-        description = "Replace the settings of a log alert visible to this token. Existing relay_id and agent_id filters remain fixed: omitted filters are restored, changing or adding them is rejected. Concurrent browser or MCP changes return conflict. Recipients must be existing group IDs.",
+        description = "Replace the settings of a log alert visible to this token. Optional message_template and message_fields customize the Telegram message; omitting them keeps the saved message settings. Existing relay_id and agent_id filters remain fixed: omitted filters are restored, changing or adding them is rejected. Concurrent browser or MCP changes return conflict. Recipients must be existing group IDs.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -1631,6 +1646,10 @@ fn alert_definition(input: AlertInput) -> DefinitionInput {
                 threshold: trigger.threshold,
             })
             .collect(),
+        title: input.title,
+        description: input.description,
+        message_template: input.message_template,
+        message_fields: input.message_fields,
     }
 }
 
@@ -1897,6 +1916,35 @@ fn core_failure(error: CoreError) -> ToolFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_alert_message_settings_are_optional_and_forwarded() {
+        let mut input = serde_json::json!({
+            "name": "errors",
+            "enabled": true,
+            "query": "level:error",
+            "threshold": 1,
+            "cooldown_seconds": 300,
+            "group_ids": []
+        });
+        let legacy: McpLogAlertInput = serde_json::from_value(input.clone()).unwrap();
+        let legacy: crate::log_alerts::LogAlertInput = legacy.into();
+        assert_eq!(legacy.message_template, None);
+        assert_eq!(legacy.message_fields, None);
+
+        input["message_template"] = serde_json::json!("<b>%name%</b>");
+        input["message_fields"] = serde_json::json!(["name", "count"]);
+        let customized: McpLogAlertInput = serde_json::from_value(input).unwrap();
+        let customized: crate::log_alerts::LogAlertInput = customized.into();
+        assert_eq!(
+            customized.message_template.as_deref(),
+            Some("<b>%name%</b>")
+        );
+        assert_eq!(
+            customized.message_fields,
+            Some(vec!["name".into(), "count".into()])
+        );
+    }
 
     #[test]
     fn registered_tools_match_the_fixed_allowlist_and_their_hints() {
