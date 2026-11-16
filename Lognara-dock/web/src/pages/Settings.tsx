@@ -1,9 +1,19 @@
 import { type FormEvent, useEffect, useState } from "react";
+import { NavLink, useLocation, useNavigate } from "react-router";
 import { api, errorText, type PasskeyInfo } from "../api";
 import { createPasskey } from "../webauthn";
+import McpAccess from "./McpAccess";
+
+type SettingsTab = "account" | "passkeys" | "mcp";
+
+const tabs: { id: SettingsTab; label: string }[] = [
+  { id: "account", label: "Аккаунт" },
+  { id: "passkeys", label: "Вход и passkey" },
+  { id: "mcp", label: "MCP-доступ" },
+];
 
 function formatTime(ms: number | null): string {
-  return ms === null ? "не использовался" : new Date(ms).toLocaleString();
+  return ms === null ? "не использовался" : new Date(ms).toLocaleString("ru-RU");
 }
 
 function PasswordForm() {
@@ -33,8 +43,7 @@ function PasswordForm() {
   };
 
   return (
-    <form onSubmit={submit}>
-      <h2>Пароль</h2>
+    <form className="settings-form" onSubmit={submit}>
       <label>
         Текущий пароль
         <input type="password" value={current} onChange={(e) => setCurrent(e.target.value)} autoComplete="current-password" />
@@ -50,8 +59,8 @@ function PasswordForm() {
       <button type="submit" disabled={!current || !next}>
         Сменить пароль
       </button>
-      {message && <p className="ok">{message}</p>}
-      {error && <p className="error">{error}</p>}
+      {message && <p className="ok" role="status">{message}</p>}
+      {error && <p className="error" role="alert">{error}</p>}
     </form>
   );
 }
@@ -106,47 +115,101 @@ function Passkeys({ onChange }: { onChange: () => void }) {
     });
 
   return (
-    <form onSubmit={add}>
-      <h2>Passkey</h2>
+    <div className="passkey-settings">
       <ul className="passkeys">
         {passkeys.map((key) => (
           <li key={key.id}>
-            <strong>{key.name}</strong>
-            <span className="muted">
-              добавлен {formatTime(key.created_at)}, вход {formatTime(key.last_used_at)}
-            </span>
-            <button type="button" onClick={() => remove(key.id)} disabled={busy}>
+            <div className="passkey-info">
+              <strong>{key.name}</strong>
+              <span className="muted">Добавлен {formatTime(key.created_at)}</span>
+              <span className="muted">Последний вход {formatTime(key.last_used_at)}</span>
+            </div>
+            <button type="button" className="quiet" onClick={() => remove(key.id)} disabled={busy || !password}>
               Удалить
             </button>
           </li>
         ))}
         {passkeys.length === 0 && <li className="muted">Ключей нет</li>}
       </ul>
-      <label>
-        Имя нового ключа
-        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="MacBook" />
-      </label>
-      <label>
-        Текущий пароль (для добавления и удаления)
-        <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
-      </label>
-      <button type="submit" disabled={busy || !name}>
-        Добавить passkey
-      </button>
-      {error && <p className="error">{error}</p>}
-    </form>
+      <form className="settings-form" onSubmit={add}>
+        <label>
+          Имя нового ключа
+          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="MacBook" />
+        </label>
+        <label>
+          Текущий пароль
+          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
+        </label>
+        <button type="submit" disabled={busy || !name.trim() || !password}>
+          Добавить passkey
+        </button>
+        {error && <p className="error" role="alert">{error}</p>}
+      </form>
+    </div>
   );
 }
 
-export default function Settings({
-  onChange,
-}: {
-  onChange: () => void;
-}) {
+export default function Settings({ onChange }: { onChange: () => void }) {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const pathTab = location.pathname.split("/")[2];
+  const validTab = tabs.some((tab) => tab.id === pathTab);
+  const activeTab: SettingsTab = validTab ? pathTab as SettingsTab : "account";
+
+  useEffect(() => {
+    if (location.pathname !== `/settings/${activeTab}`) {
+      navigate(`/settings/account${location.search}${location.hash}`, { replace: true });
+    }
+  }, [activeTab, location.hash, location.pathname, location.search, navigate]);
+
   return (
-    <section className="settings">
-      <PasswordForm />
-      <Passkeys onChange={onChange} />
+    <section className="settings-page">
+      <div className="settings-layout">
+        <nav className="settings-sidebar" aria-label="Настройки">
+          {tabs.map((tab) => (
+            <NavLink
+              key={tab.id}
+              to={`/settings/${tab.id}${location.search}${location.hash}`}
+              end
+              aria-current={activeTab === tab.id ? "page" : undefined}
+            >
+              {tab.label}
+            </NavLink>
+          ))}
+        </nav>
+
+        <div className="settings-content">
+          {activeTab === "account" && (
+            <section className="settings-section-card">
+              <header>
+                <h1>Аккаунт</h1>
+                <p>Обновите пароль для этого аккаунта. После смены остальные сессии завершатся.</p>
+              </header>
+              <div className="settings-section-body">
+                <h2>Пароль</h2>
+                <p className="muted">Для подтверждения укажите текущий пароль и введите новый дважды.</p>
+                <PasswordForm />
+              </div>
+            </section>
+          )}
+
+          {activeTab === "passkeys" && (
+            <section className="settings-section-card">
+              <header>
+                <h1>Вход и passkey</h1>
+                <p>Управляйте ключами входа, сохранёнными на ваших устройствах.</p>
+              </header>
+              <div className="settings-section-body">
+                <h2>Passkey</h2>
+                <p className="muted">Добавление и удаление ключа подтверждается текущим паролем.</p>
+                <Passkeys onChange={onChange} />
+              </div>
+            </section>
+          )}
+
+          {activeTab === "mcp" && <McpAccess />}
+        </div>
+      </div>
     </section>
   );
 }

@@ -14,7 +14,6 @@ const Alerts = lazy(() => import("./pages/Alerts"));
 const Metrics = lazy(() => import("./pages/Metrics"));
 const MetricDetail = lazy(() => import("./pages/MetricDetail"));
 const Hosts = lazy(() => import("./pages/Hosts"));
-const McpAccess = lazy(() => import("./pages/McpAccess"));
 const OAuthConsent = lazy(() => import("./pages/OAuthConsent"));
 const Settings = lazy(() => import("./pages/Settings"));
 
@@ -24,6 +23,11 @@ function LegacyLogAlertsRedirect() {
   params.set("tab", "rules");
   if (!params.has("type")) params.set("type", "logs");
   return <Navigate to={`/alerts?${params}`} replace />;
+}
+
+function LegacyMcpAccessRedirect() {
+  const location = useLocation();
+  return <Navigate to={`/settings/mcp${location.search}${location.hash}`} replace />;
 }
 
 const loadingPage = <div className="session-state" role="status">Загружаем раздел…</div>;
@@ -107,7 +111,6 @@ export default function App() {
           <NavLink to="/metrics">Метрики</NavLink>
           <NavLink to="/hosts">Хосты</NavLink>
           <NavLink to="/access">Подключения</NavLink>
-          <NavLink to="/mcp-access">MCP-доступ</NavLink>
           <NavLink to="/settings">Настройки</NavLink>
         </nav>
         <div className="user">
@@ -143,10 +146,10 @@ export default function App() {
               <Route path="/metrics/detail" element={<MetricDetail onUnauthorized={() => setMe(null)} />} />
               <Route path="/hosts" element={<Hosts onUnauthorized={() => setMe(null)} />} />
               <Route path="/access" element={<Access onUnauthorized={() => setMe(null)} />} />
-              <Route path="/mcp-access" element={<McpAccess />} />
+              <Route path="/mcp-access" element={<LegacyMcpAccessRedirect />} />
               <Route path="/oauth/consent" element={<OAuthConsent />} />
               <Route
-                path="/settings"
+                path="/settings/*"
                 element={
                   <Settings
                     onChange={refresh}

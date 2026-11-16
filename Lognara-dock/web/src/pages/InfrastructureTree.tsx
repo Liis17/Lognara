@@ -65,7 +65,7 @@ const NodeButton = memo(function NodeButton({
     onClick={() => onSelect(key)}
     onDoubleClick={() => { if (logsPath) onOpenLogs(logsPath); }}
   >
-    <span className="infra-tree-node-head"><strong>{isHost && <><HostIcon /> hwagent </>}{node.name}</strong><Chip tone={status.tone}>{status.label}</Chip></span>
+    <span className="infra-tree-node-head"><strong>{isHost && <HostIcon />}<span>{isHost ? `hwagent ${node.name}` : node.name}</span></strong><Chip tone={status.tone}>{status.label}</Chip></span>
     <span className="infra-tree-node-sub">{isHost ? `хост #${node.id}` : `agent #${node.id}`} · последнее событие {age(node.last_event_at, asOf)}</span>
     <span className="infra-tree-node-sub">{infrastructureVersion(node.release_version, node.version)}</span>
     {node.reason && <span className="infra-tree-node-sub">{REASON[node.reason]}</span>}

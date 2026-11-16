@@ -8,9 +8,10 @@ export interface ServiceComboboxProps {
   onChange: (value: string | null) => void;
   disabled?: boolean;
   inline?: boolean;
+  emptyLabel?: string;
 }
 
-export default function ServiceCombobox({ label, value, options, onChange, disabled = false, inline = false }: ServiceComboboxProps) {
+export default function ServiceCombobox({ label, value, options, onChange, disabled = false, inline = false, emptyLabel = "Все сервисы" }: ServiceComboboxProps) {
   const id = useId();
   const input = useRef<HTMLInputElement>(null);
   const [query, setQuery] = useState("");
@@ -57,7 +58,7 @@ export default function ServiceCombobox({ label, value, options, onChange, disab
     } else if (event.key === "Escape" && open) {
       event.preventDefault();
       setOpen(false);
-      setQuery(current ? serviceOptionLabel(current) : "Все сервисы");
+      setQuery(current ? serviceOptionLabel(current) : emptyLabel);
       setActiveIndex(-1);
     }
   }
@@ -75,7 +76,7 @@ export default function ServiceCombobox({ label, value, options, onChange, disab
           aria-expanded={open}
           aria-controls={listId}
           aria-activedescendant={open && activeIndex >= 0 ? optionId(activeIndex) : undefined}
-          value={focused ? query : current ? serviceOptionLabel(current) : "Все сервисы"}
+          value={focused ? query : current ? serviceOptionLabel(current) : emptyLabel}
           disabled={disabled}
           onFocus={() => {
             setFocused(true);

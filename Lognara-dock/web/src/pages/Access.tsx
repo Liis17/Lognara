@@ -253,7 +253,7 @@ export default function Access({ onUnauthorized }: { onUnauthorized: () => void 
               <div className="access-node-identity">
                 {relayEditing ? <NameEditor value={editing?.name ?? ""} disabled={busy} onChange={updateEditName} onSubmit={saveRename} onCancel={() => setEditing(null)} /> : <>
                   <strong>Relay · {relay.name}</strong><NodeStatus receivedAt={relay.heartbeat?.received_at} now={now} />
-                  <span className="muted">Создан {new Date(relay.created_at).toLocaleString()} · {relayAgents.length} {relayAgents.length === 1 ? "агент" : "агентов"}</span>
+                  <span className="muted">Создан {new Date(relay.created_at).toLocaleString("ru-RU")} · {relayAgents.length} {relayAgents.length === 1 ? "агент" : "агентов"}</span>
                 </>}
               </div>
               {!relayEditing && <div className="access-actions">
@@ -268,7 +268,7 @@ export default function Access({ onUnauthorized }: { onUnauthorized: () => void 
                   <div className="access-node-identity">
                     {agentEditing ? <NameEditor value={editing?.name ?? ""} disabled={busy} onChange={updateEditName} onSubmit={saveRename} onCancel={() => setEditing(null)} /> : <>
                       <strong>Agent · {agent.name}</strong><NodeStatus receivedAt={agent.heartbeat?.received_at} now={now} />
-                      <span className="muted">Создан {new Date(agent.created_at).toLocaleString()}</span>
+                      <span className="muted">Создан {new Date(agent.created_at).toLocaleString("ru-RU")}</span>
                     </>}
                   </div>
                   {!agentEditing && <div className="access-actions">
@@ -290,7 +290,7 @@ export default function Access({ onUnauthorized }: { onUnauthorized: () => void 
             <div className="access-node-identity">
               {hostEditing ? <NameEditor value={editing?.name ?? ""} disabled={busy} onChange={updateEditName} onSubmit={saveRename} onCancel={() => setEditing(null)} /> : <>
                 <strong><HostIcon /> hwagent · {host.name}</strong><NodeStatus receivedAt={host.heartbeat?.received_at} now={now} />
-                <span className="muted">Хост-агент · создан {new Date(host.created_at).toLocaleString()}</span>
+                <span className="muted">Хост-агент · создан {new Date(host.created_at).toLocaleString("ru-RU")}</span>
               </>}
             </div>
             {!hostEditing && <div className="access-actions">

@@ -191,6 +191,8 @@ test('host is one hwagent node with a direct core edge and its release version',
 });
 
 test('mouse wheel over the graph scrolls the page vertically', async ({ page }) => {
+  // Низкое окно: страница должна быть выше viewport независимо от высоты карточек.
+  await page.setViewportSize({ width: 1280, height: 520 });
   await fixture(page, response);
   await page.goto('/infrastructure/tree');
   const graph = page.locator('.infra-tree-scroll');

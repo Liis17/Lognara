@@ -34,26 +34,22 @@ type OAuthGrant = McpRights & {
 };
 
 function formatTime(value: number | null): string {
-  return value === null ? "не использовался" : new Date(value).toLocaleString();
+  return value === null ? "не использовался" : new Date(value).toLocaleString("ru-RU");
 }
 
-function rightsText(item: McpRights): string {
-  const rights = [
-    item.logs && "логи",
-    item.metrics && "метрики",
-  ].filter(Boolean);
-  if (item.alerts_write) {
-    if (item.logs && item.metrics) rights.push("алерты логов и метрик");
-    else if (item.logs) rights.push("алерты логов");
-    else if (item.metrics) rights.push("алерты метрик");
-  }
-  return rights.length ? rights.join(", ") : "нет прав";
+function rights(item: McpRights): string[] {
+  return [
+    item.logs && "Логи",
+    item.metrics && "Метрики",
+    item.alerts_write && "Управление алертами",
+  ].filter((value): value is string => Boolean(value));
 }
 
 function scopeText(item: McpRights): string {
   const { node_scope: scope } = item;
-  if (scope.kind === "all") return "все узлы";
-  return item.node_name ?? `${scope.kind === "relay" ? "relay" : "агент"} #${scope.id}`;
+  if (scope.kind === "all") return "Все узлы";
+  if (scope.kind === "relay") return `Relay и агенты · ${item.node_name ?? `#${scope.id}`}`;
+  return `Агент · ${item.node_name ?? `#${scope.id}`}`;
 }
 
 export default function McpAccess() {
@@ -61,10 +57,12 @@ export default function McpAccess() {
   const [tokens, setTokens] = useState<PersonalToken[]>([]);
   const [grants, setGrants] = useState<OAuthGrant[]>([]);
   const [name, setName] = useState("");
+  const [expiresInDays, setExpiresInDays] = useState(30);
   const [access, setAccess] = useState<AccessDraft>(defaultAccessDraft);
   const [nodes, setNodes] = useState<NodeLists | null>(null);
   const [secret, setSecret] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [secretCopied, setSecretCopied] = useState(false);
+  const [urlCopied, setUrlCopied] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -87,19 +85,24 @@ export default function McpAccess() {
 
   const issue = async (event: FormEvent) => {
     event.preventDefault();
-    const rights = accessBody(access);
-    if (!rights) return;
+    const permissions = accessBody(access);
+    if (!permissions) return;
     setBusy(true);
     setError("");
     setMessage("");
     setSecret(null);
-    setCopied(false);
+    setSecretCopied(false);
     try {
-      const reply = await api<{ token: string }>("POST", "/api/mcp/personal-tokens", { name, ...rights });
+      const reply = await api<{ token: string }>("POST", "/api/mcp/personal-tokens", {
+        name,
+        ...permissions,
+        expires_in_days: expiresInDays,
+      });
       setSecret(reply.token);
       setName("");
+      setExpiresInDays(30);
       setAccess(defaultAccessDraft);
-      setMessage("Токен создан. Скопируйте его сейчас: после закрытия страницы секрет нельзя будет восстановить.");
+      setMessage("Токен создан. Сохраните секрет сейчас: после закрытия страницы его нельзя будет восстановить.");
       await refresh();
     } catch (reason) {
       setError(errorText(reason));
@@ -108,19 +111,22 @@ export default function McpAccess() {
     }
   };
 
-  const copySecret = async () => {
-    if (!secret) return;
+  const copy = async (value: string, kind: "url" | "secret") => {
     try {
-      await navigator.clipboard.writeText(secret);
-      setCopied(true);
+      await navigator.clipboard.writeText(value);
       setError("");
+      if (kind === "url") setUrlCopied(true);
+      else setSecretCopied(true);
     } catch {
-      setError("Не удалось скопировать токен. Выделите и скопируйте его вручную.");
+      setError(kind === "url"
+        ? "Не удалось скопировать адрес. Выделите и скопируйте его вручную."
+        : "Не удалось скопировать секрет. Выделите и скопируйте его вручную.");
     }
   };
 
   const revokeToken = async (token: PersonalToken) => {
     if (!window.confirm(`Отозвать персональный токен «${token.name}»?`)) return;
+    setBusy(true);
     setError("");
     try {
       await api("DELETE", `/api/mcp/personal-tokens/${encodeURIComponent(token.id)}`);
@@ -128,11 +134,14 @@ export default function McpAccess() {
       setMessage(`Токен «${token.name}» отозван.`);
     } catch (reason) {
       setError(errorText(reason));
+    } finally {
+      setBusy(false);
     }
   };
 
   const revokeGrant = async (grant: OAuthGrant) => {
     if (!window.confirm(`Отозвать доступ «${grant.client_name}»?`)) return;
+    setBusy(true);
     setError("");
     try {
       await api("DELETE", `/api/mcp/grants/${encodeURIComponent(grant.id)}`);
@@ -140,63 +149,105 @@ export default function McpAccess() {
       setMessage(`Доступ «${grant.client_name}» отозван.`);
     } catch (reason) {
       setError(errorText(reason));
+    } finally {
+      setBusy(false);
     }
   };
 
   return (
     <section className="mcp-access">
-      <header>
+      <header className="mcp-access-heading">
         <h1>MCP-доступ</h1>
-        <p className="page-note">Удалённое подключение к Lognara через MCP.</p>
+        <p className="page-note">Подключайте внешние MCP-клиенты к логам и метрикам Lognara и отзывайте доступы.</p>
       </header>
 
-      <article className="mcp-card">
-        <h2>Адрес сервера</h2>
-        <p><code>{settings?.url ?? "Загружаем…"}</code></p>
+      <article className="mcp-card mcp-server-card">
+        <div>
+          <h2>Сервер MCP</h2>
+          <p className="page-note">Используйте этот адрес при настройке MCP-клиента.</p>
+        </div>
+        <div className="mcp-server-address">
+          <code>{settings?.url ?? "Загружаем адрес…"}</code>
+          <button type="button" className="quiet" disabled={!settings?.url} onClick={() => settings && void copy(settings.url, "url")}>
+            {urlCopied ? "Адрес скопирован" : "Скопировать адрес"}
+          </button>
+        </div>
         {settings && (
-          <p className={settings.enabled ? "status live" : "status disconnected"}>
-            {settings.enabled ? "MCP включён" : "MCP выключен"}
-          </p>
+          <div className="mcp-server-status">
+            <span className={`mcp-status-chip ${settings.enabled ? "enabled" : "disabled"}`}>
+              {settings.enabled ? "Включён" : "Выключен"}
+            </span>
+            <p className="page-note">
+              {settings.enabled
+                ? "Сервер принимает подключения с персональными токенами и OAuth."
+                : "Сервер выключен. Администратору нужно включить LOGNARA_DOCK_MCP_ENABLED и опубликовать адрес через HTTPS nginx."}
+            </p>
+          </div>
         )}
-        {settings && !settings.enabled && (
-          <p className="page-note">Администратору нужно включить LOGNARA_DOCK_MCP_ENABLED=true и опубликовать адрес через HTTPS nginx.</p>
-        )}
-        <p className="page-note">Чтение логов и метрик, включая полный текст логов, выдаётся по умолчанию. Запись алертов включается отдельно. Токены браузерной сессии не подходят для MCP.</p>
+        <p className="muted">Доступ к логам и метрикам выдаётся отдельно. Токены браузерной сессии не подходят для MCP.</p>
       </article>
 
       <div className="mcp-grid">
         <article className="mcp-card">
-          <h2>Персональный токен</h2>
-          <p className="page-note">Срок действия 30 дней. Секрет показывается один раз и хранится только в памяти этой страницы.</p>
-          <form onSubmit={issue}>
-            <label htmlFor="mcp-token-name">Название</label>
-            <input id="mcp-token-name" value={name} onChange={(event) => setName(event.target.value)} maxLength={80} placeholder="Codex на рабочем компьютере" />
-            <AccessFields draft={access} onChange={setAccess} nodes={nodes} />
-            <button type="submit" disabled={busy || !settings?.enabled || !name.trim() || !accessBody(access)}>
+          <header className="mcp-card-heading">
+            <h2>Выпустить персональный токен</h2>
+            <p className="page-note">Выберите права, область данных и срок действия токена.</p>
+          </header>
+          <form className="mcp-token-form" onSubmit={issue}>
+            <label htmlFor="mcp-token-name">
+              Название
+              <input id="mcp-token-name" value={name} onChange={(event) => setName(event.target.value)} maxLength={80} placeholder="Codex на рабочем компьютере" />
+            </label>
+            <AccessFields draft={access} onChange={setAccess} nodes={nodes} appearance="cards" />
+            <label htmlFor="mcp-token-expiry">
+              Срок действия
+              <select id="mcp-token-expiry" value={expiresInDays} onChange={(event) => setExpiresInDays(Number(event.target.value))}>
+                <option value={7}>7 дней</option>
+                <option value={30}>30 дней</option>
+                <option value={90}>90 дней</option>
+              </select>
+            </label>
+            <button type="submit" className="solid" disabled={busy || !settings?.enabled || !name.trim() || !accessBody(access)}>
               Выпустить токен
             </button>
           </form>
+
           {secret && (
             <div className="mcp-secret" role="region" aria-label="Выданный токен">
+              <div>
+                <strong>Сохраните секрет сейчас</strong>
+                <p>Токен показывается один раз и не появится в списке после закрытия этой страницы.</p>
+              </div>
               <label htmlFor="mcp-secret">Скопируйте секрет сейчас</label>
-              <textarea id="mcp-secret" readOnly value={secret} rows={3} />
-              <button type="button" onClick={copySecret}>{copied ? "Скопировано" : "Скопировать токен"}</button>
+              <textarea id="mcp-secret" readOnly value={secret} rows={2} />
+              <button type="button" onClick={() => void copy(secret, "secret")}>
+                {secretCopied ? "Скопировано" : "Скопировать токен"}
+              </button>
             </div>
           )}
         </article>
 
         <article className="mcp-card">
-          <h2>Выданные токены</h2>
+          <header className="mcp-card-heading">
+            <h2>Персональные токены</h2>
+            <p className="page-note">Токены, выпущенные для этого аккаунта.</p>
+          </header>
           <ul className="mcp-list">
             {tokens.map((token) => (
               <li key={token.id}>
-                <div>
+                <div className="mcp-record">
                   <strong>{token.name}</strong>
-                  <span className="muted">Права: {rightsText(token)} · Узлы: {scopeText(token)}</span>
-                  <span className="muted">Истекает {formatTime(token.expires_at)}</span>
-                  <span className="muted">Последнее использование: {formatTime(token.last_used_at)}</span>
+                  <div className="mcp-chips">
+                    {rights(token).map((right) => <span className="mcp-chip" key={right}>{right}</span>)}
+                    <span className="mcp-chip scope">{scopeText(token)}</span>
+                  </div>
+                  <div className="mcp-record-dates">
+                    <span>Создан {formatTime(token.created_at)}</span>
+                    <span>Истекает {formatTime(token.expires_at)}</span>
+                    <span>Последнее использование: {formatTime(token.last_used_at)}</span>
+                  </div>
                 </div>
-                <button type="button" className="quiet" onClick={() => revokeToken(token)}>Отозвать</button>
+                <button type="button" className="quiet" disabled={busy} onClick={() => void revokeToken(token)}>Отозвать</button>
               </li>
             ))}
             {tokens.length === 0 && <li className="muted">Персональных токенов нет</li>}
@@ -205,16 +256,26 @@ export default function McpAccess() {
       </div>
 
       <article className="mcp-card">
-        <h2>Доступы OAuth</h2>
+        <header className="mcp-card-heading">
+          <h2>Доступы OAuth</h2>
+          <p className="page-note">Согласия, выданные MCP-клиентам через OAuth.</p>
+        </header>
         <ul className="mcp-list">
           {grants.map((grant) => (
             <li key={grant.id}>
-              <div>
+              <div className="mcp-record">
                 <strong>{grant.client_name}</strong>
-                <span className="muted">Разрешение: {grant.scope} · Права: {rightsText(grant)} · Узлы: {scopeText(grant)}</span>
-                <span className="muted">Последнее использование: {formatTime(grant.last_used_at)}</span>
+                <div className="mcp-chips">
+                  {rights(grant).map((right) => <span className="mcp-chip" key={right}>{right}</span>)}
+                  <span className="mcp-chip scope">{scopeText(grant)}</span>
+                </div>
+                <div className="mcp-record-dates">
+                  <span>Разрешение: {grant.scope}</span>
+                  <span>Выдано {formatTime(grant.created_at)}</span>
+                  <span>Последнее использование: {formatTime(grant.last_used_at)}</span>
+                </div>
               </div>
-              <button type="button" className="quiet" onClick={() => revokeGrant(grant)}>Отозвать</button>
+              <button type="button" className="quiet" disabled={busy} onClick={() => void revokeGrant(grant)}>Отозвать</button>
             </li>
           ))}
           {grants.length === 0 && <li className="muted">Подключений OAuth нет</li>}
