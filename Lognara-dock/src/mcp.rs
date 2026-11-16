@@ -1954,7 +1954,7 @@ mod tests {
                 metrics: false,
                 alerts_write: true,
             },
-            ..read_logs
+            ..read_logs.clone()
         };
         assert!(tool_allowed("create_log_alert", &writer));
         assert!(tool_allowed("list_log_alerts", &writer));
