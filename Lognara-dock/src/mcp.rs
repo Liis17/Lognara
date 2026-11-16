@@ -1239,7 +1239,7 @@ impl McpServer {
             Ok(core) => success_result(json!({
                 "dock": {
                     "version": env!("CARGO_PKG_VERSION"),
-                    "release_version": option_env!("LOGNARA_RELEASE_VERSION").filter(|value| !value.is_empty()),
+                    "release_version": Some(crate::version::release_version()),
                     "git_commit": option_env!("LOGNARA_GIT_COMMIT").filter(|value| !value.is_empty()),
                 },
                 "core": {

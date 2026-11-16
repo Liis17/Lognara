@@ -1,5 +1,6 @@
 import { memo, type RefCallback, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router";
+import HostIcon from "../components/HostIcon";
 import { sourceQuery } from "../logs";
 import { age, bytes, corePresentation, plural, REASON, refreshedText, STATUS } from "../infraPresentation";
 import {
@@ -12,6 +13,7 @@ import {
   selectedInfrastructureTreeKeys,
 } from "../infraTree";
 import { useInfrastructure } from "../useInfrastructure";
+import { infrastructureVersion } from "../infrastructureVersion";
 import type { InfraNode, InfrastructureResponse } from "../types";
 
 const clock = new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -32,12 +34,19 @@ function RefreshButton({ loadedAt, loading, onRefresh }: { loadedAt: Date | null
   </button>;
 }
 
-/** Логи агента по его source; диапазон берётся по давности последнего события, чтобы не открыть пустую выдачу. */
-function agentLogsPath(node: InfraNode, asOf: string): string | null {
-  if (!node.source) return null;
+/** Логи узла; диапазон берётся по давности последнего события. */
+function nodeLogsPath(node: InfraNode, asOf: string): string {
   const silence = node.last_event_at ? Date.parse(asOf) - Date.parse(node.last_event_at) : Infinity;
   const range = silence <= 3_600_000 ? "1h" : silence <= 86_400_000 ? "24h" : "7d";
-  return `/logs?${new URLSearchParams({ view: "events", range, q: sourceQuery(node.source) })}`;
+  const params = new URLSearchParams({ view: "events", range, q: node.source ? sourceQuery(node.source) : "" });
+  if (node.kind === "host") {
+    params.append("relay_id", String(node.relay_id ?? node.id));
+    if (node.agent_id !== undefined) params.append("agent_id", String(node.agent_id));
+  } else {
+    if (node.relay_id !== null) params.append("relay_id", String(node.relay_id));
+    if (node.kind === "agent") params.append("agent_id", String(node.agent_id ?? node.id));
+  }
+  return `/logs?${params}`;
 }
 
 const NodeButton = memo(function NodeButton({
@@ -45,18 +54,20 @@ const NodeButton = memo(function NodeButton({
 }: { node: InfraNode; asOf: string; selected: boolean; onSelect: (key: string) => void; onOpenLogs: (path: string) => void }) {
   const key = infraNodeKey(node);
   const status = STATUS[node.status];
-  const logsPath = agentLogsPath(node, asOf);
+  const logsPath = nodeLogsPath(node, asOf);
+  const isHost = node.kind === "host";
   return <button
     type="button"
-    className={`infra-tree-node${selected ? " is-selected" : ""}`}
+    className={`infra-tree-node${isHost ? " infra-tree-node-host" : ""}${selected ? " is-selected" : ""}`}
     data-infra-node-key={key}
     aria-pressed={selected}
-    title={logsPath ? "Двойной клик — открыть логи агента" : undefined}
+    title={`Двойной клик — открыть логи ${isHost ? "хоста" : "агента"}`}
     onClick={() => onSelect(key)}
     onDoubleClick={() => { if (logsPath) onOpenLogs(logsPath); }}
   >
-    <span className="infra-tree-node-head"><strong>{node.name}</strong><Chip tone={status.tone}>{status.label}</Chip></span>
-    <span className="infra-tree-node-sub">{node.kind} #{node.id} · последнее событие {age(node.last_event_at, asOf)}</span>
+    <span className="infra-tree-node-head"><strong>{isHost && <><HostIcon /> hwagent </>}{node.name}</strong><Chip tone={status.tone}>{status.label}</Chip></span>
+    <span className="infra-tree-node-sub">{isHost ? `хост #${node.id}` : `agent #${node.id}`} · последнее событие {age(node.last_event_at, asOf)}</span>
+    <span className="infra-tree-node-sub">{infrastructureVersion(node.release_version, node.version)}</span>
     {node.reason && <span className="infra-tree-node-sub">{REASON[node.reason]}</span>}
   </button>;
 });
@@ -75,6 +86,7 @@ const RelayButton = memo(function RelayButton({
   >
     <span className="infra-tree-node-head"><strong>{node.name}</strong><Chip tone={status.tone}>{status.label}</Chip></span>
     <span className="infra-tree-node-sub">relay #{node.id} · {agents.length} {plural(agents.length, ["агент", "агента", "агентов"])}</span>
+    <span className="infra-tree-node-sub">{infrastructureVersion(node.release_version, node.version)}</span>
     <span className="infra-tree-node-sub">{node.events_per_second == null ? "скорость: нет данных" : `${number.format(node.events_per_second)} событий/с`}</span>
     <span className="infra-tree-node-sub">сбоев доставки с запуска {node.delivery_failures == null ? "нет данных" : number.format(node.delivery_failures)}</span>
   </button>;
@@ -177,7 +189,7 @@ function InfraTreeGraph({ data, stale }: { data: InfrastructureResponse; stale: 
 
   return <>
     {!data.registry && <p className="error infra-tree-registry" role="alert">Не удалось получить список узлов из Core. Статус Core показывается отдельно. <Link to="/access">Управление подключениями</Link>.</p>}
-    {data.registry && data.nodes.length === 0 && <p className="empty infra-tree-registry">Нет зарегистрированных relay и агентов. Создайте их в <Link to="/access">Подключениях</Link>.</p>}
+    {data.registry && data.nodes.length === 0 && <p className="empty infra-tree-registry">Нет зарегистрированных узлов. Создайте их в <Link to="/access">Подключениях</Link>.</p>}
     <section className={`panel infra-tree-panel${stale ? " infra-tree-stale" : ""}`} aria-label="Дерево инфраструктуры">
       <div className="panel-head infra-tree-panel-head"><h2>Граф распределения</h2><span className="muted">Agent → Relay → Core → Dock</span></div>
       <div
@@ -196,7 +208,7 @@ function InfraTreeGraph({ data, stale }: { data: InfrastructureResponse; stale: 
         <div className="infra-tree-canvas" style={{ width: layout.width, height: layout.height }}>
           <div className="infra-tree-selection" aria-live="polite" aria-atomic="true">{selectionText}</div>
           <div className="infra-tree-column" style={{ left: 20 }}>Agent</div>
-          <div className="infra-tree-column" style={{ left: 400 }}>Relay</div>
+          <div className="infra-tree-column" style={{ left: 400 }}>Relay / Host</div>
           <div className="infra-tree-column" style={{ left: 680 }}>Core</div>
           <div className="infra-tree-column" style={{ left: 900 }}>Dock</div>
           <svg className="infra-tree-svg" width={layout.width} height={layout.height} viewBox={`0 0 ${layout.width} ${layout.height}`} aria-hidden="true">
@@ -229,6 +241,13 @@ function InfraTreeGraph({ data, stale }: { data: InfrastructureResponse; stale: 
               onSelect={select}
               onOpenLogs={navigate}
             />}
+            {position.kind === "host" && position.node && <NodeButton
+              node={position.node}
+              asOf={data.as_of}
+              selected={selectedKeys.has(position.key)}
+              onSelect={select}
+              onOpenLogs={navigate}
+            />}
             {position.kind === "relay" && position.node && <RelayButton
               node={position.node}
               agents={groupsByKey.get(position.groupKey ?? "")?.agents ?? []}
@@ -247,7 +266,7 @@ function InfraTreeGraph({ data, stale }: { data: InfrastructureResponse; stale: 
               onClick={() => select("core")}
             >
               <span className="infra-tree-node-head"><strong>Core</strong><Chip tone={coreState.tone}>{coreState.text}</Chip></span>
-              <span className="infra-tree-node-sub">{core.version ? `v${core.version}` : "версия неизвестна"}{core.visibility_lag_ms == null ? "" : ` · lag ${number.format(core.visibility_lag_ms / 1000)} с`}</span>
+              <span className="infra-tree-node-sub">{infrastructureVersion(core.release_version, core.version, core.git_commit)}{core.visibility_lag_ms == null ? "" : ` · lag ${number.format(core.visibility_lag_ms / 1000)} с`}</span>
               <span className="infra-tree-node-sub">WAL {core.wal_bytes == null ? "—" : bytes(core.wal_bytes)}</span>
             </button>}
             {position.kind === "dock" && <button
@@ -258,7 +277,7 @@ function InfraTreeGraph({ data, stale }: { data: InfrastructureResponse; stale: 
               onClick={() => select("dock")}
             >
               <span className="infra-tree-node-head"><strong>Dock</strong><Chip tone={stale ? "mute" : "ok"}>{stale ? "Не подтверждено" : "Онлайн"}</Chip></span>
-              <span className="infra-tree-node-sub">v{data.dock.version} · 1 инстанс</span>
+              <span className="infra-tree-node-sub">{infrastructureVersion(data.dock.release_version, data.dock.version, data.dock.git_commit)} · 1 инстанс</span>
               <span className="infra-tree-node-sub">SSE {data.dock.sse_clients} · сессий {data.dock.sessions ?? "нет данных"}</span>
             </button>}
           </div>)}

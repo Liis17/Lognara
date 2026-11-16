@@ -137,12 +137,65 @@ async fn proxies_agents_with_admin_token() {
 }
 
 #[tokio::test]
+async fn proxies_renames_for_all_node_types_with_admin_token() {
+    let (t, session, core) = setup().await;
+    let cases = [
+        (
+            "/api/relays/1",
+            "/v1/admin/relays/1",
+            json!({"relay":{"id":1,"name":"edge-new"}}),
+        ),
+        (
+            "/api/agents/2",
+            "/v1/admin/agents/2",
+            json!({"agent":{"id":2,"name":"worker-new","relay_id":1}}),
+        ),
+        (
+            "/api/hosts/3",
+            "/v1/admin/hosts/3",
+            json!({"relay":{"id":3,"name":"host-new","kind":"host"},"agent":{"id":4,"name":"host-new","relay_id":3}}),
+        ),
+    ];
+    for (path, core_path, body) in cases {
+        core.reply_json(StatusCode::OK, body.clone());
+        let reply = call(
+            &t,
+            &session,
+            Method::PATCH,
+            path,
+            Some(json!({"name":body["relay"]["name"].as_str()
+                .or_else(|| body["agent"]["name"].as_str())
+                .unwrap()})),
+        )
+        .await;
+        assert_eq!(reply.status, StatusCode::OK);
+        assert_eq!(reply.body, body);
+        assert_eq!(reply.headers[header::CACHE_CONTROL], "no-store");
+        let request = core.taken().pop().unwrap();
+        assert_eq!(request.method, "PATCH");
+        assert_eq!(request.path, core_path);
+        assert_eq!(
+            request.authorization.as_deref(),
+            Some("Bearer admin-secret")
+        );
+        assert_eq!(
+            request.body["name"],
+            body["relay"]["name"]
+                .as_str()
+                .or_else(|| body["agent"]["name"].as_str())
+                .unwrap()
+        );
+    }
+}
+
+#[tokio::test]
 async fn requires_session() {
     let (t, _session, core) = setup().await;
     for (method, path, body) in [
         (Method::GET, "/api/relays", None),
         (Method::POST, "/api/relays", Some(json!({ "name": "a" }))),
         (Method::DELETE, "/api/relays/1", None),
+        (Method::PATCH, "/api/relays/1", Some(json!({"name":"b"}))),
         (Method::GET, "/api/agents", None),
         (
             Method::POST,
@@ -150,6 +203,8 @@ async fn requires_session() {
             Some(json!({ "name": "a", "relay_id": 1 })),
         ),
         (Method::DELETE, "/api/agents/1", None),
+        (Method::PATCH, "/api/agents/1", Some(json!({"name":"b"}))),
+        (Method::PATCH, "/api/hosts/1", Some(json!({"name":"b"}))),
         (Method::POST, "/api/agents/1/rotate-token", None),
     ] {
         let reply = send(&t.router, request(method, path, None, body)).await;
@@ -164,12 +219,15 @@ async fn changes_require_origin() {
     for (method, path, body) in [
         (Method::POST, "/api/relays", json!({ "name": "a" })),
         (Method::DELETE, "/api/relays/1", Value::Null),
+        (Method::PATCH, "/api/relays/1", json!({ "name": "b" })),
         (
             Method::POST,
             "/api/agents",
             json!({ "name": "a", "relay_id": 1 }),
         ),
         (Method::DELETE, "/api/agents/1", Value::Null),
+        (Method::PATCH, "/api/agents/1", json!({ "name": "b" })),
+        (Method::PATCH, "/api/hosts/1", json!({ "name": "b" })),
         (Method::POST, "/api/agents/1/rotate-token", Value::Null),
     ] {
         let builder = axum::http::Request::builder()

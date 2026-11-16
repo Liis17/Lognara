@@ -226,6 +226,7 @@ export interface Relay {
   /** `host` - хост-агент со встроенным агентом, отправляет прямо в core. */
   kind?: "relay" | "host";
   created_at: string;
+  heartbeat?: { received_at?: string };
 }
 
 export interface LogAlertText {
@@ -292,6 +293,7 @@ export interface Agent {
   name: string;
   relay_id: number;
   created_at: string;
+  heartbeat?: { received_at?: string };
 }
 
 const messages: Record<string, string> = {

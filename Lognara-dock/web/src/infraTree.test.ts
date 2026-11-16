@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   groupInfrastructure,
+  hasInfrastructureTreeCard,
   infraNodeKey,
   infrastructureTreeEdges,
   infrastructureTreeSelectionText,
@@ -11,9 +12,10 @@ import {
 } from "./infraTree.ts";
 import type { InfraNode } from "./types.ts";
 
-function node(kind: "relay" | "agent", id: number, name: string, relay_id: number | null = null): InfraNode {
+function node(kind: "relay" | "agent" | "host", id: number, name: string, relay_id: number | null = null): InfraNode {
   return {
     kind, id, name, relay_id, relay: kind === "agent" && relay_id !== null ? `relay-${relay_id}` : null,
+    ...(kind === "host" ? { agent_id: id + 100 } : {}),
     status: "online", reason: null, heartbeat_at: null, last_event_at: null, version: null,
     spool: null, delivery_failures: null, events_per_second: null, source: null,
   };
@@ -28,6 +30,22 @@ test("groups relay and agent rows by ID in stable order and retains empty relays
   assert.deepEqual(groups[0].agents, []);
   assert.deepEqual(groups[1].agents.map((agent) => agent.id), [3, 8]);
   assert.equal(groups[1].agents[0].name, "first");
+});
+
+test("keeps a host as one node with a direct path to core", () => {
+  const groups = groupInfrastructure([
+    node("relay", 2, "relay"), node("agent", 8, "ordinary", 2), node("host", 5, "mail-01", 5),
+  ]);
+  const host = groups.find((group) => group.host)!;
+  assert.equal(host.relay?.kind, "host");
+  assert.deepEqual(host.agents, []);
+  const layout = layoutInfrastructureTree(groups);
+  assert.deepEqual(infrastructureTreeEdges(layout).map((edge) => edge.key), [
+    "agent-8:relay-2", "relay-2:core", "host-5:core", "core:dock",
+  ]);
+  assert.equal(hasInfrastructureTreeCard("host-5", groups), true);
+  assert.match(infrastructureTreeSelectionText("host-5", groups), /Хост hwagent mail-01/);
+  assert.deepEqual([...selectedInfrastructureTreeKeys("host-5", groups)].sort(), ["core", "dock", "host-5"]);
 });
 
 test("missing relay IDs form labelled orphan groups with no fabricated edges", () => {

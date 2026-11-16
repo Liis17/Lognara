@@ -44,6 +44,8 @@ pub struct Delivery {
 #[derive(Deserialize)]
 pub struct RelayReport {
     pub version: String,
+    #[serde(default)]
+    pub release_version: Option<String>,
     pub spool: Spool,
     pub last_ingest_ms_ago: Option<u64>,
     #[serde(flatten)]
@@ -67,6 +69,8 @@ pub struct AgentReport {
 pub struct RelayState {
     pub received_at: String,
     pub version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub release_version: Option<String>,
     pub spool: Spool,
     pub last_ingest_at: Option<String>,
     pub last_delivery_at: Option<String>,
@@ -92,6 +96,7 @@ impl RelayHeartbeat {
         let relay = &self.relay;
         self.agents.len() <= MAX_AGENTS
             && version(&relay.version)
+            && relay.release_version.as_deref().is_none_or(version)
             && relay.events_per_second.is_finite()
             && relay.events_per_second >= 0.0
             && age(relay.last_ingest_ms_ago)
@@ -132,6 +137,7 @@ impl RelayReport {
         RelayState {
             received_at: format_timestamp(now),
             version: self.version,
+            release_version: self.release_version,
             spool: self.spool,
             last_ingest_at: at(now, self.last_ingest_ms_ago),
             last_delivery_at: at(now, self.delivery.last_delivery_ms_ago),

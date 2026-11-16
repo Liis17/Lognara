@@ -737,6 +737,249 @@ async fn post_batch(router: &Router, token: &str, body: Vec<u8>) -> StatusCode {
 }
 
 #[tokio::test]
+async fn renames_preserve_tokens_ids_delivery_and_host_pair_atomically() {
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = Config::from_lookup(|key| match key {
+        "LOGNARA_ADMIN_TOKEN" => Some("admin".into()),
+        "LOGNARA_QUERY_TOKEN" => Some("query".into()),
+        _ => None,
+    })
+    .unwrap();
+    config.data_dir = dir.path().into();
+    let core = Core::open(config).unwrap();
+    let router = api::router(core.clone());
+    let nil = serde_json::Value::Null;
+
+    let (_, relay) = call(
+        &router,
+        "POST",
+        "/v1/admin/relays",
+        "admin",
+        json!({"name":"main"}),
+    )
+    .await;
+    let (_, other_relay) = call(
+        &router,
+        "POST",
+        "/v1/admin/relays",
+        "admin",
+        json!({"name":"taken"}),
+    )
+    .await;
+    let (_, agent) = call(
+        &router,
+        "POST",
+        "/v1/admin/agents",
+        "admin",
+        json!({"name":"worker","relay_id":relay["relay"]["id"]}),
+    )
+    .await;
+    let (_, other_agent) = call(
+        &router,
+        "POST",
+        "/v1/admin/agents",
+        "admin",
+        json!({"name":"taken","relay_id":relay["relay"]["id"]}),
+    )
+    .await;
+    let relay_id = relay["relay"]["id"].as_i64().unwrap();
+    let agent_id = agent["agent"]["id"].as_i64().unwrap();
+    let relay_token = relay["token"].as_str().unwrap();
+    let agent_token = agent["token"].as_str().unwrap();
+
+    let relay_path = format!("/v1/admin/relays/{relay_id}");
+    let (status, renamed_relay) = call(
+        &router,
+        "PATCH",
+        &relay_path,
+        "admin",
+        json!({"name":"main-renamed"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(renamed_relay["relay"]["id"], relay_id);
+    assert_eq!(renamed_relay["relay"]["name"], "main-renamed");
+    assert_eq!(
+        renamed_relay["relay"]["created_at"],
+        relay["relay"]["created_at"]
+    );
+    assert_eq!(
+        call(
+            &router,
+            "PATCH",
+            &relay_path,
+            "admin",
+            json!({"name":"taken"})
+        )
+        .await,
+        (StatusCode::CONFLICT, json!({"error":"name_taken"}))
+    );
+    assert_eq!(
+        call(&router, "PATCH", &relay_path, "admin", json!({"name":" "})).await,
+        (StatusCode::BAD_REQUEST, json!({"error":"invalid_name"}))
+    );
+
+    let agent_path = format!("/v1/admin/agents/{agent_id}");
+    let (status, renamed_agent) = call(
+        &router,
+        "PATCH",
+        &agent_path,
+        "admin",
+        json!({"name":"worker-renamed"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(renamed_agent["agent"]["id"], agent_id);
+    assert_eq!(renamed_agent["agent"]["name"], "worker-renamed");
+    assert_eq!(renamed_agent["agent"]["relay_id"], relay_id);
+    assert_eq!(
+        call(
+            &router,
+            "PATCH",
+            &agent_path,
+            "admin",
+            json!({"name":"taken"})
+        )
+        .await,
+        (StatusCode::CONFLICT, json!({"error":"name_taken"}))
+    );
+
+    let agent_hash = hex::encode(Sha256::digest(agent_token.as_bytes()));
+    let heartbeat = json!({"relay": relay_report(), "agents": [{"token_sha256":agent_hash,"heartbeat_ms_ago":0,"telemetry":agent_report("server-after-rename")}]});
+    assert_eq!(
+        call(&router, "POST", "/v1/heartbeat", relay_token, heartbeat)
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+    assert!(
+        post_batch(
+            &router,
+            relay_token,
+            host_batch(agent_token, "delivered after rename")
+        )
+        .await
+        .is_success()
+    );
+    let (status, listed_relays) =
+        call(&router, "GET", "/v1/admin/relays", "admin", nil.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(listed_relays["relays"][0]["id"], relay_id);
+    assert_eq!(listed_relays["relays"][0]["name"], "main-renamed");
+    let (status, listed_agents) =
+        call(&router, "GET", "/v1/admin/agents", "admin", nil.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    let updated = listed_agents["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == agent_id)
+        .unwrap();
+    assert_eq!(updated["name"], "worker-renamed");
+    assert_eq!(
+        updated["heartbeat"]["source"]["server"],
+        "server-after-rename"
+    );
+    assert_eq!(other_relay["relay"]["name"], "taken");
+    assert_eq!(other_agent["agent"]["name"], "taken");
+
+    let (_, host) = call(
+        &router,
+        "POST",
+        "/v1/admin/hosts",
+        "admin",
+        json!({"name":"mail"}),
+    )
+    .await;
+    let host_id = host["relay"]["id"].as_i64().unwrap();
+    let host_agent_id = host["agent"]["id"].as_i64().unwrap();
+    let host_token = host["token"].as_str().unwrap();
+    let host_path = format!("/v1/admin/hosts/{host_id}");
+    assert_eq!(
+        call(
+            &router,
+            "PATCH",
+            &host_path,
+            "admin",
+            json!({"name":"taken"})
+        )
+        .await,
+        (StatusCode::CONFLICT, json!({"error":"name_taken"}))
+    );
+    let (_, unchanged_relays) =
+        call(&router, "GET", "/v1/admin/relays", "admin", nil.clone()).await;
+    let unchanged_host = unchanged_relays["relays"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == host_id)
+        .unwrap();
+    let (_, unchanged_agents) =
+        call(&router, "GET", "/v1/admin/agents", "admin", nil.clone()).await;
+    let unchanged_agent = unchanged_agents["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == host_agent_id)
+        .unwrap();
+    assert_eq!(unchanged_host["name"], "mail");
+    assert_eq!(unchanged_agent["name"], "mail");
+
+    let (status, renamed_host) = call(
+        &router,
+        "PATCH",
+        &host_path,
+        "admin",
+        json!({"name":"mail-renamed"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(renamed_host["relay"]["id"], host_id);
+    assert_eq!(renamed_host["agent"]["id"], host_agent_id);
+    assert_eq!(renamed_host["relay"]["name"], "mail-renamed");
+    assert_eq!(renamed_host["agent"]["name"], "mail-renamed");
+    assert_eq!(
+        renamed_host["relay"]["created_at"],
+        host["relay"]["created_at"]
+    );
+    assert_eq!(
+        renamed_host["agent"]["created_at"],
+        host["agent"]["created_at"]
+    );
+    assert_eq!(
+        core.journal
+            .access
+            .relay_for_token(&Sha256::digest(host_token.as_bytes()).into()),
+        Some(host_id)
+    );
+    assert_eq!(
+        core.journal
+            .access
+            .agent_node(&lognara_core::wire::AgentHash(
+                Sha256::digest(host_token.as_bytes()).into()
+            )),
+        Some(lognara_core::model::Node {
+            relay_id: host_id,
+            agent_id: host_agent_id
+        })
+    );
+    assert_eq!(call(&router, "POST", "/v1/heartbeat", host_token,
+        json!({"relay":relay_report(),"agents":[{"token_sha256":hex::encode(Sha256::digest(host_token.as_bytes())),"heartbeat_ms_ago":0,"telemetry":agent_report("mail-server")}]})
+    ).await.0, StatusCode::NO_CONTENT);
+    assert!(
+        post_batch(
+            &router,
+            host_token,
+            host_batch(host_token, "host delivered after rename")
+        )
+        .await
+        .is_success()
+    );
+    core.shutdown().unwrap();
+}
+
+#[tokio::test]
 async fn host_sends_directly_and_keeps_node_identity_after_token_rotation() {
     use serde_json::json;
     let dir = tempfile::tempdir().unwrap();

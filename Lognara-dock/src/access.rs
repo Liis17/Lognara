@@ -28,6 +28,12 @@ pub struct NewAgent {
     relay_id: i64,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Rename {
+    name: String,
+}
+
 pub async fn list_relays(
     State(app): State<AppState>,
     _user: AuthUser,
@@ -44,6 +50,19 @@ pub async fn create_relay(
     let created = app.core.create_relay(&relay.name).await?;
     tracing::info!(username = %user.username, "relay created");
     Ok(issued(created))
+}
+
+pub async fn rename_relay(
+    State(app): State<AppState>,
+    user: AuthUser,
+    id: Result<Path<i64>, PathRejection>,
+    body: Result<Json<Rename>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let Path(id) = id.map_err(|_| ApiError::BadRequest("invalid_request"))?;
+    let Json(rename) = body.map_err(|_| ApiError::BadRequest("invalid_request"))?;
+    let updated = app.core.rename_relay(id, &rename.name).await?;
+    tracing::info!(username = %user.username, id, "relay renamed");
+    Ok(Json(updated))
 }
 
 pub async fn delete_relay(
@@ -73,6 +92,19 @@ pub async fn create_agent(
     let created = app.core.create_agent(&agent.name, agent.relay_id).await?;
     tracing::info!(username = %user.username, relay_id = agent.relay_id, "agent created");
     Ok(issued(created))
+}
+
+pub async fn rename_agent(
+    State(app): State<AppState>,
+    user: AuthUser,
+    id: Result<Path<i64>, PathRejection>,
+    body: Result<Json<Rename>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let Path(id) = id.map_err(|_| ApiError::BadRequest("invalid_request"))?;
+    let Json(rename) = body.map_err(|_| ApiError::BadRequest("invalid_request"))?;
+    let updated = app.core.rename_agent(id, &rename.name).await?;
+    tracing::info!(username = %user.username, id, "agent renamed");
+    Ok(Json(updated))
 }
 
 pub async fn rotate_agent_token(
@@ -107,6 +139,19 @@ pub async fn create_host(
     let created = app.core.create_host(&host.name).await?;
     tracing::info!(username = %user.username, "host created");
     Ok(issued(created))
+}
+
+pub async fn rename_host(
+    State(app): State<AppState>,
+    user: AuthUser,
+    id: Result<Path<i64>, PathRejection>,
+    body: Result<Json<Rename>, JsonRejection>,
+) -> Result<Json<Value>, ApiError> {
+    let Path(id) = id.map_err(|_| ApiError::BadRequest("invalid_request"))?;
+    let Json(rename) = body.map_err(|_| ApiError::BadRequest("invalid_request"))?;
+    let updated = app.core.rename_host(id, &rename.name).await?;
+    tracing::info!(username = %user.username, id, "host renamed");
+    Ok(Json(updated))
 }
 
 pub async fn rotate_host_token(

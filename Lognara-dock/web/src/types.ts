@@ -127,9 +127,9 @@ export interface IssueDetailsResponse {
 export type NodeStatus = "offline" | "degraded" | "unknown" | "idle" | "online";
 export interface SpoolUsage { used_bytes: number; limit_bytes: number; records: number }
 export interface InfraNode {
-  kind: "relay" | "agent"; id: number; name: string; relay_id: number | null; relay: string | null;
+  kind: "relay" | "agent" | "host"; id: number; name: string; relay_id: number | null; agent_id?: number; relay: string | null;
   status: NodeStatus; reason: "no_heartbeat" | "relay_silent" | "spool" | "delivery" | null;
-  heartbeat_at: string | null; last_event_at: string | null; version: string | null;
+  heartbeat_at: string | null; last_event_at: string | null; version: string | null; release_version?: string | null;
   spool: SpoolUsage | null; delivery_failures: number | null; events_per_second: number | null;
   source: { environment: string | null; server: string; backend: string; service: string; service_instance: string | null } | null;
 }
@@ -140,10 +140,11 @@ export interface InfraStorage {
 export interface InfrastructureResponse {
   as_of: string;
   thresholds: { heartbeat_ttl_seconds: number; idle_seconds: number; spool_warn_percent: number };
-  core: { status: "online" | "not_ready" | "unavailable"; version: string | null; visibility_lag_ms: number | null;
+  core: { status: "online" | "not_ready" | "unavailable"; version: string | null; release_version?: string | null;
+    git_commit?: string | null; visibility_lag_ms: number | null;
     wal_bytes: number | null; wal_limit_bytes: number | null };
   storage: InfraStorage | null;
-  dock: { version: string; sse_clients: number; sessions: number | null };
+  dock: { version: string; release_version?: string | null; git_commit?: string | null; sse_clients: number; sessions: number | null };
   registry: boolean;
   nodes: InfraNode[];
 }

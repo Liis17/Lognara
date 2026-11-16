@@ -1,7 +1,8 @@
 import { type ReactNode } from "react";
 import { Link } from "react-router";
-import { sourceQuery } from "../logs";
+import HostIcon from "../components/HostIcon";
 import { age, bytes, corePresentation, groupChip, percent, plural, REASON, STATUS } from "../infraPresentation";
+import { infrastructureVersion } from "../infrastructureVersion";
 import { useInfrastructure } from "../useInfrastructure";
 import type { InfraNode, InfraStorage } from "../types";
 
@@ -51,11 +52,29 @@ function Storage({ storage, wal }: { storage: InfraStorage; wal: number }) {
   </>;
 }
 
+function nodeLogsPath(node: InfraNode, service?: string): string {
+  const params = new URLSearchParams({ view: "events", range: "1h" });
+  if (service) params.set("q", `service:${JSON.stringify(service)}`);
+  if (node.kind === "relay") params.append("relay_id", String(node.id));
+  else if (node.kind === "host") {
+    params.append("relay_id", String(node.relay_id ?? node.id));
+    if (node.agent_id !== undefined) params.append("agent_id", String(node.agent_id));
+  } else {
+    if (node.relay_id !== null) params.append("relay_id", String(node.relay_id));
+    params.append("agent_id", String(node.agent_id ?? node.id));
+  }
+  return `/logs?${params}`;
+}
+
+function nodeLabel(node: InfraNode) {
+  return node.kind === "host" ? <><HostIcon /> hwagent {node.name}</> : `${node.kind} ${node.name}`;
+}
+
 export default function Infrastructure({ onUnauthorized }: { onUnauthorized: () => void }) {
   const { data, loadedAt, error, loading, refresh } = useInfrastructure(onUnauthorized);
 
   const nodes = data?.nodes ?? [];
-  const agents = nodes.filter((node) => node.kind === "agent");
+  const agents = nodes.filter((node) => node.kind === "agent" || node.kind === "host");
   const relays = nodes.filter((node) => node.kind === "relay");
   const attention = nodes.filter((node) => node.status === "offline" || node.status === "degraded").length;
   const fresh = (list: InfraNode[]) => list.filter((node) => node.status !== "offline" && node.status !== "unknown");
@@ -73,8 +92,6 @@ export default function Infrastructure({ onUnauthorized }: { onUnauthorized: () 
     : !data.registry ? "Состояние узлов недоступно" : !nodes.length ? "Нет зарегистрированных узлов"
     : attention ? `${attention} ${plural(attention, ["узел требует", "узла требуют", "узлов требуют"])} внимания`
     : unknown ? `Состояние ${unknown} ${plural(unknown, ["узла", "узлов", "узлов"])} неизвестно` : "Узлы на связи";
-  const logsLink = (node: InfraNode) => node.source && `/logs?${new URLSearchParams({ view: "events", range: "1h", q: sourceQuery(node.source) })}`;
-
   return <section className="infra-page page-stack">
     <div className="summary infra-summary">
       <div>
@@ -106,14 +123,14 @@ export default function Infrastructure({ onUnauthorized }: { onUnauthorized: () 
         <div className="stage">
           <div className="stage-name"><b>Core</b><Chip tone={coreChip.tone}>{coreChip.text}</Chip></div>
           <div className="stage-big">{core?.visibility_lag_ms != null ? number.format(core.visibility_lag_ms / 1000) : "—"}<small>с lag публикации</small></div>
-          <div className="stage-sub">{core?.version ? `v${core.version}` : "версия неизвестна"}</div>
+          <div className="stage-sub">{infrastructureVersion(core?.release_version, core?.version, core?.git_commit)}</div>
           <div className="stage-sub">WAL {core?.wal_bytes != null ? bytes(core.wal_bytes) : "—"}{core?.wal_limit_bytes ? ` из ${bytes(core.wal_limit_bytes)}` : ""}</div>
           {walShare !== null && <Meter value={walShare} hot={walShare >= warn} />}
         </div>
         <div className="stage">
           <div className="stage-name"><b>Dock</b><Chip tone="ok">Онлайн</Chip></div>
           <div className="stage-big">{data.dock.sse_clients}<small>SSE-{plural(data.dock.sse_clients, ["клиент", "клиента", "клиентов"])}</small></div>
-          <div className="stage-sub">v{data.dock.version} · 1 инстанс</div>
+          <div className="stage-sub">{infrastructureVersion(data.dock.release_version, data.dock.version, data.dock.git_commit)} · 1 инстанс</div>
           <div className="stage-sub">активных сессий {data.dock.sessions ?? "нет данных"}</div>
         </div>
       </section>
@@ -121,21 +138,23 @@ export default function Infrastructure({ onUnauthorized }: { onUnauthorized: () 
         <section className="panel table-scroll" aria-label="Узлы">
           <div className="panel-head"><h2>Узлы <small className="muted">сначала проблемные</small></h2></div>
           {!data.registry ? <p className="empty">Не удалось получить список узлов из Core.</p> :
-            !nodes.length ? <p className="empty">Нет зарегистрированных relay и агентов. Создайте их в <Link to="/access">Подключениях</Link>.</p> :
+            !nodes.length ? <p className="empty">Нет зарегистрированных relay, агентов и хостов. Создайте их в <Link to="/access">Подключениях</Link>.</p> :
             <table className="nodes-table"><thead><tr><th>Узел</th><th>Статус</th><th>Heartbeat</th><th>Последнее событие</th><th>Спул</th><th>Версия</th></tr></thead>
               <tbody>{nodes.map((node) => {
-                const status = STATUS[node.status], spool = percent(node.spool), link = logsLink(node);
+                const status = STATUS[node.status], spool = percent(node.spool), service = node.source?.service?.trim();
                 return <tr key={`${node.kind}-${node.id}`}>
-                  <td className="node-name"><code>{node.kind} {node.name}</code>
-                    {(node.relay || link) && <small>{node.relay && `через ${node.relay}`}{node.relay && link && " · "}{link && <Link to={link} title="Фильтр по конфигурации агента; принадлежность события агенту не проверяется">фильтр {node.source?.server}</Link>}</small>}</td>
+                  <td className="node-name">
+                    {service ? <code>{nodeLabel(node)}</code> : <Link to={nodeLogsPath(node)} title="Открыть логи узла"><code>{nodeLabel(node)}</code></Link>}
+                    {(node.relay || service) && <small>{node.relay && `через ${node.relay}`}{node.relay && service && " · "}{service && <Link to={nodeLogsPath(node, service)} title={`Логи сервиса ${service} на этом узле`}>сервис {service}</Link>}</small>}
+                  </td>
                   <td><Chip tone={status.tone}>{status.label}</Chip>{node.reason && <small className="node-reason">{REASON[node.reason]}</small>}</td>
                   <td className="node-time">{age(node.heartbeat_at, data.as_of)}</td>
                   <td className="node-time">{age(node.last_event_at, data.as_of)}</td>
                   <td>{spool === null ? <span className="node-time">—</span> : <span className="node-spool"><Meter value={spool} hot={spool >= warn} />{spool}%</span>}</td>
-                  <td className="node-time">{node.version ?? "—"}</td>
+                  <td className="node-time">{infrastructureVersion(node.release_version, node.version)}</td>
                 </tr>;
               })}</tbody></table>}
-          <p className="page-note node-note">Показатели узла относятся к последнему heartbeat. Ссылки строят фильтр по конфигурации, а не по подтверждённому agent_id. «Нет новых логов»: heartbeat приходит, а событий нет дольше {data.thresholds.idle_seconds / 60} мин. «Отключён»: heartbeat нет дольше {data.thresholds.heartbeat_ttl_seconds} с. «Нет данных»: heartbeat не приходил или relay агента не на связи. «Деградирован»: спул от {warn}% или ошибки доставки после последнего успеха.</p>
+          <p className="page-note node-note">Показатели узла относятся к последнему heartbeat. Ссылки на логи ограничены relay_id/agent_id из реестра; ссылки сервиса добавляют фильтр service. «Нет новых логов»: heartbeat приходит, а событий нет дольше {data.thresholds.idle_seconds / 60} мин. «Отключён»: heartbeat нет дольше {data.thresholds.heartbeat_ttl_seconds} с. «Нет данных»: heartbeat не приходил или relay агента не на связи. «Деградирован»: спул от {warn}% или ошибки доставки после последнего успеха.</p>
         </section>
         <section className="panel storage-card" aria-label="Хранилище">
           <div className="panel-head"><h2>Хранилище Core {data.storage && <small className="muted">retention {number.format(data.storage.retention_seconds / 86_400)} дн</small>}</h2></div>

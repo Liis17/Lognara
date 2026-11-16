@@ -735,6 +735,12 @@ impl CoreClient {
         self.admin(Method::POST, "relays".into(), Some(body)).await
     }
 
+    pub async fn rename_relay(&self, id: i64, name: &str) -> Result<Value, CoreError> {
+        let body = json!({ "name": name });
+        self.admin(Method::PATCH, format!("relays/{id}"), Some(body))
+            .await
+    }
+
     pub async fn delete_relay(&self, id: i64) -> Result<(), CoreError> {
         let path = format!("relays/{id}");
         self.admin(Method::DELETE, path, None).await.map(drop)
@@ -751,6 +757,12 @@ impl CoreClient {
         self.admin(Method::POST, "agents".into(), Some(body)).await
     }
 
+    pub async fn rename_agent(&self, id: i64, name: &str) -> Result<Value, CoreError> {
+        let body = json!({ "name": name });
+        self.admin(Method::PATCH, format!("agents/{id}"), Some(body))
+            .await
+    }
+
     pub async fn rotate_agent_token(&self, id: i64) -> Result<Value, CoreError> {
         self.admin(Method::POST, format!("agents/{id}/rotate-token"), None)
             .await
@@ -765,6 +777,12 @@ impl CoreClient {
     pub async fn create_host(&self, name: &str) -> Result<Value, CoreError> {
         let body = json!({ "name": name });
         self.admin(Method::POST, "hosts".into(), Some(body)).await
+    }
+
+    pub async fn rename_host(&self, id: i64, name: &str) -> Result<Value, CoreError> {
+        let body = json!({ "name": name });
+        self.admin(Method::PATCH, format!("hosts/{id}"), Some(body))
+            .await
     }
 
     pub async fn rotate_host_token(&self, id: i64) -> Result<Value, CoreError> {

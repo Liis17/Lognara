@@ -41,7 +41,7 @@ fn relay(id: i64, name: &str, heartbeat: Option<i64>) -> Value {
     let mut relay = json!({"id": id, "name": name, "created_at": NOW});
     if let Some(age) = heartbeat {
         relay["heartbeat"] = json!({
-            "received_at": ago(age), "version": "0.2.0", "spool": spool(10),
+            "received_at": ago(age), "version": "0.2.0", "release_version": "dev-test-relay", "spool": spool(10),
             "last_ingest_at": ago(age + 1), "last_delivery_at": ago(age), "last_failure_at": null,
             "delivery_failures": 0, "events_per_second": 3.5
         });
@@ -67,7 +67,8 @@ fn agent(id: i64, name: &str, relay_id: i64, heartbeat: Option<HeartbeatSample>)
 
 fn status() -> Value {
     json!({
-        "version": "0.3.0", "as_of": NOW, "ready": true, "visible_sequence": 10, "visibility_lag_ms": 600,
+        "version": "0.3.0", "release_version": "dev-test-core", "git_commit": "abcdef123456",
+        "as_of": NOW, "ready": true, "visible_sequence": 10, "visibility_lag_ms": 600,
         "wal_bytes": 2048, "wal_limit_bytes": 4096,
         "storage": {"segments": 2, "parquet_bytes": 1000, "index_bytes": 100, "oldest_event_at": ago(86400),
             "retention_seconds": 604800, "disk_total_bytes": 10000, "disk_free_bytes": 4000}
@@ -86,12 +87,17 @@ async fn nodes_get_distinct_states_from_heartbeat_age_spool_and_delivery() {
     let set = |path: &str, status: StatusCode, body: Value| {
         replies.lock().unwrap().insert(path.into(), (status, body));
     };
+    let mut host_relay = relay(4, "mail-host", Some(5));
+    host_relay["kind"] = json!("host");
+    let mut host_agent = agent(10, "mail-host", 4, Some((3, 2, 4, (2, None))));
+    host_agent["heartbeat"]["source"]["backend"] = json!("host");
+    host_agent["heartbeat"]["source"]["service"] = json!("host");
     set("/v1/status", StatusCode::OK, status());
     set(
         "/v1/admin/relays",
         StatusCode::OK,
         json!({"as_of": NOW, "relays": [
-            relay(1, "relay-eu-1", Some(5)), relay(2, "relay-eu-2", Some(120)), relay(3, "relay-new", None),
+            relay(1, "relay-eu-1", Some(5)), relay(2, "relay-eu-2", Some(120)), relay(3, "relay-new", None), host_relay,
         ]}),
     );
     set(
@@ -106,7 +112,7 @@ async fn nodes_get_distinct_states_from_heartbeat_age_spool_and_delivery() {
             agent(6, "offline", 1, Some((90, 95, 4, (95, None)))),
             agent(7, "silent", 1, None),
             agent(8, "behind-offline-relay", 2, Some((130, 130, 4, (130, None)))),
-            agent(9, "missing-relay", 99, Some((3, 2, 4, (2, None)))),
+            agent(9, "missing-relay", 99, Some((3, 2, 4, (2, None)))), host_agent,
         ]}),
     );
     let get = || {
@@ -146,6 +152,7 @@ async fn nodes_get_distinct_states_from_heartbeat_age_spool_and_delivery() {
     expect("agent recovered", "online", Value::Null);
     expect("agent offline", "offline", Value::Null);
     expect("agent silent", "unknown", json!("no_heartbeat"));
+    expect("host mail-host", "online", Value::Null);
     expect(
         "agent behind-offline-relay",
         "unknown",
@@ -198,14 +205,39 @@ async fn nodes_get_distinct_states_from_heartbeat_age_spool_and_delivery() {
         .find(|node| node["kind"] == "relay")
         .unwrap();
     assert!(relay["relay_id"].is_null());
+    let host = body["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["kind"] == "host")
+        .unwrap();
+    assert_eq!(host["id"], 4);
+    assert_eq!(host["relay_id"], 4);
+    assert_eq!(host["agent_id"], 10);
+    assert_eq!(host["release_version"], "dev-test-relay");
+    assert_eq!(host["source"]["service"], "host");
+    assert_eq!(
+        body["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|node| node["name"] == "mail-host")
+            .count(),
+        1
+    );
     assert_eq!(body["as_of"], NOW);
     assert_eq!(body["registry"], true);
     assert_eq!(
         body["core"],
-        json!({"status": "online", "version": "0.3.0", "visibility_lag_ms": 600, "wal_bytes": 2048, "wal_limit_bytes": 4096})
+        json!({"status": "online", "version": "0.3.0", "release_version": "dev-test-core", "git_commit": "abcdef123456",
+            "visibility_lag_ms": 600, "wal_bytes": 2048, "wal_limit_bytes": 4096})
     );
     assert_eq!(body["storage"]["parquet_bytes"], 1000);
     assert_eq!(body["dock"]["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        body["dock"]["release_version"],
+        lognara_dock::version::release_version()
+    );
     assert_eq!(body["dock"]["sessions"], 1);
     assert_eq!(
         body["thresholds"],
