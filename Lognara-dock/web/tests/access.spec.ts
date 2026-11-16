@@ -5,7 +5,7 @@ const token = `lna_${"a".repeat(64)}`;
 const relayToken = `lnr_${"b".repeat(64)}`;
 const hostToken = `lnh_${"c".repeat(64)}`;
 
-async function fixture(page: Page, empty = false) {
+async function fixture(page: Page, empty = false, renameUnsupported = false) {
   const received = new Date().toISOString();
   const state = {
     relays: empty ? [] : [
@@ -57,6 +57,7 @@ async function fixture(page: Page, empty = false) {
         : { agent: state.agents.find((agent) => agent.id === id), token } });
     }
     if (request.method() === "PATCH") {
+      if (renameUnsupported) return route.fulfill({ status: 501, json: { error: "core_upgrade_required" } });
       const kind = pathParts[2];
       if (kind === "agents") {
         const agent = state.agents.find((item) => item.id === id);
@@ -146,6 +147,15 @@ test("renames relay, agent and host through their inline editors", async ({ page
     ["PATCH", "/api/hosts/3", { name: "mail-edge" }],
   ]);
   expect(state.agents.find((item) => item.id === 4)?.name).toBe("mail-edge");
+});
+
+test("explains that Core must be upgraded when it does not support renaming", async ({ page }) => {
+  await fixture(page, false, true);
+  const relay = page.getByRole("region", { name: "Relay relay-eu" });
+  await relay.getByRole("button", { name: "Переименовать" }).first().click();
+  await page.getByLabel("Новое имя").fill("relay-europe");
+  await page.getByRole("button", { name: "Сохранить" }).click();
+  await expect(page.getByRole("alert")).toHaveText("Для переименования обновите Core");
 });
 
 test("confirms deletion and token rotation while retaining the one-time secret panel", async ({ page }) => {

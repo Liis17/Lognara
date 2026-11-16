@@ -1907,7 +1907,10 @@ fn core_failure(error: CoreError) -> ToolFailure {
             "cursor_expired",
             "Core query snapshot expired; start a new query",
         ),
-        CoreError::Status { .. } | CoreError::Format | CoreError::Rejected(_, _) => {
+        CoreError::Status { .. }
+        | CoreError::Format
+        | CoreError::Rejected(_, _)
+        | CoreError::RenameUnsupported => {
             ToolFailure::new("unavailable", "Core returned an unexpected response")
         }
     }

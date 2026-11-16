@@ -177,6 +177,8 @@ pub enum CoreError {
     /// Admin-запрос отклонён; `code` из JSON `{"error": code}` или пустой.
     #[error("core rejected admin request with {0}: {1:?}")]
     Rejected(reqwest::StatusCode, String),
+    #[error("core must be upgraded to rename nodes")]
+    RenameUnsupported,
 }
 
 /// Успешный ответ core: статус и JSON-тело (`null`, если тела нет).
@@ -737,8 +739,7 @@ impl CoreClient {
 
     pub async fn rename_relay(&self, id: i64, name: &str) -> Result<Value, CoreError> {
         let body = json!({ "name": name });
-        self.admin(Method::PATCH, format!("relays/{id}"), Some(body))
-            .await
+        self.rename_admin(format!("relays/{id}"), body).await
     }
 
     pub async fn delete_relay(&self, id: i64) -> Result<(), CoreError> {
@@ -759,8 +760,7 @@ impl CoreClient {
 
     pub async fn rename_agent(&self, id: i64, name: &str) -> Result<Value, CoreError> {
         let body = json!({ "name": name });
-        self.admin(Method::PATCH, format!("agents/{id}"), Some(body))
-            .await
+        self.rename_admin(format!("agents/{id}"), body).await
     }
 
     pub async fn rotate_agent_token(&self, id: i64) -> Result<Value, CoreError> {
@@ -781,8 +781,7 @@ impl CoreClient {
 
     pub async fn rename_host(&self, id: i64, name: &str) -> Result<Value, CoreError> {
         let body = json!({ "name": name });
-        self.admin(Method::PATCH, format!("hosts/{id}"), Some(body))
-            .await
+        self.rename_admin(format!("hosts/{id}"), body).await
     }
 
     pub async fn rotate_host_token(&self, id: i64) -> Result<Value, CoreError> {
@@ -793,6 +792,17 @@ impl CoreClient {
     pub async fn delete_host(&self, id: i64) -> Result<(), CoreError> {
         let path = format!("hosts/{id}");
         self.admin(Method::DELETE, path, None).await.map(drop)
+    }
+
+    async fn rename_admin(&self, path: String, body: Value) -> Result<Value, CoreError> {
+        self.admin(Method::PATCH, path, Some(body))
+            .await
+            .map_err(|error| match error {
+                CoreError::Rejected(StatusCode::METHOD_NOT_ALLOWED, _) => {
+                    CoreError::RenameUnsupported
+                }
+                other => other,
+            })
     }
 
     /// Ответ core как JSON; `Null` для 204.
@@ -955,5 +965,37 @@ mod alert_status_tests {
             classify_alert_series_status(StatusCode::UNAUTHORIZED, &Value::Null),
             AlertSeriesStatus::Misconfigured
         );
+    }
+
+    #[tokio::test]
+    async fn renaming_maps_core_method_not_allowed_to_upgrade_required() {
+        let app = axum::Router::new().route(
+            "/v1/admin/relays/{id}",
+            axum::routing::patch(|| async {
+                (
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    axum::Json(json!({"error":"method_not_allowed"})),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let base = Url::parse(&format!("http://{address}/")).unwrap();
+        let client = CoreClient {
+            http: reqwest::Client::new(),
+            search_url: base.join("v1/logs/search").unwrap(),
+            query_url: base.join("v1/").unwrap(),
+            base: base.clone(),
+            admin_url: base.join("v1/admin/").unwrap(),
+            query_token: "query".into(),
+            admin_token: "admin".into(),
+        };
+
+        assert!(matches!(
+            client.rename_relay(1, "relay-new").await,
+            Err(CoreError::RenameUnsupported)
+        ));
+        server.abort();
     }
 }

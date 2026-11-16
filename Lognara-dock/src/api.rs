@@ -101,6 +101,7 @@ pub enum ApiError {
     Internal,
     /// Core недоступен или ответил неожиданно.
     CoreUnavailable,
+    CoreUpgradeRequired,
     TelegramUnavailable,
     TelegramRateLimited(Duration),
     CursorExpired,
@@ -137,6 +138,7 @@ impl From<CoreError> for ApiError {
                     Self::CoreUnavailable
                 }
             },
+            CoreError::RenameUnsupported => Self::CoreUpgradeRequired,
             CoreError::Status {
                 status: StatusCode::BAD_REQUEST,
                 detail,
@@ -202,6 +204,7 @@ impl IntoResponse for ApiError {
             }
             Self::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
             Self::CoreUnavailable => (StatusCode::BAD_GATEWAY, "core_unavailable"),
+            Self::CoreUpgradeRequired => (StatusCode::NOT_IMPLEMENTED, "core_upgrade_required"),
             Self::TelegramUnavailable => (StatusCode::BAD_GATEWAY, "telegram_unavailable"),
             Self::TelegramRateLimited(wait) => {
                 let body = Json(json!({ "error": "telegram_rate_limited" }));
@@ -385,5 +388,21 @@ async fn ready(axum::extract::State(app): axum::extract::State<AppState>) -> Sta
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn unsupported_core_rename_returns_upgrade_required_code() {
+        let response = ApiError::from(CoreError::RenameUnsupported).into_response();
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"], "core_upgrade_required");
     }
 }

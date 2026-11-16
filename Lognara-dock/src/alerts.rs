@@ -2,6 +2,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    net::IpAddr,
     time::Duration,
 };
 
@@ -2600,10 +2601,11 @@ fn append_html_block(
 
 fn telegram_button(link: &str) -> Option<String> {
     let url = Url::parse(link).ok()?;
-    if !matches!(url.scheme(), "http" | "https")
+    if url.scheme() != "https"
         || url.host_str().is_none()
         || !url.username().is_empty()
         || url.password().is_some()
+        || telegram_button_host_is_local_or_private(url.host_str()?)
     {
         return None;
     }
@@ -2611,6 +2613,47 @@ fn telegram_button(link: &str) -> Option<String> {
         "inline_keyboard": [[{"text": "Открыть в Dock", "url": url.as_str()}]]
     }))
     .ok()
+}
+
+fn telegram_button_host_is_local_or_private(host: &str) -> bool {
+    let host = host.trim_end_matches('.');
+    if host.eq_ignore_ascii_case("localhost")
+        || host.to_ascii_lowercase().ends_with(".localhost")
+        || host.to_ascii_lowercase().ends_with(".local")
+    {
+        return true;
+    }
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    match host.parse::<IpAddr>() {
+        Ok(IpAddr::V4(address)) => {
+            let octets = address.octets();
+            address.is_private()
+                || address.is_loopback()
+                || address.is_link_local()
+                || address.is_unspecified()
+                || address.is_broadcast()
+                || address.is_multicast()
+                || (octets[0] == 100 && octets[1] & 0b1100_0000 == 0b0100_0000)
+        }
+        Ok(IpAddr::V6(address)) => {
+            address.is_loopback()
+                || address.is_unspecified()
+                || address.is_unique_local()
+                || address.is_unicast_link_local()
+                || address.is_multicast()
+                || address.to_ipv4_mapped().is_some_and(|ipv4| {
+                    let octets = ipv4.octets();
+                    ipv4.is_private()
+                        || ipv4.is_loopback()
+                        || ipv4.is_link_local()
+                        || ipv4.is_unspecified()
+                        || ipv4.is_broadcast()
+                        || ipv4.is_multicast()
+                        || (octets[0] == 100 && octets[1] & 0b1100_0000 == 0b0100_0000)
+                })
+        }
+        Err(_) => false,
+    }
 }
 
 pub(crate) fn render_telegram_message(
@@ -3125,43 +3168,133 @@ impl TelegramClient {
         reply_markup: Option<&str>,
     ) -> Result<(), TelegramFailure> {
         let url = self.endpoint(token, "sendMessage")?;
-        let mut payload = json!({"chat_id": chat_id, "text": text});
-        let payload = payload.as_object_mut().ok_or(TelegramFailure::Transient)?;
-        if let Some(parse_mode) = parse_mode {
-            payload.insert("parse_mode".into(), Value::String(parse_mode.into()));
+        let mut text = text.to_owned();
+        let mut parse_mode = parse_mode.map(str::to_owned);
+        let mut reply_markup = match reply_markup {
+            Some(markup) => {
+                Some(serde_json::from_str(markup).map_err(|_| TelegramFailure::Transient)?)
+            }
+            None => None,
+        };
+
+        loop {
+            let mut payload = json!({"chat_id": chat_id, "text": text});
+            let payload = payload.as_object_mut().ok_or(TelegramFailure::Transient)?;
+            if let Some(parse_mode) = &parse_mode {
+                payload.insert("parse_mode".into(), Value::String(parse_mode.clone()));
+            }
+            if let Some(reply_markup) = &reply_markup {
+                payload.insert("reply_markup".into(), reply_markup.clone());
+            }
+            let response = self
+                .http
+                .post(url.clone())
+                .json(&Value::Object(payload.clone()))
+                .send()
+                .await
+                .map_err(|_| TelegramFailure::Transient)?;
+            let status = response.status();
+            let body = response
+                .bytes()
+                .await
+                .map_err(|_| TelegramFailure::Transient)?;
+            let reply: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+            if status.is_success() && reply["ok"].as_bool() == Some(true) {
+                return Ok(());
+            }
+            if status == StatusCode::UNAUTHORIZED || reply["error_code"] == 401 {
+                return Err(TelegramFailure::InvalidToken);
+            }
+            if status == StatusCode::TOO_MANY_REQUESTS || reply["error_code"] == 429 {
+                return Err(telegram_rate_limit(&reply));
+            }
+
+            let description = reply["description"].as_str().unwrap_or_default();
+            if status == StatusCode::FORBIDDEN
+                || reply["error_code"] == 403
+                || ((status.is_client_error() || reply["error_code"] == 400)
+                    && telegram_description_is_recipient_error(description))
+            {
+                return Err(TelegramFailure::PermanentRecipient);
+            }
+            if status != StatusCode::BAD_REQUEST {
+                return Err(TelegramFailure::Transient);
+            }
+            if reply_markup.is_some() && telegram_description_is_button_error(description) {
+                if let Some(link) = reply_markup.as_ref().and_then(telegram_markup_url) {
+                    append_telegram_text_link(&mut text, link, parse_mode.as_deref());
+                }
+                reply_markup = None;
+                continue;
+            }
+            if parse_mode.is_some() && telegram_description_is_parse_error(description) {
+                text = telegram_plain_text(&text);
+                parse_mode = None;
+                continue;
+            }
+            return Err(TelegramFailure::Transient);
         }
-        if let Some(reply_markup) = reply_markup {
-            let markup =
-                serde_json::from_str(reply_markup).map_err(|_| TelegramFailure::Transient)?;
-            payload.insert("reply_markup".into(), markup);
-        }
-        let response = self
-            .http
-            .post(url)
-            .json(&Value::Object(payload.clone()))
-            .send()
-            .await
-            .map_err(|_| TelegramFailure::Transient)?;
-        let status = response.status();
-        let body = response
-            .bytes()
-            .await
-            .map_err(|_| TelegramFailure::Transient)?;
-        let reply: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-        if status.is_success() && reply["ok"].as_bool() == Some(true) {
-            return Ok(());
-        }
-        if status == StatusCode::UNAUTHORIZED || reply["error_code"] == 401 {
-            return Err(TelegramFailure::InvalidToken);
-        }
-        if status == StatusCode::TOO_MANY_REQUESTS || reply["error_code"] == 429 {
-            return Err(telegram_rate_limit(&reply));
-        }
-        if status == StatusCode::BAD_REQUEST || status == StatusCode::FORBIDDEN {
-            return Err(TelegramFailure::PermanentRecipient);
-        }
-        Err(TelegramFailure::Transient)
     }
+}
+
+fn telegram_markup_url(markup: &Value) -> Option<&str> {
+    for row in markup["inline_keyboard"].as_array()? {
+        for button in row.as_array()? {
+            if let Some(url) = button["url"].as_str() {
+                return Some(url);
+            }
+        }
+    }
+    None
+}
+
+fn append_telegram_text_link(text: &mut String, link: &str, parse_mode: Option<&str>) {
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    if parse_mode == Some("HTML") {
+        text.push_str("<b>Открыть в Dock:</b> ");
+        text.push_str(&escape_html(link));
+    } else {
+        text.push_str("Открыть в Dock: ");
+        text.push_str(link);
+    }
+}
+
+fn telegram_plain_text(html: &str) -> String {
+    html.replace("<b>", "")
+        .replace("</b>", "")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&amp;", "&")
+}
+
+fn telegram_description_is_button_error(description: &str) -> bool {
+    let description = description.to_ascii_lowercase();
+    description.contains("button") || description.contains("wrong http url")
+}
+
+fn telegram_description_is_parse_error(description: &str) -> bool {
+    let description = description.to_ascii_lowercase();
+    description.contains("can't parse entities") || description.contains("can’t parse entities")
+}
+
+fn telegram_description_is_recipient_error(description: &str) -> bool {
+    let description = description.to_ascii_lowercase();
+    [
+        "chat not found",
+        "bot was blocked",
+        "user is deactivated",
+        "user deactivated",
+        "bot was kicked",
+        "bot is not a member",
+        "not enough rights",
+        "have no rights",
+        "forbidden",
+    ]
+    .iter()
+    .any(|needle| description.contains(*needle))
 }
 
 impl Default for TelegramClient {
@@ -3362,6 +3495,21 @@ mod tests {
         assert!(!rendered.text.contains("Все условия"));
         assert_eq!(rendered.parse_mode.as_deref(), Some("HTML"));
         assert!(rendered.reply_markup.is_some());
+    }
+
+    #[test]
+    fn local_dock_url_is_rendered_as_text_instead_of_a_telegram_button() {
+        let rendered = render_telegram_message(
+            "status",
+            "🟡",
+            None,
+            &BTreeMap::new(),
+            Vec::new(),
+            "http://localhost:7403",
+        );
+
+        assert!(rendered.reply_markup.is_none());
+        assert!(rendered.text.contains("http://localhost:7403"));
     }
 
     #[test]
@@ -4953,7 +5101,7 @@ mod tests {
             ),
             (
                 StatusCode::FORBIDDEN,
-                json!({"ok":false,"description":"private details"}),
+                json!({"ok":false,"description":"Forbidden: bot was blocked by the user"}),
             ),
             (
                 StatusCode::UNAUTHORIZED,
@@ -5026,6 +5174,86 @@ mod tests {
             requests[8].1["reply_markup"]["inline_keyboard"][0][0]["text"],
             "Открыть в Dock"
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn telegram_send_retries_button_and_parse_errors_within_one_delivery() {
+        let mock = MockTelegram::default();
+        mock.replies.lock().unwrap().extend([
+            (
+                StatusCode::BAD_REQUEST,
+                json!({"ok":false,"error_code":400,"description":"Bad Request: BUTTON_URL_INVALID"}),
+            ),
+            (StatusCode::OK, json!({"ok":true})),
+            (
+                StatusCode::BAD_REQUEST,
+                json!({"ok":false,"error_code":400,"description":"Bad Request: can't parse entities: Unsupported start tag"}),
+            ),
+            (StatusCode::OK, json!({"ok":true})),
+            (
+                StatusCode::BAD_REQUEST,
+                json!({"ok":false,"error_code":400,"description":"Bad Request: chat not found"}),
+            ),
+        ]);
+        let app = Router::new()
+            .route("/{token}/getMe", get(get_me))
+            .route("/{token}/sendMessage", post(send_message))
+            .with_state(mock.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = TelegramClient::with_base(Url::parse(&format!("http://{address}/")).unwrap());
+        let markup = r#"{"inline_keyboard":[[{"text":"Открыть в Dock","url":"https://dock.example/?a=1&b=2"}]]}"#;
+
+        client
+            .send(
+                BOT_TOKEN,
+                1001,
+                "<b>A &amp; B</b>",
+                Some("HTML"),
+                Some(markup),
+            )
+            .await
+            .unwrap();
+        client
+            .send(
+                BOT_TOKEN,
+                1002,
+                "<b>formatted</b>",
+                Some("HTML"),
+                Some(markup),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            client
+                .send(BOT_TOKEN, 1003, "plain text", None, None,)
+                .await,
+            Err(TelegramFailure::PermanentRecipient)
+        ));
+
+        let requests = mock.requests.lock().unwrap();
+        assert_eq!(requests.len(), 5);
+        assert!(requests[0].1["reply_markup"].is_object());
+        assert!(requests[1].1.get("reply_markup").is_none());
+        assert_eq!(requests[1].1["parse_mode"], "HTML");
+        assert!(
+            requests[1].1["text"]
+                .as_str()
+                .unwrap()
+                .contains("https://dock.example/?a=1&amp;b=2")
+        );
+        assert!(requests[2].1.get("parse_mode").is_some());
+        assert!(requests[3].1.get("parse_mode").is_none());
+        assert!(requests[3].1.get("reply_markup").is_some());
+        assert!(
+            requests[3].1["text"]
+                .as_str()
+                .unwrap()
+                .contains("formatted")
+        );
+        assert!(!requests[3].1["text"].as_str().unwrap().contains("<b>"));
         server.abort();
     }
 

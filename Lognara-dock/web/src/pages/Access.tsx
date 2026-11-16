@@ -123,6 +123,7 @@ export default function Access({ onUnauthorized }: { onUnauthorized: () => void 
       await refresh(true);
     } catch (cause) {
       if (cause instanceof ApiError && cause.status === 401) unauthorized.current();
+      else if (cause instanceof ApiError && cause.code === "core_upgrade_required") setError("Для переименования обновите Core");
       else setError(errorText(cause));
     } finally {
       busyRef.current = false;
