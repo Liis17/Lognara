@@ -1,4 +1,4 @@
-import { type CSSProperties, type FormEvent, useState } from "react";
+import { type CSSProperties, type FormEvent, useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router";
 import { api, errorText } from "../api";
 import { getPasskey } from "../webauthn";
@@ -25,7 +25,18 @@ const makeBlobs = () =>
     };
   });
 
-export default function Login({ onLogin }: { onLogin: () => Promise<void> }) {
+function oauthReturnPath(search: string): string | null {
+  const returnTo = new URLSearchParams(search).get("return_to");
+  if (returnTo && ["/oauth/authorize", "/oauth/consent"].some((path) => returnTo.startsWith(`${path}?`))) {
+    const destination = new URL(returnTo, window.location.origin);
+    if (destination.origin === window.location.origin && !returnTo.startsWith("//")) {
+      return `${destination.pathname}${destination.search}`;
+    }
+  }
+  return null;
+}
+
+export default function Login({ onLogin, authenticated = false }: { onLogin: () => Promise<void>; authenticated?: boolean }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -35,16 +46,20 @@ export default function Login({ onLogin }: { onLogin: () => Promise<void> }) {
   const navigate = useNavigate();
   const location = useLocation();
 
+  useEffect(() => {
+    if (!authenticated) return;
+    const destination = oauthReturnPath(location.search);
+    if (destination) window.location.assign(destination);
+    else navigate("/logs", { replace: true });
+  }, [authenticated, location.search, navigate]);
+
   const finish = async () => {
-    await onLogin();
-    const returnTo = new URLSearchParams(location.search).get("return_to");
-    if (returnTo && ["/oauth/authorize", "/oauth/consent"].some((path) => returnTo.startsWith(`${path}?`))) {
-      const destination = new URL(returnTo, window.location.origin);
-      if (destination.origin === window.location.origin && !returnTo.startsWith("//")) {
-        window.location.assign(`${destination.pathname}${destination.search}`);
-        return;
-      }
+    const destination = oauthReturnPath(location.search);
+    if (destination) {
+      window.location.assign(destination);
+      return;
     }
+    await onLogin();
     navigate("/logs", { replace: true });
   };
 
@@ -74,6 +89,8 @@ export default function Login({ onLogin }: { onLogin: () => Promise<void> }) {
       const credential = await getPasskey(options);
       await api("POST", "/api/auth/passkey/finish", credential);
     });
+
+  if (authenticated) return <div className="session-state" role="status">Продолжаем вход…</div>;
 
   return (
     <div className="login-page">
