@@ -327,7 +327,7 @@ pre.json, .event-details pre, tr.details pre { margin: 0; padding: 12px; backgro
 .histogram-data caption { text-align: left; padding: 12px 14px; }
 .histogram-empty { padding-top: 24px; padding-bottom: 24px; color: var(--ink3); }
 .inline-label { flex-direction: row; align-items: center; gap: 8px; }
-.service-combobox { position: relative; min-width: 0; }
+.service-combobox { position: relative; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .service-combobox.inline { flex-direction: row; align-items: center; gap: 8px; }
 .service-combobox-control { position: relative; min-width: 0; }
 .service-combobox input { width: 220px; height: 40px; padding-right: 36px; }
@@ -360,7 +360,7 @@ pre.json, .event-details pre, tr.details pre { margin: 0; padding: 12px; backgro
 .date-range-presets button { flex: 1 0 auto; padding: 6px 9px; font-size: 12px; }
 .date-range-zone { display: block; margin-top: 10px; color: var(--ink3); font: 11px var(--mono); }
 .line-chart { min-width: 0; }
-.line-chart-unit { margin-bottom: 8px; color: var(--ink3); }
+.line-chart-unit { margin-bottom: 8px; color: var(--ink3); overflow-wrap: anywhere; }
 .line-chart-legend { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
 .line-chart-legend button { padding: 5px 9px; border-radius: 999px; font-size: 11px; font-weight: 400; }
 .line-chart-legend button[aria-pressed='false'] { color: var(--ink4); opacity: .65; }
@@ -608,6 +608,11 @@ pre.json, .event-details pre, tr.details pre { margin: 0; padding: 12px; backgro
 .pattern-values ul { list-style: none; padding: 0; margin: 0 0 6px; }
 .pattern-values li { display: grid; grid-template-columns: minmax(0,140px) minmax(40px,1fr) auto; gap: 6px 10px; align-items: center; margin: 4px 0; font: 12px var(--mono); color: var(--ink2); }
 .pattern-values code { overflow-wrap: anywhere; }
+.pattern-cardinality { display: grid; gap: 6px; color: var(--ink2); font-size: 12px; }
+.pattern-cardinality strong { color: var(--ink); }
+.pattern-cardinality ul { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; }
+.pattern-cardinality li { display: block; margin: 0; }
+.pattern-cardinality code { display: inline-block; max-width: 220px; padding: 3px 7px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 1px solid var(--line); border-radius: 6px; }
 .pattern-value-count { text-align: right; color: var(--ink); }
 .pattern-examples { display: flex; flex-direction: column; gap: 6px; }
 .pattern-examples summary { display: flex; gap: 8px; cursor: pointer; padding: 7px 10px; border-radius: 8px; background: var(--bg); font: 12px/1.45 var(--mono); color: var(--ink2); overflow-wrap: anywhere; }
@@ -811,6 +816,28 @@ table.preview .message { overflow-wrap: anywhere; min-width: 150px; }
 
 /* Метрики: обзор по серверам и отдельная страница. */
 .metrics-overview, .metric-detail { display: block; min-width: 0; }
+.metrics-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.metrics-toolbar h1 { margin-right: auto; }
+.metric-filters { display: grid; grid-template-columns: minmax(240px,1fr) minmax(160px,220px) minmax(160px,200px); gap: 12px; align-items: end; margin: 14px 0 22px; }
+.metric-filters label { display: grid; gap: 6px; min-width: 0; color: var(--ink3); font-size: 12px; }
+.metric-filters input, .metric-filters select { width: 100%; min-width: 0; }
+.metric-favorites h2, .metric-catalog > h2, .metric-search-results > h2 { margin: 20px 0 12px; }
+.metric-favorite-group { margin: 14px 0 22px; }
+.metric-favorite-group h3 { margin: 0 0 10px; color: var(--ink2); font-size: 14px; }
+.metric-favorite-group h4 { margin: 0 0 10px; color: var(--ink3); font-size: 12px; font-weight: 500; }
+.metric-server-group { margin: 10px 0; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+.metric-server-group > summary { padding: 14px 16px; cursor: pointer; font-weight: 600; }
+.metric-server-group[open] > summary { border-bottom: 1px solid var(--line); }
+.metric-server-services { padding: 4px 16px 8px; }
+.metric-service-group { border-bottom: 1px solid var(--line-soft); }
+.metric-service-group:last-child { border-bottom: 0; }
+.metric-service-group > summary { padding: 12px 4px; color: var(--ink2); cursor: pointer; font-weight: 500; }
+.metric-service-group[open] > summary { color: var(--accent); }
+.metric-service-content { padding: 0 4px 14px; }
+.metric-tile-value { display: flex; align-items: baseline; gap: 6px; font-variant-numeric: tabular-nums; }
+.metric-tile-value strong { color: var(--ink); font-size: 18px; }
+.metric-tile-value span { color: var(--ink3); font-size: 12px; }
+.metric-search-summary { margin: 0 0 10px; }
 .metric-server { margin: 24px 0; }
 .metric-server h2, .metric-service h3 { overflow-wrap: anywhere; }
 .metric-service h3 { color: var(--ink3); margin-bottom: 12px; }
@@ -854,6 +881,7 @@ table.preview .message { overflow-wrap: anywhere; min-width: 150px; }
 .metric-chart, .metric-chart > div { min-width: 0; max-width: 100%; }
 .metric-chart-unit { margin-bottom: 8px; color: var(--ink3); overflow-wrap: anywhere; }
 @media (hover: none), (pointer: coarse) { .metric-favorite { opacity: 1; } }
+@media (max-width: 640px) { .metric-filters { grid-template-columns: minmax(0,1fr); } }
 
 .log-alerts { display: grid; gap: 14px; max-width: 980px; }
 .log-alert-form { display: grid; gap: 12px; padding: 16px; border: 1px solid var(--line); border-radius: 8px; }

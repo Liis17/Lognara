@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import uPlot from "uplot";
 import "uplot/dist/uPlot.min.css";
 import type { SeriesLine } from "../api";
-import { chartColorToken, chartData, selectedChartRange, zoomChartRange } from "./lineChartUtils";
+import { chartColorToken, chartData, formatTimeAxisTicks, selectedChartRange, zoomChartRange } from "./lineChartUtils";
 
 export interface LineChartProps {
   buckets: string[];
@@ -15,6 +15,7 @@ export interface LineChartProps {
   onSelectBucket?: (index: number) => void;
   showLegend?: boolean;
   legendLabel?: string;
+  colorTokens?: readonly string[];
 }
 
 interface Hover { index: number; left: number; tooltipLeft: number }
@@ -22,7 +23,7 @@ const HEIGHT = 320;
 const number = new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 4 });
 
 export default function LineChart({ buckets, series, unit = "", visibleSeries, onToggleSeries, onSelectRange, onZoom,
-  onSelectBucket, showLegend = true, legendLabel = "Серии диаграммы" }: LineChartProps) {
+  onSelectBucket, showLegend = true, legendLabel = "Серии диаграммы", colorTokens }: LineChartProps) {
   const container = useRef<HTMLDivElement>(null);
   const plotRef = useRef<uPlot | null>(null);
   const callbacks = useRef({ onSelectRange, onZoom });
@@ -39,7 +40,8 @@ export default function LineChart({ buckets, series, unit = "", visibleSeries, o
     const element = container.current;
     if (!element) return;
     const theme = getComputedStyle(element);
-    const colorValues = series.map((_line, index) => theme.getPropertyValue(chartColorToken(index)).trim() || theme.getPropertyValue("--accent").trim());
+    const tokens = series.map((_line, index) => colorTokens?.[index] ?? chartColorToken(index));
+    const colorValues = tokens.map((token) => theme.getPropertyValue(token).trim() || theme.getPropertyValue("--accent").trim());
     const ink = theme.getPropertyValue("--ink3").trim();
     const grid = theme.getPropertyValue("--line").trim();
     const axis = { font: "12px Arial", stroke: ink, grid: { stroke: grid }, ticks: { stroke: grid } };
@@ -58,7 +60,7 @@ export default function LineChart({ buckets, series, unit = "", visibleSeries, o
         })),
       ],
       axes: [
-        { ...axis, values: (_self, values) => (values ?? []).map((value) => tooltipTime.format(new Date(Number(value) * 1000))) },
+        { ...axis, space: 78, values: (_self, values) => formatTimeAxisTicks(values ?? [], element.clientWidth, timeZone) },
         { ...axis },
       ],
       cursor: { show: true, x: true, y: false, drag: { x: true, y: false, setScale: false, dist: 4 } },
@@ -92,7 +94,7 @@ export default function LineChart({ buckets, series, unit = "", visibleSeries, o
       plot.destroy();
       plotRef.current = null;
     };
-  }, [buckets, series, tooltipTime]);
+  }, [buckets, series, tooltipTime, colorTokens]);
 
   useEffect(() => {
     const plot = plotRef.current;
@@ -125,12 +127,13 @@ export default function LineChart({ buckets, series, unit = "", visibleSeries, o
   }, [timestamps]);
 
   const hoveredTimestamp = hover ? buckets[hover.index] : undefined;
+  const colorToken = (index: number) => colorTokens?.[index] ?? chartColorToken(index);
   return <section className="line-chart" aria-label="Линейная диаграмма">
     {unit && <div className="line-chart-unit">{unit}</div>}
     {showLegend && series.length > 0 && <div className="line-chart-legend" role="group" aria-label={legendLabel}>
       {series.map((line, index) => <button key={`${index}/${line.label}`} type="button" aria-pressed={visibleSeries.has(index)}
         onClick={() => onToggleSeries(index)}>
-        <i aria-hidden="true" style={{ backgroundColor: `var(${chartColorToken(index)})` }} />{line.label || `Серия ${index + 1}`}
+        <i aria-hidden="true" style={{ backgroundColor: `var(${colorToken(index)})` }} />{line.label || `Серия ${index + 1}`}
       </button>)}
     </div>}
     <div className="line-chart-frame" onMouseLeave={() => setHover(null)}>
@@ -141,12 +144,12 @@ export default function LineChart({ buckets, series, unit = "", visibleSeries, o
             const value = line.values[hover.index];
             if (!visibleSeries.has(index) || value == null || !Number.isFinite(value)) return null;
             const position = plotRef.current?.valToPos(value, "y", true);
-            return position == null ? null : <circle key={index} cx={hover.left} cy={position} r="4" fill={`var(${chartColorToken(index)})`} />;
+            return position == null ? null : <circle key={index} cx={hover.left} cy={position} r="4" fill={`var(${colorToken(index)})`} />;
           })}
         </svg>
         <div className="line-chart-tooltip" style={{ left: `${hover.tooltipLeft}px` }} role="status">
           {hoveredTimestamp && <time dateTime={hoveredTimestamp}>{tooltipTime.format(new Date(hoveredTimestamp))}</time>}
-          {series.map((line, index) => visibleSeries.has(index) && <div key={`${index}/${line.label}`}><i style={{ backgroundColor: `var(${chartColorToken(index)})` }} />
+          {series.map((line, index) => visibleSeries.has(index) && <div key={`${index}/${line.label}`}><i style={{ backgroundColor: `var(${colorToken(index)})` }} />
             {line.label || `Серия ${index + 1}`}: {line.values[hover.index] == null ? "—" : `${number.format(line.values[hover.index]!)}${unit ? ` ${unit}` : ""}`}
           </div>)}
         </div>

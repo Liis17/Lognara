@@ -321,6 +321,12 @@ test('analytics shows real aggregates and drills down to level filter', async ({
   await expect(service).toHaveValue('Все сервисы');
   await page.getByRole('button', { name: 'Сравнить с прошлым окном' }).click();
   await expect.poll(() => calls.filter((call) => call.path === '/api/stats/summary').length).toBeGreaterThanOrEqual(3);
+  await expect(page.getByRole('heading', { name: 'Скорость логов', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Доля ошибок', exact: true })).toBeVisible();
+  await expect(page.locator('.analytics-chart-panel').nth(0).locator('.line-chart-legend'))
+    .toContainText('Предыдущее окно · всего');
+  await expect(page.locator('.analytics-chart-panel').nth(1).locator('.line-chart-legend'))
+    .toContainText('Предыдущее окно');
   await page.locator('.metric').filter({ hasText: 'Доля ERROR' }).getByRole('button').click();
   await expect(page).toHaveURL(/\/logs\?/);
   await expect.poll(() => calls.filter((call) => call.path === '/api/stats/summary').at(-1)?.body.filters)
@@ -349,13 +355,8 @@ test('desktop screenshots preserve actual template composition', async ({ page }
   await page.screenshot({ path: test.info().outputPath('logs-desktop.png'), fullPage: true });
   await page.goto('/analytics');
   await expect(page.locator('.metric').filter({ hasText: 'Доля ERROR' })).toContainText('7%');
-  const plotInsets = await page.locator('svg').evaluate((svg) => {
-    const outer = svg.getBoundingClientRect();
-    const bars = svg.querySelectorAll('.histogram-bar');
-    return [bars[0].getBoundingClientRect().left - outer.left,
-      outer.right - bars[bars.length - 1].getBoundingClientRect().right];
-  });
-  expect(Math.max(...plotInsets)).toBeLessThan(8);
+  await expect(page.locator('.analytics-chart-panel')).toHaveCount(3);
+  await expect(page.locator('.analytics-chart-panel .line-chart-plot canvas').first()).toBeVisible();
   await page.screenshot({ path: test.info().outputPath('analytics-desktop.png'), fullPage: true });
 });
 
@@ -443,12 +444,13 @@ test('summary renders seven stacked levels, duration coverage and event action d
   await page.goto('/analytics');
   await expect(page.locator('.metric').filter({ hasText: 'p95 duration_ms' })).toContainText(/5\s012 мс/);
   await expect(page.locator('.metric').filter({ hasText: 'p95 duration_ms' })).toContainText('Покрытие 80% · 800 измерений · приблизительно t-digest');
-  for (const level of ['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'unknown']) {
-    await expect(page.locator(`.histogram-bar[data-level=${level}]`)).toHaveCount(12);
+  const volumeChart = page.locator('.analytics-chart-panel').first();
+  await expect(volumeChart.locator('.line-chart-legend button')).toHaveCount(7);
+  for (const level of ['TRACE', 'DEBUG', 'INFO', 'WARN', 'ERROR', 'FATAL', 'UNKNOWN']) {
+    await expect(volumeChart.locator('.line-chart-legend')).toContainText(level);
   }
-  await expect(page.locator('.histogram-bucket').first()).toHaveAttribute('aria-label', /TRACE 1.*DEBUG 1.*INFO 59.*WARN 18.*ERROR 6.*FATAL 2.*UNKNOWN 1/);
-  await page.getByText('Числа диаграммы', { exact: true }).click();
-  await expect(page.locator('.histogram-data th')).toHaveCount(9);
+  await expect(volumeChart.locator('.histogram-data tbody tr')).toHaveCount(12);
+  await expect(volumeChart.locator('.histogram-data th')).toHaveCount(8);
   await expect(page.locator('.actions-table')).toContainText('Нет измерений');
   await page.getByRole('button', { name: 'charge.create', exact: true }).click();
   await expect.poll(() => calls.filter(call => call.path === '/api/stats/summary').at(-1)?.body.filters).toEqual({ action: ['charge.create'] });
@@ -466,7 +468,7 @@ test('empty summary uses zeros and no duration measurements; failed refresh clea
   await expect(page.locator('.metric').filter({ hasText: 'Всего событий' }).getByRole('button')).toHaveText('0');
   await expect(page.locator('.metric').filter({ hasText: 'p95 duration_ms' })).toContainText('Нет измерений');
   await expect(page.locator('.metric').filter({ hasText: 'p95 duration_ms' })).toContainText('Покрытие 0%');
-  await expect(page.getByText('Нет данных для диаграммы.', { exact: true })).toBeVisible();
+  await expect(page.getByText('За выбранный период данных нет.', { exact: true })).toHaveCount(3);
   failed = true;
   await page.getByRole('button', { name: 'Обновить', exact: true }).click();
   await expect(page.getByRole('alert')).toContainText('Поиск временно недоступен');

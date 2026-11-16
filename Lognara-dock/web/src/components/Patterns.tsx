@@ -51,11 +51,17 @@ function PatternDetails({ details, eventLink }: { details: PatternDetailsRespons
         {!details.variables.length && <p className="muted">В этом паттерне нет нормализованных переменных.</p>}
         {details.variables.map((variable) => <div className="pattern-values" key={variable.name}>
           <h4>{variable.name} <span className="muted">· {variable.variable_type} · {number.format(variable.total)} значений</span></h4>
-          <ul>{variable.values.map((value) => <li key={value.value}>
-            <code>{value.value}</code><span className="pattern-track" aria-hidden="true"><i style={{ width: `${variable.total ? value.count / variable.total * 100 : 0}%` }} /></span>
-            <span className="pattern-value-count">{number.format(value.count)} <span className="muted">({percent.format(variable.total ? value.count / variable.total : 0)})</span></span>
-          </li>)}</ul>
-          {!!variable.other_count && <p className="page-note">Ещё {number.format(variable.other_count)} значений.</p>}
+          {variable.total >= 8 && variable.values.length > 0 && variable.values.every((value) => value.count === 1) ? <div className="pattern-cardinality">
+            <strong>{number.format(variable.total)} уникальных значений</strong>
+            <span className="muted">Примеры</span>
+            <ul>{variable.values.slice(0, 3).map((value) => <li key={value.value}><code>{value.value}</code></li>)}</ul>
+          </div> : <>
+            <ul>{variable.values.map((value) => <li key={value.value}>
+              <code>{value.value}</code><span className="pattern-track" aria-hidden="true"><i style={{ width: `${variable.total ? value.count / variable.total * 100 : 0}%` }} /></span>
+              <span className="pattern-value-count">{number.format(value.count)} <span className="muted">({percent.format(variable.total ? value.count / variable.total : 0)})</span></span>
+            </li>)}</ul>
+            {!!variable.other_count && <p className="page-note">Ещё {number.format(variable.other_count)} значений.</p>}
+          </>}
         </div>)}
       </div>
       <div><h3>Примеры сообщений</h3>

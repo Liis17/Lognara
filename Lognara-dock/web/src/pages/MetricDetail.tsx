@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link, useSearchParams } from "react-router";
+import { Link, useNavigate, useSearchParams } from "react-router";
 import {
   api,
   ApiError,
@@ -10,7 +10,7 @@ import {
   type Split,
   type MetricAlertKey,
 } from "../api";
-import Chart from "../components/Chart";
+import LineChart from "../components/LineChart";
 import MetricDialog from "../components/MetricDialog";
 import MetricEditor, { aggregationText, kindText } from "./MetricEditor";
 import MetricAlertEditor from "./MetricAlertEditor";
@@ -33,6 +33,7 @@ export default function MetricDetail({
 }: {
   onUnauthorized: () => void;
 }) {
+  const navigate = useNavigate();
   const [params] = useSearchParams();
   const identity = params.toString();
   const alertKey: MetricAlertKey = {
@@ -53,6 +54,7 @@ export default function MetricDetail({
   const [chart, setChart] = useState<SeriesReply | null>(null);
   const [loading, setLoading] = useState(false);
   const [chartError, setChartError] = useState("");
+  const [visibleSeries, setVisibleSeries] = useState<ReadonlySet<number>>(new Set());
   const [editing, setEditing] = useState(false);
   const [generation, setGeneration] = useState(0);
   const fail = (e: unknown, setter: (text: string) => void) => {
@@ -132,6 +134,28 @@ export default function MetricDetail({
       });
     return () => controller.abort();
   }, [metric, range, split, environment]);
+  useEffect(() => {
+    setVisibleSeries(new Set(chart?.series.map((_line, index) => index) ?? []));
+  }, [chart]);
+  const toggleSeries = (index: number) => setVisibleSeries((current) => {
+    const next = new Set(current);
+    if (next.has(index)) next.delete(index); else next.add(index);
+    return next;
+  });
+  const openLogs = (from: number, to: number) => {
+    if (!metric) return;
+    const filters: string[] = [];
+    if (metric.origin === "rule") {
+      filters.push(`server:${JSON.stringify(metric.definition?.server ?? metric.server)}`);
+    }
+    filters.push(`service:${JSON.stringify(metric.origin === "rule" ? metric.definition?.service ?? metric.service : metric.service)}`);
+    navigate(`/logs?${new URLSearchParams({
+      view: "events",
+      from: new Date(from).toISOString(),
+      to: new Date(to).toISOString(),
+      q: filters.join(" AND "),
+    })}`);
+  };
   return (
     <section className="metrics metric-detail">
       <Link to="/metrics">← Все метрики</Link>
@@ -212,14 +236,12 @@ export default function MetricDetail({
             (chart.series.some((line) =>
               line.values.some((value) => value !== null),
             ) ? (
-              <Chart
-                buckets={chart.buckets}
-                series={chart.series}
-                unit={chart.unit}
-              />
+              <LineChart buckets={chart.buckets} series={chart.series} unit={chart.unit}
+                visibleSeries={visibleSeries} onToggleSeries={toggleSeries} onSelectRange={openLogs} onZoom={() => {}} />
             ) : (
               <p className="muted">За выбранный период точек нет</p>
             ))}
+          {chart && <p className="muted metric-range-hint">Выделите участок графика мышью, чтобы открыть логи сервиса за этот диапазон.</p>}
           {editing && (
             <MetricDialog
               title="Настройка метрики"
