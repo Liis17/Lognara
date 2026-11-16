@@ -12,8 +12,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Require master branch
-        run: test "$GITHUB_REF" = refs/heads/master
+      - name: Require dev or master branch
+        run: test "$GITHUB_REF" = refs/heads/dev || test "$GITHUB_REF" = refs/heads/master
   release:
     needs: [validate]
     # Reusable CI needs pull-request reads and the NuGet job's OIDC permission.

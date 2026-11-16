@@ -3,7 +3,11 @@ name: Release agent
 on:
   push:
     branches: [master]
-    paths: ['Lognara-agent/**']
+    paths: ['Lognara-agent/**', 'Lognara-spool/**', '.github/workflows/release-agent.yml']
+  pull_request:
+    branches: [dev]
+    paths: ['Lognara-agent/**', 'Lognara-spool/**', '.github/workflows/release-agent.yml']
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -99,6 +103,7 @@ jobs:
   publish:
     name: Publish agent release
     needs: [build]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
