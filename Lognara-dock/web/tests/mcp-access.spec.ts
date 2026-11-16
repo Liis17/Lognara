@@ -207,7 +207,9 @@ for (const returnTo of ["https://evil.example/oauth/authorize?state=1", "//evil.
   test(`an active login rejects a non-OAuth return path: ${returnTo}`, async ({ page }) => {
     await page.route("**/api/**", (route) => route.fulfill({ json: { username: "liis", passkeys: 0 } }));
     await page.goto(`/login?return_to=${encodeURIComponent(returnTo)}`);
-    await expect(page).toHaveURL(/\/logs$/u);
+    await expect(page).toHaveURL((url) =>
+      url.origin === new URL(test.info().project.use.baseURL!).origin && url.pathname === "/logs",
+    );
   });
 }
 
