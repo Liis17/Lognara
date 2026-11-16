@@ -817,7 +817,8 @@ impl Store {
                     return Ok(Err(AlertStoreError::Conflict("group_not_found")));
                 }
             }
-            let old: Option<(String, i64, i64, Option<String>, Option<String>, Option<String>, String)> = match &mode {
+            type OldMetricAlert = (String, i64, i64, Option<String>, Option<String>, Option<String>, String);
+            let old: Option<OldMetricAlert> = match &mode {
                 AlertWrite::Update(id) => tx
                     .query_row(
                         "SELECT id,revision,enabled,title,description,message_template,message_fields
@@ -2126,7 +2127,8 @@ impl Store {
                 tx.commit()?;
                 return Ok(None);
             }
-            let row: Option<(String, String, i64, String, Option<String>, Option<String>, String, i64)> = tx.query_row(
+            type DeliveryRow = (String, String, i64, String, Option<String>, Option<String>, String, i64);
+            let row: Option<DeliveryRow> = tx.query_row(
                 "SELECT d.event_id,d.recipient_id,d.recipient_chat_id,o.message,o.parse_mode,o.reply_markup,
                         g.telegram_token,d.attempts
                  FROM metric_alert_deliveries d
@@ -2855,11 +2857,11 @@ pub async fn preview_message(
 }
 
 fn window_text(seconds: u64) -> String {
-    if seconds % 86_400 == 0 {
+    if seconds.is_multiple_of(86_400) {
         format!("{} дн", seconds / 86_400)
-    } else if seconds % 3_600 == 0 {
+    } else if seconds.is_multiple_of(3_600) {
         format!("{} ч", seconds / 3_600)
-    } else if seconds % 60 == 0 {
+    } else if seconds.is_multiple_of(60) {
         format!("{} мин", seconds / 60)
     } else {
         format!("{seconds} сек")
@@ -2894,14 +2896,13 @@ fn alert_message(
     if selected("title") {
         source.push(format!("Название: {title}"));
     }
-    if selected("description") {
-        if let Some(description) = alert
+    if selected("description")
+        && let Some(description) = alert
             .description
             .as_deref()
             .filter(|value| !value.is_empty())
-        {
-            source.push(format!("Описание: {description}"));
-        }
+    {
+        source.push(format!("Описание: {description}"));
     }
     if selected("server") {
         source.push(format!("Сервер: {}", alert.key.server));
@@ -5225,6 +5226,8 @@ mod tests {
                 threshold: 1,
                 cooldown_seconds: 0,
                 group_ids: vec![],
+                message_template: None,
+                message_fields: None,
             }
         }
 
@@ -5479,6 +5482,8 @@ mod tests {
                 threshold: 1,
                 cooldown_seconds: 0,
                 group_ids: vec![],
+                message_template: None,
+                message_fields: None,
             }
         }
 

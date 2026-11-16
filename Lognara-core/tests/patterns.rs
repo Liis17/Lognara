@@ -5,6 +5,7 @@ use axum::{
 use lognara_core::{
     api,
     config::Config,
+    issues::{self, IssueRequest, Status},
     model::format_timestamp,
     pattern_identity,
     patterns::{self, DetailsRequest, PatternRequest, PatternResponse, Sort},
@@ -211,12 +212,31 @@ async fn service_metrics_are_searchable_but_not_patterns_after_restart() {
             .count(),
         2
     );
-    let catalog = core.patterns.view().unwrap();
-    assert!(metric_ids.iter().all(|id| catalog.known.contains_key(id)));
     assert!(
-        catalog
+        response
+            .patterns
+            .iter()
+            .all(|pattern| !pattern.template.starts_with("ServiceMetrics {"))
+    );
+    let found = issues::search(
+        &core,
+        IssueRequest {
+            from: format_timestamp(TS),
+            to: format_timestamp(TS + 100 * SECOND),
+            filters: BTreeMap::new(),
+            interval_seconds: 60,
+            limit: 100,
+            status: Status::Open,
+            resolved: vec![],
+            regressed: vec![],
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        found
             .issues
-            .values()
+            .iter()
             .any(|issue| issue.template.starts_with("ServiceMetrics {"))
     );
     core.shutdown().unwrap();

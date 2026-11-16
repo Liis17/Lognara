@@ -310,8 +310,8 @@ fn validate(input: &LogAlertInput) -> Result<(), LogAlertError> {
             "message template must be printable and at most 2000 characters",
         ));
     }
-    if let Some(fields) = &input.message_fields {
-        if fields.iter().any(|field| {
+    if let Some(fields) = &input.message_fields
+        && (fields.iter().any(|field| {
             ![
                 "name",
                 "title",
@@ -329,10 +329,9 @@ fn validate(input: &LogAlertInput) -> Result<(), LogAlertError> {
                 "samples",
             ]
             .contains(&field.as_str())
-        }) || fields.iter().collect::<BTreeSet<_>>().len() != fields.len()
-        {
-            return Err(LogAlertError::Invalid("invalid message fields"));
-        }
+        }) || fields.iter().collect::<BTreeSet<_>>().len() != fields.len())
+    {
+        return Err(LogAlertError::Invalid("invalid message fields"));
     }
     Ok(())
 }
@@ -828,7 +827,7 @@ fn truncate(text: &str, limit: usize) -> String {
 }
 
 /// Формирует HTML-уведомление и сохраняет кнопку вместе с уже отрендеренным текстом outbox.
-pub fn log_alert_message(
+pub(crate) fn log_alert_message(
     alert: &LogAlert,
     count: i64,
     suppressed: i64,
