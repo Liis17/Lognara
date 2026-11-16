@@ -623,7 +623,6 @@ pre.json, .event-details pre, tr.details pre { margin: 0; padding: 12px; backgro
 .access .access-add-form button, .access .access-name-edit button { margin-top: 0; }
 .access-add-form .access-actions { align-items: center; }
 .access .access-name-edit { display: flex; align-items: center; flex-direction: row; flex-wrap: wrap; gap: 7px; padding: 0; border: 0; background: transparent; }
-.access-name-edit label { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 .access-name-edit input { width: min(260px, 60vw); }
 .host-icon { width: 16px; height: 16px; flex: 0 0 auto; vertical-align: -3px; color: var(--info); stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 @media (max-width: 900px) {

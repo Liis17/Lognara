@@ -70,7 +70,7 @@ function NameEditor({
   onCancel: () => void;
 }) {
   return <form className="access-name-edit" onSubmit={onSubmit}>
-    <label className="sr-only">Новое имя<input autoFocus maxLength={64} value={value} onChange={(event) => onChange(event.target.value)} /></label>
+    <input aria-label="Новое имя" autoFocus maxLength={64} value={value} onChange={(event) => onChange(event.target.value)} />
     <button type="submit" disabled={disabled || !value.trim()}>Сохранить</button>
     <button type="button" className="quiet" disabled={disabled} onClick={onCancel}>Отмена</button>
   </form>;
