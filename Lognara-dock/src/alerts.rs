@@ -3170,7 +3170,7 @@ impl TelegramClient {
         let url = self.endpoint(token, "sendMessage")?;
         let mut text = text.to_owned();
         let mut parse_mode = parse_mode.map(str::to_owned);
-        let mut reply_markup = match reply_markup {
+        let mut reply_markup: Option<Value> = match reply_markup {
             Some(markup) => {
                 Some(serde_json::from_str(markup).map_err(|_| TelegramFailure::Transient)?)
             }
