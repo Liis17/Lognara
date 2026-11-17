@@ -15,6 +15,9 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import okhttp3.sse.EventSource
+import okhttp3.sse.EventSourceListener
+import okhttp3.sse.EventSources
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
@@ -60,6 +63,28 @@ class LognaraApi(
     suspend fun disconnect(session: DeviceSession) {
         val response = authenticatedResponse(session, "DELETE", DeviceApiRoutes.DISCONNECT, maxResponseBytes = AUTH_RESPONSE_BODY_BYTES)
         if (response.status != 204) throw ApiException.Server(response.status, decodeError(response.body))
+    }
+
+    fun openLogsStream(session: DeviceSession, listener: LiveStreamListener): LiveConnection {
+        val request = authenticatedRequest(session, "GET", DeviceApiRoutes.LIVE)
+            .newBuilder()
+            .header("Accept", "text/event-stream")
+            .build()
+        val source = EventSources.createFactory(client).newEventSource(request, object : EventSourceListener() {
+            override fun onOpen(eventSource: EventSource, response: Response) = listener.onOpen()
+
+            override fun onEvent(eventSource: EventSource, id: String?, type: String?, data: String) =
+                listener.onEvent(type, data)
+
+            override fun onClosed(eventSource: EventSource) = listener.onClosed()
+
+            override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {
+                val status = response?.code
+                if (status == 401) onUnauthorized?.invoke()
+                listener.onFailure(status)
+            }
+        })
+        return LiveConnection { source.cancel() }
     }
 
     suspend inline fun <reified T> authenticatedJson(

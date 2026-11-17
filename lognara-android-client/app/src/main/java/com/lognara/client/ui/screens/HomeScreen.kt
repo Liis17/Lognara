@@ -36,6 +36,7 @@ import com.lognara.client.data.DeviceSession
 import com.lognara.client.data.LogEvent
 import com.lognara.client.data.LognaraApi
 import com.lognara.client.ui.screens.logs.LogsScreen
+import com.lognara.client.ui.screens.live.LiveScreen
 
 private data class HomeTab(val title: Int, val symbol: TabSymbol)
 private enum class TabSymbol { Logs, Live, Issues, Infrastructure, Metrics, Settings }
@@ -102,6 +103,8 @@ fun HomeScreen(
         Box(modifier = Modifier.fillMaxSize().padding(insets)) {
             if (selectedTab == 0) {
                 LogsScreen(api, session, onOpenEvent)
+            } else if (selectedTab == 1) {
+                LiveScreen(api, session, onOpenEvent)
             } else {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text(
