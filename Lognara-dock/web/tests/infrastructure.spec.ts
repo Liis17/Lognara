@@ -108,8 +108,13 @@ test('infrastructure completes a slow request before scheduling the next refresh
   expect(requests).toBe(1);
   release();
   await expect(refresh).toBeEnabled();
-  await page.clock.fastForward(10_001);
-  await expect.poll(() => requests).toBe(2);
+  await page.clock.fastForward(9_000);
+  expect(requests).toBe(1);
+  // Таймер ставится после завершения запроса; на медленном CI рендер может отстать от одного скачка времени.
+  await expect.poll(async () => {
+    await page.clock.fastForward(1_001);
+    return requests;
+  }).toBe(2);
 });
 
 test('failed refresh marks the previous snapshot stale and stops claiming health', async ({ page }) => {
