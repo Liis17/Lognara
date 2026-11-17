@@ -36,11 +36,13 @@ import com.lognara.client.data.DeviceSession
 import com.lognara.client.data.LogEvent
 import com.lognara.client.data.Issue
 import com.lognara.client.data.LognaraApi
+import com.lognara.client.data.SeriesMetric
 import com.lognara.client.ui.screens.data.DataRange
 import com.lognara.client.ui.screens.infra.InfrastructureScreen
 import com.lognara.client.ui.screens.issues.IssuesScreen
 import com.lognara.client.ui.screens.logs.LogsScreen
 import com.lognara.client.ui.screens.live.LiveScreen
+import com.lognara.client.ui.screens.metrics.MetricsScreen
 
 private data class HomeTab(val title: Int, val symbol: TabSymbol)
 private enum class TabSymbol { Logs, Live, Issues, Infrastructure, Metrics, Settings }
@@ -55,6 +57,7 @@ fun HomeScreen(
     onOpenIssue: (Issue, DataRange, String) -> Unit,
     issuesRefreshKey: Int,
     onIssueStatusChanged: () -> Unit,
+    onOpenMetric: (SeriesMetric) -> Unit,
 ) {
     val tabs = listOf(
         HomeTab(R.string.tab_logs, TabSymbol.Logs),
@@ -117,14 +120,7 @@ fun HomeScreen(
             } else if (selectedTab == 3) {
                 InfrastructureScreen(api, session)
             } else {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text(
-                        text = stringResource(R.string.section_placeholder),
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(horizontal = 32.dp),
-                    )
-                }
+                MetricsScreen(api, session, onOpenMetric)
             }
         }
     }

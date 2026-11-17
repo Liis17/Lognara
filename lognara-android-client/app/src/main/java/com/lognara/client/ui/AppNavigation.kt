@@ -24,11 +24,14 @@ import androidx.navigation.navArgument
 import com.lognara.client.R
 import com.lognara.client.data.DeviceSession
 import com.lognara.client.data.Issue
+import com.lognara.client.data.MetricKey
+import com.lognara.client.data.SeriesMetric
 import com.lognara.client.ui.screens.logs.EventDetailScreen
 import com.lognara.client.ui.screens.logs.TraceDetailScreen
 import com.lognara.client.ui.screens.HomeScreen
 import com.lognara.client.ui.screens.data.DataRange
 import com.lognara.client.ui.screens.issues.IssueDetailsScreen
+import com.lognara.client.ui.screens.metrics.MetricDetailsScreen
 import com.lognara.client.ui.screens.LoginScreen
 import com.lognara.client.ui.screens.ManualEntryScreen
 import com.lognara.client.ui.screens.ScannerScreen
@@ -47,6 +50,7 @@ private const val SETTINGS = "settings"
 private const val EVENT_DETAIL = "event-detail"
 private const val TRACE_DETAIL = "trace-detail?traceId={traceId}&from={from}&to={to}"
 private const val ISSUE_DETAIL = "issue-detail?fingerprint={fingerprint}&range={range}&service={service}"
+private const val METRIC_DETAIL = "metric-detail?server={server}&service={service}&name={name}&origin={origin}"
 
 @Composable
 fun AppNavigation(viewModel: AppViewModel) {
@@ -140,6 +144,35 @@ fun AppNavigation(viewModel: AppViewModel) {
                     },
                     issuesRefreshKey = issuesRefreshKey,
                     onIssueStatusChanged = viewModel::refreshIssues,
+                    onOpenMetric = { metric: SeriesMetric ->
+                        navController.navigate(
+                            "metric-detail?server=${Uri.encode(metric.server)}&service=${Uri.encode(metric.service)}&name=${Uri.encode(metric.name)}&origin=${Uri.encode(metric.origin)}",
+                        )
+                    },
+                )
+            }
+        }
+        composable(
+            route = METRIC_DETAIL,
+            arguments = listOf(
+                navArgument("server") { type = NavType.StringType; defaultValue = "" },
+                navArgument("service") { type = NavType.StringType },
+                navArgument("name") { type = NavType.StringType },
+                navArgument("origin") { type = NavType.StringType },
+            ),
+        ) { entry ->
+            val activeSession: DeviceSession? = session
+            if (activeSession != null) {
+                MetricDetailsScreen(
+                    api = viewModel.container.api,
+                    session = activeSession,
+                    key = MetricKey(
+                        server = entry.arguments?.getString("server").orEmpty(),
+                        service = entry.arguments?.getString("service").orEmpty(),
+                        name = entry.arguments?.getString("name").orEmpty(),
+                        origin = entry.arguments?.getString("origin").orEmpty(),
+                    ),
+                    onBack = { navController.popBackStack() },
                 )
             }
         }
