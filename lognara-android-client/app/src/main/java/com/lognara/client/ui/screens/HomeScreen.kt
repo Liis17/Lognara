@@ -32,13 +32,22 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.lognara.client.R
+import com.lognara.client.data.DeviceSession
+import com.lognara.client.data.LogEvent
+import com.lognara.client.data.LognaraApi
+import com.lognara.client.ui.screens.logs.LogsScreen
 
 private data class HomeTab(val title: Int, val symbol: TabSymbol)
 private enum class TabSymbol { Logs, Live, Issues, Infrastructure, Metrics, Settings }
 
 @Composable
 @OptIn(ExperimentalMaterial3Api::class)
-fun HomeScreen(onSettings: () -> Unit) {
+fun HomeScreen(
+    session: DeviceSession,
+    api: LognaraApi,
+    onSettings: () -> Unit,
+    onOpenEvent: (LogEvent) -> Unit,
+) {
     val tabs = listOf(
         HomeTab(R.string.tab_logs, TabSymbol.Logs),
         HomeTab(R.string.tab_live, TabSymbol.Live),
@@ -90,16 +99,19 @@ fun HomeScreen(onSettings: () -> Unit) {
             }
         },
     ) { insets ->
-        Box(
-            modifier = Modifier.fillMaxSize().padding(insets),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = stringResource(R.string.section_placeholder),
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 32.dp),
-            )
+        Box(modifier = Modifier.fillMaxSize().padding(insets)) {
+            if (selectedTab == 0) {
+                LogsScreen(api, session, onOpenEvent)
+            } else {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text(
+                        text = stringResource(R.string.section_placeholder),
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 32.dp),
+                    )
+                }
+            }
         }
     }
 }

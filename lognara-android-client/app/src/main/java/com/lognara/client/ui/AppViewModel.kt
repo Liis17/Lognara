@@ -7,6 +7,7 @@ import com.lognara.client.BuildConfig
 import com.lognara.client.AppContainer
 import com.lognara.client.data.ApiException
 import com.lognara.client.data.DeviceSession
+import com.lognara.client.data.LogEvent
 import com.lognara.client.data.PairError
 import com.lognara.client.data.PairPayloadException
 import com.lognara.client.data.PairResult
@@ -41,10 +42,13 @@ data class SettingsUiState(
 enum class SettingsError { Network, Server, Redirect, InvalidResponse }
 enum class LoginNotice { DeviceStillListed }
 
-class AppViewModel(private val container: AppContainer) : ViewModel() {
+class AppViewModel(val container: AppContainer) : ViewModel() {
     private var unauthorizedSignOut: Job? = null
     private val _session = MutableStateFlow<DeviceSession?>(null)
     val session = _session.asStateFlow()
+
+    private val _selectedEvent = MutableStateFlow<LogEvent?>(null)
+    val selectedEvent = _selectedEvent.asStateFlow()
 
     private val _isRestoring = MutableStateFlow(true)
     val isRestoring = _isRestoring.asStateFlow()
@@ -91,6 +95,10 @@ class AppViewModel(private val container: AppContainer) : ViewModel() {
 
     fun clearPairingError() {
         if (!_pairing.value.isConnecting) _pairing.value = PairingUiState()
+    }
+
+    fun selectEvent(event: LogEvent?) {
+        _selectedEvent.value = event
     }
 
     fun connect(payloadText: String) {
@@ -176,6 +184,7 @@ class AppViewModel(private val container: AppContainer) : ViewModel() {
             container.credentialsStore.clear()
         } finally {
             _session.value = null
+            _selectedEvent.value = null
             _settings.value = SettingsUiState()
         }
     }

@@ -43,7 +43,7 @@ object DeviceApiRoutes {
         routeUrl()
             .addPathSegment("api")
             .addPathSegment("traces")
-            .addPathSegment(traceId)
+            .addPathSegment(traceId.lowercase())
             .addQueryParameter("from", from)
             .addQueryParameter("to", to)
             .addQueryParameter("limit", "50")
