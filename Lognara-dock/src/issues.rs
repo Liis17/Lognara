@@ -16,7 +16,7 @@ use crate::api::{ApiError, App, AppState};
 use crate::core_client::CoreQueryError;
 use crate::patterns::{Part, VariableValue, required_nullable};
 use crate::query::{Bucket, Filters, LogEvent};
-use crate::session::AuthUser;
+use crate::session::ApiUser;
 use crate::store::{IssueAction, IssueState, Recurrence, StoreError};
 
 /// Пауза наблюдателя после того, как он догнал core.
@@ -320,7 +320,7 @@ fn fingerprint(path: Result<Path<String>, PathRejection>) -> Result<String, ApiE
 
 pub async fn search(
     State(app): State<AppState>,
-    _user: AuthUser,
+    _user: ApiUser,
     body: Result<Json<SearchRequest>, JsonRejection>,
 ) -> Result<Json<IssueResponse<IssueView>>, ApiError> {
     let Json(search) = body.map_err(|_| ApiError::BadRequest("invalid_request"))?;
@@ -365,7 +365,7 @@ pub async fn search(
 
 pub async fn details(
     State(app): State<AppState>,
-    _user: AuthUser,
+    _user: ApiUser,
     path: Result<Path<String>, PathRejection>,
     body: Result<Json<DetailsRequest>, JsonRejection>,
 ) -> Result<Json<DetailsView>, ApiError> {
@@ -397,7 +397,7 @@ pub async fn details(
 
 pub async fn resolve(
     State(app): State<AppState>,
-    user: AuthUser,
+    user: ApiUser,
     path: Result<Path<String>, PathRejection>,
 ) -> Result<StatusCode, ApiError> {
     let id = fingerprint(path)?;
@@ -409,7 +409,7 @@ pub async fn resolve(
 
 pub async fn reopen(
     State(app): State<AppState>,
-    user: AuthUser,
+    user: ApiUser,
     path: Result<Path<String>, PathRejection>,
 ) -> Result<StatusCode, ApiError> {
     let id = fingerprint(path)?;

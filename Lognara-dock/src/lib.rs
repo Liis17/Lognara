@@ -8,6 +8,7 @@ pub mod api;
 pub mod auth;
 pub mod config;
 pub mod core_client;
+pub mod devices;
 pub mod htpasswd;
 pub mod infra;
 pub mod issues;

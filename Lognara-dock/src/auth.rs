@@ -15,7 +15,7 @@ use serde_json::json;
 use crate::api::{ApiError, AppState};
 use crate::session::{AuthUser, SESSION_COOKIE, cookie, session_cookie};
 
-/// Столько неудачных попыток подряд блокируют вход по паролю для логина.
+/// Столько неудачных попыток подряд блокируют запросы по ключу.
 const MAX_FAILURES: u32 = 5;
 const LOCKOUT: Duration = Duration::from_secs(300);
 /// Предел записей, чтобы перебор логинов не занимал память без границ.
@@ -34,7 +34,7 @@ struct Failures {
 }
 
 impl LoginLimiter {
-    /// Сколько ещё ждать, если логин заблокирован.
+    /// Сколько ещё ждать, если ключ заблокирован.
     pub fn locked_for(&self, username: &str) -> Option<Duration> {
         let entries = self.entries.lock().unwrap();
         let entry = entries.get(username)?;

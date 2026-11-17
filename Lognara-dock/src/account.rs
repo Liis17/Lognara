@@ -9,12 +9,12 @@ use serde_json::{Value, json};
 use crate::api::{ApiError, AppState};
 use crate::auth::check_password;
 use crate::htpasswd::UpdateError;
-use crate::session::AuthUser;
+use crate::session::{ApiUser, AuthUser};
 
 /// bcrypt учитывает только первые 72 байта; длиннее пароль не принимается.
 const MAX_NEW_PASSWORD_BYTES: usize = 71;
 
-pub async fn me(State(app): State<AppState>, user: AuthUser) -> Result<Json<Value>, ApiError> {
+pub async fn me(State(app): State<AppState>, user: ApiUser) -> Result<Json<Value>, ApiError> {
     let passkeys = crate::passkey::count(&app, &user.username).await?;
     Ok(Json(json!({
         "username": user.username,
@@ -56,7 +56,7 @@ pub async fn change_password(
             }
         })?;
     app.sessions
-        .revoke_others(&user.username, user.token_hash)
+        .revoke_after_password_change(&user.username, user.token_hash)
         .await?;
     tracing::info!(username = %user.username, "password changed");
     Ok(StatusCode::NO_CONTENT)

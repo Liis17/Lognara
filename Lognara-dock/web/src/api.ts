@@ -45,6 +45,21 @@ export interface PasskeyInfo {
   last_used_at: number | null;
 }
 
+export interface DeviceInfo {
+  id: string;
+  name: string;
+  created_at: number;
+  last_used_at: number | null;
+}
+
+export interface DevicePairing {
+  pairing_id: string;
+  payload: string;
+  expires_at: number;
+}
+
+export type DevicePairingStatus = "pending" | "used" | "expired" | "replaced";
+
 export type Origin = "counter" | "gauge" | "rule";
 export type Kind = "delta" | "cumulative" | "gauge";
 export type Aggregation = "sum" | "avg" | "min" | "max" | "last";
@@ -318,6 +333,7 @@ export interface Agent {
 const messages: Record<string, string> = {
   import_conflict: "Набор метрик изменился. Проверьте импорт повторно и выберите действия для конфликтов.",
   unauthorized: "Неверный логин или пароль",
+  forbidden: "Недостаточно прав для этого действия",
   too_many_attempts: "Слишком много попыток, попробуйте позже",
   invalid_current_password: "Неверный текущий пароль",
   password_too_short: "Новый пароль слишком короткий",

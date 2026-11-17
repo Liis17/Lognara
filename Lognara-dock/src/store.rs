@@ -1,6 +1,7 @@
-//! SQLite в каталоге данных: сессии, passkey, скрытые паттерны, статусы проблем и избранное метрик.
+//! SQLite в каталоге данных: сессии, passkey, устройства, скрытые паттерны, статусы проблем и избранное метрик.
 //! Каталог блокируется одним процессом.
 
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io;
 use std::path::Path;
@@ -316,7 +317,32 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE metric_alert_outbox ADD COLUMN parse_mode TEXT;
     ALTER TABLE metric_alert_outbox ADD COLUMN reply_markup TEXT;
     ",
+    "
+    CREATE TABLE device_pairings (
+        id TEXT PRIMARY KEY,
+        username TEXT NOT NULL,
+        code_hash BLOB NOT NULL UNIQUE,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        used_at INTEGER,
+        device_id TEXT,
+        replaced_at INTEGER
+    );
+    CREATE TABLE devices (
+        id TEXT PRIMARY KEY,
+        username TEXT NOT NULL,
+        name TEXT NOT NULL,
+        token_hash BLOB NOT NULL UNIQUE,
+        created_at INTEGER NOT NULL,
+        last_used_at INTEGER,
+        revoked_at INTEGER
+    );
+    CREATE INDEX devices_username ON devices(username);
+    ",
 ];
+
+#[doc(hidden)]
+pub const CURRENT_SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 
 /// Предел строк статусов: Dock передаёт решённые и вернувшиеся fingerprint в core.
 pub const MAX_ISSUE_STATES: i64 = 10_000;
@@ -397,6 +423,37 @@ pub enum RefreshOutcome {
     Invalid,
 }
 
+#[derive(Debug, Clone)]
+pub struct DevicePairingInfo {
+    pub expires_at: i64,
+    pub used_at: Option<i64>,
+    pub device_id: Option<String>,
+    pub replaced_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DeviceInfo {
+    pub id: String,
+    pub name: String,
+    pub created_at: i64,
+    pub last_used_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceAuthorization {
+    pub id: String,
+    pub username: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PairDeviceOutcome {
+    Created(String),
+    InvalidCode,
+    DeviceLimit,
+}
+
+type DevicePairingRow = (String, String, Option<i64>, Option<i64>, i64);
+
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("database error: {0}")]
@@ -412,6 +469,233 @@ pub struct Store {
 }
 
 impl Store {
+    pub async fn create_device_pairing(
+        &self,
+        id: String,
+        username: String,
+        code_hash: [u8; 32],
+        created_at: i64,
+        expires_at: i64,
+    ) -> Result<(), StoreError> {
+        self.call(move |conn| {
+            let tx = conn.transaction()?;
+            tx.execute(
+                "DELETE FROM device_pairings WHERE expires_at < ?1",
+                [created_at - 86_400_000],
+            )?;
+            tx.execute(
+                "DELETE FROM devices WHERE revoked_at IS NOT NULL AND revoked_at < ?1",
+                [created_at - 30 * 24 * 60 * 60 * 1000],
+            )?;
+            tx.execute(
+                "UPDATE device_pairings SET replaced_at=?2
+                 WHERE username=?1 AND used_at IS NULL AND replaced_at IS NULL",
+                rusqlite::params![username, created_at],
+            )?;
+            tx.execute(
+                "INSERT INTO device_pairings(id,username,code_hash,created_at,expires_at)
+                 VALUES(?1,?2,?3,?4,?5)",
+                rusqlite::params![id, username, code_hash, created_at, expires_at],
+            )?;
+            tx.commit()
+        })
+        .await
+    }
+
+    pub async fn device_pairing(
+        &self,
+        id: String,
+        username: String,
+    ) -> Result<Option<DevicePairingInfo>, StoreError> {
+        self.call(move |conn| {
+            conn.query_row(
+                "SELECT expires_at,used_at,device_id,replaced_at FROM device_pairings
+                 WHERE id=?1 AND username=?2",
+                rusqlite::params![id, username],
+                |row| {
+                    Ok(DevicePairingInfo {
+                        expires_at: row.get(0)?,
+                        used_at: row.get(1)?,
+                        device_id: row.get(2)?,
+                        replaced_at: row.get(3)?,
+                    })
+                },
+            )
+            .optional()
+        })
+        .await
+    }
+
+    pub async fn pair_device(
+        &self,
+        code_hash: [u8; 32],
+        device_id: String,
+        name: String,
+        token_hash: [u8; 32],
+        users: Option<Arc<HashMap<String, String>>>,
+    ) -> Result<PairDeviceOutcome, StoreError> {
+        self.call(move |conn| {
+            let tx = conn.transaction()?;
+            let pairing: Option<DevicePairingRow> = tx
+                .query_row(
+                    "SELECT id,username,used_at,replaced_at,expires_at
+                     FROM device_pairings WHERE code_hash=?1",
+                    [code_hash],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((pairing_id, username, used_at, replaced_at, expires_at)) = pairing else {
+                tx.commit()?;
+                return Ok(PairDeviceOutcome::InvalidCode);
+            };
+            let now = now_ms();
+            if used_at.is_some() || replaced_at.is_some() || expires_at <= now {
+                tx.commit()?;
+                return Ok(PairDeviceOutcome::InvalidCode);
+            }
+            let Some(users) = users else {
+                tx.commit()?;
+                return Ok(PairDeviceOutcome::InvalidCode);
+            };
+            if !users.contains_key(&username) {
+                tx.execute(
+                    "UPDATE devices SET revoked_at=?2 WHERE username=?1 AND revoked_at IS NULL",
+                    rusqlite::params![username, now],
+                )?;
+                tx.execute(
+                    "UPDATE device_pairings SET replaced_at=?2 WHERE id=?1 AND replaced_at IS NULL",
+                    rusqlite::params![pairing_id, now],
+                )?;
+                tx.commit()?;
+                return Ok(PairDeviceOutcome::InvalidCode);
+            }
+            let active: i64 = tx.query_row(
+                "SELECT count(*) FROM devices WHERE username=?1 AND revoked_at IS NULL",
+                [&username],
+                |row| row.get(0),
+            )?;
+            if active >= 10 {
+                tx.commit()?;
+                return Ok(PairDeviceOutcome::DeviceLimit);
+            }
+            let changed = tx.execute(
+                "UPDATE device_pairings SET used_at=?2,device_id=?3
+                 WHERE id=?1 AND used_at IS NULL AND replaced_at IS NULL AND expires_at>?2",
+                rusqlite::params![pairing_id, now, device_id],
+            )?;
+            if changed != 1 {
+                tx.commit()?;
+                return Ok(PairDeviceOutcome::InvalidCode);
+            }
+            tx.execute(
+                "INSERT INTO devices(id,username,name,token_hash,created_at)
+                 VALUES(?1,?2,?3,?4,?5)",
+                rusqlite::params![device_id, username, name, token_hash, now],
+            )?;
+            tx.commit()?;
+            Ok(PairDeviceOutcome::Created(username))
+        })
+        .await
+    }
+
+    pub async fn devices(&self, username: String) -> Result<Vec<DeviceInfo>, StoreError> {
+        self.call(move |conn| {
+            let mut statement = conn.prepare(
+                "SELECT id,name,created_at,last_used_at FROM devices
+                 WHERE username=?1 AND revoked_at IS NULL ORDER BY created_at,id",
+            )?;
+            statement
+                .query_map([username], |row| {
+                    Ok(DeviceInfo {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        created_at: row.get(2)?,
+                        last_used_at: row.get(3)?,
+                    })
+                })?
+                .collect()
+        })
+        .await
+    }
+
+    pub async fn authenticate_device(
+        &self,
+        token_hash: [u8; 32],
+    ) -> Result<Option<DeviceAuthorization>, StoreError> {
+        self.call(move |conn| {
+            let tx = conn.transaction()?;
+            let device: Option<(String, String, Option<i64>)> = tx
+                .query_row(
+                    "SELECT id,username,last_used_at FROM devices
+                     WHERE token_hash=?1 AND revoked_at IS NULL",
+                    [token_hash],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+            let Some((id, username, last_used_at)) = device else {
+                tx.commit()?;
+                return Ok(None);
+            };
+            let now = now_ms();
+            if last_used_at.is_none_or(|last_used| now - last_used >= 60_000) {
+                tx.execute(
+                    "UPDATE devices SET last_used_at=?2 WHERE token_hash=?1 AND revoked_at IS NULL",
+                    rusqlite::params![token_hash, now],
+                )?;
+            }
+            tx.commit()?;
+            Ok(Some(DeviceAuthorization { id, username }))
+        })
+        .await
+    }
+
+    pub async fn revoke_device(&self, username: String, id: String) -> Result<bool, StoreError> {
+        self.call(move |conn| {
+            let changed = conn.execute(
+                "UPDATE devices SET revoked_at=?3
+                 WHERE username=?1 AND id=?2 AND revoked_at IS NULL",
+                rusqlite::params![username, id, now_ms()],
+            )?;
+            Ok(changed > 0)
+        })
+        .await
+    }
+
+    pub async fn revoke_current_device(
+        &self,
+        id: String,
+        token_hash: [u8; 32],
+    ) -> Result<(), StoreError> {
+        self.call(move |conn| {
+            conn.execute(
+                "UPDATE devices SET revoked_at=?3
+                 WHERE id=?1 AND token_hash=?2 AND revoked_at IS NULL",
+                rusqlite::params![id, token_hash, now_ms()],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn revoke_user_devices(&self, username: String) -> Result<(), StoreError> {
+        self.call(move |conn| {
+            conn.execute(
+                "UPDATE devices SET revoked_at=?2 WHERE username=?1 AND revoked_at IS NULL",
+                rusqlite::params![username, now_ms()],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
     pub async fn favorite_metrics(&self) -> Result<Vec<crate::series::MetricKey>, StoreError> {
         self.call(|conn| {
             conn.prepare("SELECT server,service,name,origin FROM favorite_metrics ORDER BY server,service,name,origin")?
@@ -1412,10 +1696,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         {
             let conn = Connection::open(dir.path().join("dock.sqlite3")).unwrap();
-            for sql in &MIGRATIONS[..MIGRATIONS.len() - 1] {
+            for sql in &MIGRATIONS[..MIGRATIONS.len() - 2] {
                 conn.execute_batch(sql).unwrap();
             }
-            conn.pragma_update(None, "user_version", MIGRATIONS.len() as i64 - 1)
+            conn.pragma_update(None, "user_version", MIGRATIONS.len() as i64 - 2)
                 .unwrap();
         }
         let key = crate::series::MetricKey {
@@ -1438,7 +1722,7 @@ mod tests {
         {
             let conn = Connection::open(dir.path().join("dock.sqlite3")).unwrap();
             // Схема до прав токенов и скоупа алертов: без них и последующих миграций.
-            let before = MIGRATIONS.len() - 4;
+            let before = MIGRATIONS.len() - 5;
             for sql in &MIGRATIONS[..before] {
                 conn.execute_batch(sql).unwrap();
             }
@@ -1529,7 +1813,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         {
             let conn = Connection::open(dir.path().join("dock.sqlite3")).unwrap();
-            for sql in &MIGRATIONS[..MIGRATIONS.len() - 1] {
+            for sql in &MIGRATIONS[..MIGRATIONS.len() - 2] {
                 conn.execute_batch(sql).unwrap();
             }
             conn.execute_batch(
@@ -1541,7 +1825,7 @@ mod tests {
                      VALUES('event-1','metric-1',1,'firing','old & <message>',1,1000);",
             )
             .unwrap();
-            conn.pragma_update(None, "user_version", MIGRATIONS.len() as i64 - 1)
+            conn.pragma_update(None, "user_version", MIGRATIONS.len() as i64 - 2)
                 .unwrap();
         }
 

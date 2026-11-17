@@ -10,7 +10,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::api::AppState;
-use crate::session::AuthUser;
+use crate::session::ApiUser;
 
 /// Без heartbeat дольше этого узел отключён: relay и агенты шлют его раз в 10 секунд.
 pub const HEARTBEAT_TTL: Duration = Duration::from_secs(60);
@@ -197,7 +197,7 @@ pub struct Infrastructure {
 }
 
 /// `GET /api/infrastructure`.
-pub async fn overview(State(app): State<AppState>, _user: AuthUser) -> Json<Infrastructure> {
+pub async fn overview(State(app): State<AppState>, _user: ApiUser) -> Json<Infrastructure> {
     let (status, relays, agents, sessions) = tokio::join!(
         app.core.status(),
         app.core.list_relays(),
