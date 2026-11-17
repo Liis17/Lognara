@@ -405,6 +405,8 @@ pre.json, .event-details pre, tr.details pre { margin: 0; padding: 12px; backgro
 .metric strong, .metric-value { display: block; color: var(--ink); font-size: 26px; font-weight: 600; line-height: 1.25; font-variant-numeric: tabular-nums; }
 .metric p { margin: 6px 0 0; color: var(--ink3); font-size: 12px; }
 .analytics-grid { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 12px; }
+.analytics-chart-panel > .line-chart { padding: 0 20px; }
+.analytics-chart-panel > p { padding: 0 20px 16px; }
 .levels, .top-services { list-style: none; padding: 0 16px 16px; margin: 0; }
 .levels li, .top-services li { display: flex; gap: 12px; align-items: center; margin: 9px 0; }
 .levels button, .top-services button { width: 100%; display: grid; grid-template-columns: minmax(80px,1fr) minmax(30px,1.2fr) auto; gap: 12px; padding: 3px 0; border: 0; border-radius: 3px; background: none; font-weight: 400; text-align: left; justify-content: initial; }
