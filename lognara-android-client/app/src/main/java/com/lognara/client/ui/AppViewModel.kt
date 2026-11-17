@@ -50,6 +50,9 @@ class AppViewModel(val container: AppContainer) : ViewModel() {
     private val _selectedEvent = MutableStateFlow<LogEvent?>(null)
     val selectedEvent = _selectedEvent.asStateFlow()
 
+    private val _issuesRefreshKey = MutableStateFlow(0)
+    val issuesRefreshKey = _issuesRefreshKey.asStateFlow()
+
     private val _isRestoring = MutableStateFlow(true)
     val isRestoring = _isRestoring.asStateFlow()
 
@@ -99,6 +102,10 @@ class AppViewModel(val container: AppContainer) : ViewModel() {
 
     fun selectEvent(event: LogEvent?) {
         _selectedEvent.value = event
+    }
+
+    fun refreshIssues() {
+        _issuesRefreshKey.value += 1
     }
 
     fun connect(payloadText: String) {

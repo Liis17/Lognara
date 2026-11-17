@@ -34,7 +34,10 @@ import androidx.compose.ui.unit.dp
 import com.lognara.client.R
 import com.lognara.client.data.DeviceSession
 import com.lognara.client.data.LogEvent
+import com.lognara.client.data.Issue
 import com.lognara.client.data.LognaraApi
+import com.lognara.client.ui.screens.data.DataRange
+import com.lognara.client.ui.screens.issues.IssuesScreen
 import com.lognara.client.ui.screens.logs.LogsScreen
 import com.lognara.client.ui.screens.live.LiveScreen
 
@@ -48,6 +51,9 @@ fun HomeScreen(
     api: LognaraApi,
     onSettings: () -> Unit,
     onOpenEvent: (LogEvent) -> Unit,
+    onOpenIssue: (Issue, DataRange, String) -> Unit,
+    issuesRefreshKey: Int,
+    onIssueStatusChanged: () -> Unit,
 ) {
     val tabs = listOf(
         HomeTab(R.string.tab_logs, TabSymbol.Logs),
@@ -105,6 +111,8 @@ fun HomeScreen(
                 LogsScreen(api, session, onOpenEvent)
             } else if (selectedTab == 1) {
                 LiveScreen(api, session, onOpenEvent)
+            } else if (selectedTab == 2) {
+                IssuesScreen(api, session, issuesRefreshKey, onOpenIssue, onIssueStatusChanged)
             } else {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text(

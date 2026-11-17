@@ -92,6 +92,18 @@ class ApiModelsTest {
     }
 
     @Test
+    fun decodesDockIssueDetailsFixture() {
+        val details = apiJson.decodeFromString<IssueDetailsResponse>(
+            """{"as_of":"2026-11-17T12:00:00Z","issue":{"fingerprint":"f1_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","environment":null,"service":"api","action":null,"exception_type":"Failure","frames":["app.rs:42"],"pattern_id":"p1","template":"failed","parts":[],"exact":false,"count":2,"servers":1,"is_new":false,"first_seen":"2026-11-17T11:00:00Z","last_seen":"2026-11-17T11:59:00Z","buckets":[]},"servers":[{"value":"node-1","count":2}],"other_servers":1,"examples":[{"id":"event-1","timestamp":"2026-11-17T11:59:00Z","ingested_at":"2026-11-17T11:59:01Z","server":"node-1","backend":"http","service":"api","level":"error","message":"failed"}],"state":{"status":"regressed","resolved_at":null,"resolved_by":null},"history":[{"action":"regressed","actor":null,"at":"2026-11-17T11:59:00Z","event_at":"2026-11-17T11:58:59Z"}]}""",
+        )
+
+        assertEquals("node-1", details.servers.single().value)
+        assertEquals("event-1", details.examples.single().id)
+        assertEquals("regressed", details.state.status)
+        assertEquals("regressed", details.history.single().action)
+    }
+
+    @Test
     fun summaryRequestSerializesOnlyDockFields() {
         val request = SummaryRequest(
             from = "2026-11-17T11:00:00Z",

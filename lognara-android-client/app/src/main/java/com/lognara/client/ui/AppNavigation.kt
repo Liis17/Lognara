@@ -23,9 +23,12 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.lognara.client.R
 import com.lognara.client.data.DeviceSession
+import com.lognara.client.data.Issue
 import com.lognara.client.ui.screens.logs.EventDetailScreen
 import com.lognara.client.ui.screens.logs.TraceDetailScreen
 import com.lognara.client.ui.screens.HomeScreen
+import com.lognara.client.ui.screens.data.DataRange
+import com.lognara.client.ui.screens.issues.IssueDetailsScreen
 import com.lognara.client.ui.screens.LoginScreen
 import com.lognara.client.ui.screens.ManualEntryScreen
 import com.lognara.client.ui.screens.ScannerScreen
@@ -43,6 +46,7 @@ private const val HOME = "home"
 private const val SETTINGS = "settings"
 private const val EVENT_DETAIL = "event-detail"
 private const val TRACE_DETAIL = "trace-detail?traceId={traceId}&from={from}&to={to}"
+private const val ISSUE_DETAIL = "issue-detail?fingerprint={fingerprint}&range={range}&service={service}"
 
 @Composable
 fun AppNavigation(viewModel: AppViewModel) {
@@ -53,6 +57,7 @@ fun AppNavigation(viewModel: AppViewModel) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val notice by viewModel.loginNotice.collectAsStateWithLifecycle()
     val selectedEvent by viewModel.selectedEvent.collectAsStateWithLifecycle()
+    val issuesRefreshKey by viewModel.issuesRefreshKey.collectAsStateWithLifecycle()
 
     if (isRestoring) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -124,6 +129,39 @@ fun AppNavigation(viewModel: AppViewModel) {
                     session = activeSession,
                     api = viewModel.container.api,
                     onSettings = { navController.navigate(SETTINGS) },
+                    onOpenEvent = { event ->
+                        viewModel.selectEvent(event)
+                        navController.navigate(EVENT_DETAIL)
+                    },
+                    onOpenIssue = { issue: Issue, range: DataRange, service: String ->
+                        navController.navigate(
+                            "issue-detail?fingerprint=${Uri.encode(issue.fingerprint)}&range=${range.name}&service=${Uri.encode(service)}",
+                        )
+                    },
+                    issuesRefreshKey = issuesRefreshKey,
+                    onIssueStatusChanged = viewModel::refreshIssues,
+                )
+            }
+        }
+        composable(
+            route = ISSUE_DETAIL,
+            arguments = listOf(
+                navArgument("fingerprint") { type = NavType.StringType },
+                navArgument("range") { type = NavType.StringType; defaultValue = DataRange.TwentyFourHours.name },
+                navArgument("service") { type = NavType.StringType; defaultValue = "" },
+            ),
+        ) { entry ->
+            val activeSession: DeviceSession? = session
+            if (activeSession != null) {
+                IssueDetailsScreen(
+                    api = viewModel.container.api,
+                    session = activeSession,
+                    fingerprint = entry.arguments?.getString("fingerprint").orEmpty(),
+                    range = DataRange.entries.firstOrNull { it.name == entry.arguments?.getString("range") }
+                        ?: DataRange.TwentyFourHours,
+                    service = entry.arguments?.getString("service").orEmpty(),
+                    onBack = { navController.popBackStack() },
+                    onStatusChanged = viewModel::refreshIssues,
                     onOpenEvent = { event ->
                         viewModel.selectEvent(event)
                         navController.navigate(EVENT_DETAIL)
