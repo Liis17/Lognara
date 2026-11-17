@@ -260,7 +260,7 @@ private fun IssueDetailsContent(
 ) {
     val resolve = details.state.status != "resolved"
     Column(
-        Modifier.fillMaxSize().padding(vertical = 12.dp),
+        Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         LazyColumn(

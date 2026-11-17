@@ -171,7 +171,10 @@ fun TraceDetailScreen(
             emptyText = stringResource(R.string.trace_empty),
             modifier = Modifier.fillMaxSize().padding(insets).padding(horizontal = 12.dp),
         ) { response ->
-            LazyColumn(Modifier.fillMaxSize().padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            LazyColumn(
+                Modifier.fillMaxSize().padding(horizontal = 16.dp).padding(top = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
                 items(response.events, key = { it.id }) { event ->
                     LogEventRow(event = event, onClick = { onOpenEvent(event) })
                 }

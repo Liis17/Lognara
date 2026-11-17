@@ -66,7 +66,10 @@ fun InfrastructureScreen(api: LognaraApi, session: DeviceSession) {
 @Composable
 private fun InfrastructureContent(response: InfrastructureResponse, onRefresh: () -> Unit) {
     val groups = groupInfrastructureNodes(response.nodes)
-    LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxSize()) {
+    LazyColumn(
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+    ) {
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text(stringResource(R.string.infra_updated, localTimestamp(response.as_of)), style = MaterialTheme.typography.labelMedium)

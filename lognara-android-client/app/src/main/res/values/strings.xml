@@ -179,8 +179,8 @@
     <string name="infra_events_rate">Скорость: %1$s событий/с</string>
     <string name="infra_source">Сервис %1$s · сервер %2$s</string>
     <string name="infra_relay_name">Relay: %1$s</string>
-    <string name="infra_spool">Спул: %1$s из %2$s · %3$d%% (порог %4$d%%) · записей %5$d</string>
-    <string name="infra_spool_no_limit">Спул: %1$s · записей %2$d (лимит неизвестен)</string>
+    <string name="infra_spool">Спул: %1$s из %2$s · %3$d%% (порог %4$d%%) · записей %5$s</string>
+    <string name="infra_spool_no_limit">Спул: %1$s · записей %2$s (лимит неизвестен)</string>
     <string name="infra_age_under_second">меньше секунды</string>
     <string name="infra_age_seconds">%1$d с назад</string>
     <string name="infra_age_minutes">%1$d мин назад</string>

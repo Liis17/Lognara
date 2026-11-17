@@ -85,7 +85,10 @@ fun MetricsScreen(
         onRetry = viewModel::reload,
         modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
     ) { data ->
-        LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxSize()) {
+        LazyColumn(
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+        ) {
             item {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                     TextButton(onClick = viewModel::reload) { Text(stringResource(R.string.metric_refresh)) }
@@ -316,7 +319,10 @@ fun MetricDetailsScreen(
             modifier = Modifier.fillMaxSize().padding(insets).padding(horizontal = 12.dp),
         ) { metric ->
             if (metric != null) {
-                LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxSize()) {
+                LazyColumn(
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+                ) {
                     item {
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text(metric.definition?.title?.takeIf(String::isNotBlank) ?: metric.name, style = MaterialTheme.typography.titleLarge)
