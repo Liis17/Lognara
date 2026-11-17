@@ -475,6 +475,27 @@ pre.json, .event-details pre, tr.details pre { margin: 0; padding: 12px; backgro
 .passkey-settings { display: grid; gap: 16px; min-width: 0; }
 .passkeys { margin: 0; }
 .passkey-info { display: grid; flex: 1; min-width: 0; gap: 3px; }
+.device-settings { gap: 20px; }
+.device-pairing, .device-list-section { display: grid; gap: 10px; min-width: 0; }
+.device-pairing h2, .device-list-section h2 { margin: 0; }
+.device-pairing > p { margin: 0; }
+.device-pairing-active { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: start; gap: 20px; }
+.device-pairing-code { display: grid; justify-items: start; gap: 10px; min-width: 0; }
+.device-qr-frame { width: fit-content; padding: 8px; border-radius: 8px; background: #fff; }
+.device-qr { display: block; width: min(240px, 68vw); height: auto; }
+.device-countdown { margin: 0; color: var(--ink3); }
+.device-countdown strong { color: var(--ink); font-family: var(--mono); font-weight: 600; }
+.device-pairing-actions { display: flex; justify-content: flex-end; }
+.device-pairing-result { margin: 0; color: var(--ink3); }
+.device-manual-code { display: grid; gap: 8px; width: min(100%,480px); }
+.device-manual-code label { display: grid; gap: 6px; color: var(--ink3); font-size: 13px; }
+.device-manual-code textarea { width: 100%; min-height: 82px; resize: vertical; font: 12px var(--mono); overflow-wrap: anywhere; }
+.devices-list { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; }
+.device-record { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 0; border-bottom: 1px solid var(--line); }
+.device-record-info { display: grid; min-width: 0; gap: 3px; }
+.device-record-info strong { overflow-wrap: anywhere; }
+.device-record-info .muted { font-size: 13px; }
+.device-record > button { flex: none; color: var(--accent); }
 .alert-settings { grid-column: 1 / -1; display: grid; gap: 16px; min-width: 0; }
 .alert-settings > h2 { margin: 0; }
 .alert-global-status, .alert-token-form, .alert-settings-panel, .alert-settings-panel form, .alert-settings-panel > form { padding: 20px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); min-width: 0; }
@@ -835,6 +856,10 @@ pre.json, .event-details pre, tr.details pre { margin: 0; padding: 12px; backgro
   .passkeys li { gap: 8px; }
   .passkeys li .muted { flex-basis: 100%; }
   .passkeys li button { margin-left: 0; }
+  .device-pairing-active { grid-template-columns: 1fr; }
+  .device-pairing-actions { justify-content: flex-start; }
+  .device-record { align-items: flex-start; }
+  .device-record > button { margin-left: auto; }
 }
 
 .actions-table td:first-child { overflow-wrap: anywhere; max-width: 280px; }

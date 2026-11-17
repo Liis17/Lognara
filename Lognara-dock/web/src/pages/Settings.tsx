@@ -3,13 +3,15 @@ import { NavLink, useLocation, useNavigate } from "react-router";
 import { api, errorText, type PasskeyInfo } from "../api";
 import { createPasskey } from "../webauthn";
 import McpAccess from "./McpAccess";
+import DeviceSettings from "./DeviceSettings";
 
-type SettingsTab = "account" | "passkeys" | "mcp";
+type SettingsTab = "account" | "passkeys" | "mcp" | "devices";
 
 const tabs: { id: SettingsTab; label: string }[] = [
   { id: "account", label: "Аккаунт" },
   { id: "passkeys", label: "Вход и passkey" },
   { id: "mcp", label: "MCP-доступ" },
+  { id: "devices", label: "Устройства" },
 ];
 
 function formatTime(ms: number | null): string {
@@ -208,6 +210,8 @@ export default function Settings({ onChange }: { onChange: () => void }) {
           )}
 
           {activeTab === "mcp" && <McpAccess />}
+
+          {activeTab === "devices" && <DeviceSettings />}
         </div>
       </div>
     </section>
