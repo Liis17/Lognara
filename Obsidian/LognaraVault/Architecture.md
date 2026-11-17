@@ -9,6 +9,7 @@ Parent: [[Index]]
 | Язык и runtime | Rust (edition 2024) и tokio подтверждены для `Lognara-agent/` и `Lognara-relay/`. Core также использует Rust 2024 и tokio; MSRV 1.94. |
 | Зависимости | `Lognara-agent/Cargo.toml`: axum, reqwest, tokio, tokio-util, serde, serde_json, rmp-serde, serde_bytes, zstd, tracing, http-body, glob, regex, sha2, libc, общий lognara-spool. Подробности в [[Agent/LognaraAgent]]. `Lognara-relay/Cargo.toml`: общие HTTP/runtime/serde/zstd зависимости, reqwest с rustls, а также uuid, time, base64, bytes, http-body для ограниченного чтения, sha2 для проверки хешей агентов из core. Подробности в [[Relay/LognaraRelay]]. |
 | Веб-интерфейс и MCP | `Lognara-dock/Cargo.toml`: axum, rmcp 3.8 Streamable HTTP, tower-http (ServeDir), reqwest, rusqlite (bundled), bcrypt, webauthn-rs 0.5 (`conditional-ui`, требует OpenSSL), fs2, time. Фронтенд `Lognara-dock/web/`: React, react-router, TypeScript, Vite, uPlot. Подробности в [[Dock/LognaraDock]]. |
+| Android-клиент | `lognara-android-client/`: Kotlin, Jetpack Compose, Material 3, CameraX + ZXing, OkHttp, kotlinx.serialization, DataStore; Gradle 9.4.1, JDK 21. Подробности в [[Android/LognaraAndroidClient]]. |
 | .NET-клиент | `Lognara-dotnet/`: .NET 8+, Serilog 4.4 и Serilog.Sinks.Http 9.2.1; [[Agent/Serilog]]. Сборка и тесты на Ubuntu/Windows, публикация NuGet через OIDC в [[Repository/CI]]. |
 | Хранилище core | `Lognara-core/Cargo.toml`: DataFusion, Parquet с ZSTD, Tantivy, rusqlite, rand, а также regex (правила метрик, лимит размера выражения 1 MiB). Подробности в [[Core/LognaraCore]]. |
 | Лицензия | MIT, см. `LICENSE`. |
@@ -23,6 +24,7 @@ Parent: [[Index]]
 | [[Relay/LognaraRelay]] | `Lognara-relay/` | Реализованы приём пачек агентов, разбор в события, группировка по источнику, отправка в core и spool на диске. Структура в [[Relay/LognaraRelay-ProjectMap]]. |
 | [[Core/LognaraCore]] | `Lognara-core/` | Реализованы реестр подключений access.sqlite3 и admin API, авторизация relay, HTTP-приём, WAL, Arrow/Parquet, поиск Tantivy, аналитика DataFusion, retained-source API, retention, метрики и build version metadata, паттерны, проблемы и heartbeat. Структура в [[Core/LognaraCore-ProjectMap]]. |
 | [[Dock/LognaraDock]] | `Lognara-dock/` | Реализованы вход по htpasswd/passkey, сессии в SQLite, браузерное управление PAT/OAuth, opt-in Streamable HTTP MCP с правами и скоупом relay/агента для каждого токена и инструментами управления алертами метрик и логов, исторический поиск/cursor/Trace, SSE, аналитика и метрики. MCP отделён от cookie API и использует Core query API. Структура в [[Dock/LognaraDock-ProjectMap]]. |
+| [[Android/LognaraAndroidClient]] | `lognara-android-client/` | Мобильный клиент Dock: вход по одноразовому QR-коду, токен устройства в Android Keystore; разделы данных пока заглушки. |
 | [[Delivery/Spool]] | `Lognara-spool/` | Общая атомарная файловая очередь; оба процесса подтверждают приём только после durable commit. |
 | [[Agent/Serilog]] | `Lognara-dotnet/` | Библиотека `WriteTo.Lognara(...)` для HTTP-входа агента; очередь в памяти или на диске. |
 | [[Repository/LocalExample]] | `Example/` | Локальный Compose: Python-сервер на 8881 и agent в одном контейнере, relay, core и dock отдельно; веб-логи на localhost:7403. |
@@ -41,6 +43,7 @@ Parent: [[Index]]
 | `Example/entrypoint.py` | Запускает agent и Python-сервер внутри `app`, передаёт остановку обоим процессам. |
 | `Example/server.py` | Любой корректный HTTP-метод и путь; данные клиента в JSON/stdout и на локальный agent. |
 | `Lognara-dock/src/main.rs` | Точка входа веб-интерфейса; конфигурация `LOGNARA_DOCK_*`, порт `7403`, фронтенд из `LOGNARA_DOCK_WEB_DIR`. |
+| `lognara-android-client/app/src/main/java/com/lognara/client/MainActivity.kt` | Точка входа Android-клиента; адрес Dock приходит из QR-кода, своей конфигурации сервера нет. |
 | `README.md` | Обзор проекта: схема потока, Serilog-клиент, быстрый старт, токены, образы и фрагменты Compose, краткие метрики и API со ссылками на документацию компонентов и vault, статус. |
 | `.gitignore` | Исключает сборки Cargo (`target`) и артефакты агента в корневом `/build/`, резервные файлы rustfmt, PDB, Cargo Mutants, `default.profraw`, `.DS_Store`, локальный `.env` с ключом. |
 | `.env.example` | Центральные admin/query-токены и данные core; персональные LOGNARA_RELAY_CORE_TOKEN/LOGNARA_AGENT_TOKEN из dock, LOGNARA_RELAY_MEMORY_MB=2048 и данные agent/relay на машине приложений. |

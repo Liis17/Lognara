@@ -41,6 +41,12 @@ Lognara — система сбора логов: агент в контейне
 | [[Dock/LognaraDock-ProjectMap]] | lognara-dock | Дерево файлов Rust и React, связи модулей и тесты. |
 | [[Dock/DesignIntegration]] | развитие dock | Полный план шести HTML-дизайнов; этапы 0–6 реализованы, дальнейшие backend-этапы и решения пользователя. |
 
+### Android
+
+| Файл | Компонент | Описание |
+|------|-----------|----------|
+| [[Android/LognaraAndroidClient]] | lognara-android-client | Приложение на Compose: вход по QR-коду Dock, токен устройства в Android Keystore, отключение устройства; разделы данных пока заглушки. |
+
 ### Delivery
 
 | Файл | Компонент | Описание |
