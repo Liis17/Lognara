@@ -5072,13 +5072,6 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let mut app = test_app(directory.path(), "http://127.0.0.1:1/");
         let mock = MockTelegram::default();
-        mock.replies.lock().unwrap().extend([
-            (StatusCode::OK, json!({"ok":true})),
-            (
-                StatusCode::FORBIDDEN,
-                json!({"ok":false,"error_code":403,"description":"Forbidden: bot was blocked by the user"}),
-            ),
-        ]);
         let server = install_mock_telegram(&mut app, mock.clone()).await;
         let session = app.sessions.create("admin").await.unwrap();
         let body = json!({
@@ -5140,6 +5133,30 @@ mod tests {
         let mut body = body;
         body["group_ids"] = json!(group_ids);
 
+        let settings = app.store.alert_settings().await.unwrap();
+        let blocked_first = settings
+            .groups
+            .iter()
+            .find(|group| group.id == group_ids[0])
+            .and_then(|group| group.recipient_ids.first())
+            .and_then(|id| {
+                settings
+                    .recipients
+                    .iter()
+                    .find(|recipient| &recipient.id == id)
+            })
+            .is_some_and(|recipient| recipient.name == "blocked");
+        let ok = (StatusCode::OK, json!({"ok":true}));
+        let blocked = (
+            StatusCode::FORBIDDEN,
+            json!({"ok":false,"error_code":403,"description":"Forbidden: bot was blocked by the user"}),
+        );
+        mock.replies.lock().unwrap().extend(if blocked_first {
+            [blocked, ok]
+        } else {
+            [ok, blocked]
+        });
+
         let (status, response) = api_request(
             app.clone(),
             Some(&session),
@@ -5168,8 +5185,12 @@ mod tests {
         assert_eq!(response["failed"][0]["error"], "recipient_unavailable");
         let requests = mock.requests.lock().unwrap().clone();
         assert_eq!(requests.len(), 2);
-        assert_eq!(requests[0].1["chat_id"], 1001);
-        assert_eq!(requests[1].1["chat_id"], 1002);
+        let mut chat_ids = requests
+            .iter()
+            .map(|(_, body)| body["chat_id"].as_i64().unwrap())
+            .collect::<Vec<_>>();
+        chat_ids.sort_unstable();
+        assert_eq!(chat_ids, [1001, 1002]);
         assert!(
             requests[0].1["text"]
                 .as_str()
