@@ -39,6 +39,13 @@ async function fixture(page: Page) {
         last_checked_at: null, last_sent_at: null, ...body });
       return route.fulfill({ status: 201, json: { id: "a1" } });
     }
+    if (path.startsWith("/api/log-alerts/") && method === "PUT") {
+      const body = request.postDataJSON();
+      state.writes.push({ method, path, body });
+      const index = state.alerts.findIndex((alert) => `/api/log-alerts/${alert.id}` === path);
+      state.alerts[index] = { ...state.alerts[index], ...body };
+      return route.fulfill({ status: 204 });
+    }
     return route.fulfill({ status: 404, json: { error: "not_found" } });
   });
   return state;
@@ -92,4 +99,23 @@ test("single-event fields are rejected before saving", async ({ page }) => {
   await page.getByRole("button", { name: "Создать алерт" }).click();
   await expect(page.getByText("Поле trace_id нельзя использовать в алерте")).toBeVisible();
   expect(state.writes.some((write) => write.path === "/api/log-alerts")).toBe(false);
+});
+
+test("renames a log alert from its tile and keeps the rest of the rule", async ({ page }) => {
+  const state = await fixture(page);
+  state.alerts.push({ id: "a1", revision: 1, no_recipients: false, last_count: 0, last_match_at: null,
+    last_checked_at: null, last_sent_at: null, name: "sudo", enabled: true, query: "service:host",
+    filters: { service: ["host"] }, threshold: 1, cooldown_seconds: 300, group_ids: ["g1"],
+    message_template: "", message_fields: ["name"] });
+  await page.goto("/alerts");
+  const tile = page.locator(".alert-rule-row");
+  await tile.hover();
+  await tile.getByRole("button", { name: "Переименовать" }).click();
+  await tile.getByLabel("Публичное имя алерта").fill("sudo на хосте");
+  await tile.getByRole("button", { name: "Сохранить" }).click();
+  await expect(tile.getByText("sudo на хосте", { exact: true })).toBeVisible();
+  expect(state.writes).toEqual([{ method: "PUT", path: "/api/log-alerts/a1", body: {
+    name: "sudo на хосте", enabled: true, query: "service:host", filters: { service: ["host"] }, threshold: 1,
+    cooldown_seconds: 300, group_ids: ["g1"], message_template: "", message_fields: ["name"],
+  } }]);
 });

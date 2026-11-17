@@ -1,4 +1,4 @@
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, type ReactNode, useEffect, useState } from "react";
 import {
   api,
   ApiError,
@@ -62,7 +62,7 @@ function initialDraft(key: MetricAlertKey, metric: SeriesMetric | null): MetricA
   };
 }
 
-function definitionDraft(alert: MetricAlertDefinition): MetricAlertDefinitionInput {
+export function definitionDraft(alert: MetricAlertDefinition): MetricAlertDefinitionInput {
   return {
     key: alert.key,
     enabled: alert.enabled,
@@ -95,7 +95,9 @@ export default function MetricAlertEditor({
   onUnauthorized,
   onDone,
   onCancel,
+  picker,
 }: {
+  picker?: ReactNode;
   keyValue: MetricAlertKey;
   metric: SeriesMetric | null;
   onUnauthorized: () => void;
@@ -272,6 +274,7 @@ export default function MetricAlertEditor({
         </div>
         {alert && <span className={`tag alert-state-${alert.state}`}>{alert.state}</span>}
       </div>
+      {picker}
       {!ready ? (
         <p className="muted">Загрузка настроек алерта…</p>
       ) : (
