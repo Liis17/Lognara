@@ -8,13 +8,13 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::api::{ApiError, AppState};
-use crate::session::AuthUser;
+use crate::session::{ApiUser, AuthUser};
 use crate::token_access::Scope;
 
 pub async fn list(
     State(app): State<AppState>,
     Query(query): Query<std::collections::HashMap<String, String>>,
-    _user: AuthUser,
+    _user: ApiUser,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let (status, body) = match query.get("group_by").map(String::as_str) {
         None => app.core.series().await?,
@@ -34,7 +34,7 @@ pub async fn list(
 
 pub async fn query(
     State(app): State<AppState>,
-    _user: AuthUser,
+    _user: ApiUser,
     Json(body): Json<Value>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let (status, reply) = app.core.series_query(&body).await?;
@@ -95,7 +95,7 @@ fn parse_id(raw: &str) -> Result<Uuid, ApiError> {
 
 pub async fn sources(
     State(app): State<AppState>,
-    _user: AuthUser,
+    _user: ApiUser,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let (status, body) = app.core.series_sources().await?;
     Ok((status, Json(body)))
@@ -141,7 +141,7 @@ impl MetricKey {
 }
 pub async fn lookup(
     State(app): State<AppState>,
-    _user: AuthUser,
+    _user: ApiUser,
     Json(body): Json<Value>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let (status, reply) = app.core.series_lookup(&body).await?;
@@ -149,7 +149,7 @@ pub async fn lookup(
 }
 pub async fn favorites(
     State(app): State<AppState>,
-    _user: AuthUser,
+    _user: ApiUser,
 ) -> Result<Json<Value>, ApiError> {
     Ok(Json(
         serde_json::json!({ "keys": app.store.favorite_metrics().await? }),

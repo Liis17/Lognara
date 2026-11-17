@@ -22,7 +22,7 @@ use tokio_util::sync::CancellationToken;
 use crate::api::AppState;
 use crate::config::Config;
 use crate::core_client::CoreClient;
-use crate::session::AuthUser;
+use crate::session::{ApiCredential, ApiUser};
 
 /// Максимум `limit` в поиске core.
 const BATCH_LIMIT: usize = 1000;
@@ -32,8 +32,6 @@ const RECENT: usize = 200;
 const FUTURE_SKEW: Duration = Duration::from_secs(60);
 const CHANNEL: usize = 64;
 const KEEPALIVE: Duration = Duration::from_secs(15);
-/// Как часто поток проверяет, что сессия ещё действует.
-const SESSION_RECHECK: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug)]
 pub enum Message {
@@ -183,7 +181,7 @@ impl Live {
 /// `GET /api/logs/stream`: SSE с событиями `logs`, `core_error`, `core_ok` и `lagged`.
 pub async fn stream(
     State(app): State<AppState>,
-    user: AuthUser,
+    user: ApiUser,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let (recent, core_error, rx) = app.live.subscribe();
     let mut initial = vec![logs_event(&recent)];
@@ -192,7 +190,7 @@ pub async fn stream(
     }
     initial.reverse();
 
-    let mut recheck = tokio::time::interval(SESSION_RECHECK);
+    let mut recheck = tokio::time::interval(app.credential_recheck_interval);
     recheck.reset();
     let stream = futures_util::stream::unfold(
         (initial, rx, recheck, app, user),
@@ -212,7 +210,7 @@ pub async fn stream(
                         Err(broadcast::error::RecvError::Closed) => return None,
                     },
                     _ = recheck.tick() => {
-                        if session_alive(&app, &user).await {
+                        if credential_alive(&app, &user).await {
                             continue;
                         }
                         return None;
@@ -226,10 +224,38 @@ pub async fn stream(
     Sse::new(stream).keep_alive(KeepAlive::new().interval(KEEPALIVE))
 }
 
-/// Поток закрывается, если сессию отозвали или пользователя убрали из htpasswd.
-async fn session_alive(app: &AppState, user: &AuthUser) -> bool {
-    matches!(app.sessions.lookup_hash(user.token_hash).await, Ok(Some(_)))
-        && app.htpasswd.contains(&user.username)
+/// Поток закрывается, если данные доступа отозвали или пользователя убрали из htpasswd.
+async fn credential_alive(app: &AppState, user: &ApiUser) -> bool {
+    match &user.credential {
+        ApiCredential::Session(token_hash) => {
+            let Ok(Some((username, _))) = app.sessions.lookup_hash(*token_hash).await else {
+                return false;
+            };
+            if username != user.username {
+                return false;
+            }
+            let Ok(Some(users)) = crate::session::htpasswd_users(app).await else {
+                return false;
+            };
+            users.contains_key(&username)
+        }
+        ApiCredential::Device { id, token_hash } => {
+            let Ok(Some(users)) = crate::session::htpasswd_users(app).await else {
+                return false;
+            };
+            let Ok(Some(device)) = app.store.authenticate_device(*token_hash).await else {
+                return false;
+            };
+            if device.id.as_str() != id.as_str() || device.username != user.username {
+                return false;
+            }
+            if !users.contains_key(&device.username) {
+                let _ = app.store.revoke_user_devices(device.username).await;
+                return false;
+            }
+            true
+        }
+    }
 }
 
 fn logs_event(events: &[Value]) -> Event {

@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use crate::api::{ApiError, AppState};
 use crate::core_client::CoreQueryError;
-use crate::session::AuthUser;
+use crate::session::ApiUser;
 use crate::token_access::Scope;
 
 pub type Filters = BTreeMap<String, Vec<String>>;
@@ -291,7 +291,7 @@ impl From<CoreQueryError> for ApiError {
 
 pub async fn search(
     State(app): State<AppState>,
-    _user: AuthUser,
+    _user: ApiUser,
     body: Result<Json<SearchRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Json(request) = body.map_err(|_| ApiError::BadRequest("invalid_request"))?;
@@ -300,7 +300,7 @@ pub async fn search(
 
 pub async fn trace(
     State(app): State<AppState>,
-    _user: AuthUser,
+    _user: ApiUser,
     path: Result<Path<String>, PathRejection>,
     params: Result<Query<TraceParams>, QueryRejection>,
 ) -> Result<Response, ApiError> {
@@ -311,7 +311,7 @@ pub async fn trace(
 
 pub async fn histogram(
     State(app): State<AppState>,
-    _user: AuthUser,
+    _user: ApiUser,
     body: Result<Json<HistogramRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Json(request) = body.map_err(|_| ApiError::BadRequest("invalid_request"))?;
@@ -320,7 +320,7 @@ pub async fn histogram(
 
 pub async fn group_by(
     State(app): State<AppState>,
-    _user: AuthUser,
+    _user: ApiUser,
     body: Result<Json<GroupRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Json(request) = body.map_err(|_| ApiError::BadRequest("invalid_request"))?;
@@ -329,7 +329,7 @@ pub async fn group_by(
 
 pub async fn summary(
     State(app): State<AppState>,
-    _user: AuthUser,
+    _user: ApiUser,
     body: Result<Json<SummaryRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let Json(request) = body.map_err(|_| ApiError::BadRequest("invalid_request"))?;

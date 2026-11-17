@@ -14,7 +14,7 @@ Lognara-dock/
     main.rs                   tracing, конфиг, App::open, SIGTERM/SIGINT
     lib.rs                    run(): axum::serve, наблюдатель проблем, отмена App::shutdown
     config.rs                 LOGNARA_DOCK_* и проверки
-    api.rs                    App/AppState, ApiError, router, health, SPA
+    api.rs                    App/AppState, ApiError, router including device routes, health, SPA
     mcp.rs                    stateless Streamable HTTP `/mcp`, tools по правам токена, скоуп узла, алерты, Bearer auth, cursors и limits
     token_access.rs           права (логи, метрики, запись алертов) и скоуп узла MCP-токена
     oauth.rs                  OAuth metadata, restricted ChatGPT CIMD, PKCE, token/refresh endpoints
@@ -23,10 +23,11 @@ Lognara-dock/
     log_alerts.rs             алерты на логи: правила запроса страницы Logs, проверка по watermark `sequence`
     version.rs                release_version: LOGNARA_RELEASE_VERSION или версия с коротким commit
     htpasswd.rs               разбор, кэш по stamp, verify, атомарная перезапись
-    store.rs                  SQLite, миграции, PAT/OAuth hashes and grants, сессии, passkey, паттерны, проблемы, избранное
+    store.rs                  SQLite, миграции, device pairing/token hashes/revocation, PAT/OAuth hashes and grants, сессии, passkey, паттерны, проблемы, избранное
+    devices.rs                одноразовое QR-pairing, device Bearer, список и отзыв устройств
     patterns.rs               DTO паттернов, proxy search/details и персональное скрытие
     issues.rs                 DTO проблем, proxy search/details, resolve/reopen, наблюдатель возвратов
-    session.rs                Sessions, cookie, AuthUser, require_origin
+    session.rs                Sessions, cookie, ApiUser/device Bearer allowlist, AuthUser, require_origin
     auth.rs                   login/logout, LoginLimiter, check_password
     access.rs                 /api/relays, /api/agents: сессия и proxy admin core
     account.rs                /api/me, смена пароля, check_current_password
@@ -35,11 +36,12 @@ Lognara-dock/
     query.rs                  typed DTO и авторизованные proxy search/trace/histogram/group-by/summary
     core_client.rs            клиент core: история/Trace/аналитика/паттерны/ошибки/status, серии/определения, admin CRUD; таймаут запросов 35 с
     series.rs                 /api/series*: прокси каталога/lookup/графиков и редактирования, API общего избранного
-    live.rs                   Live (poller + broadcast) на общем CoreClient, SSE stream
+    live.rs                   Live (poller + broadcast) на общем CoreClient, SSE stream с recheck session/device credential
   tests/
     common/mod.rs             TestApp, запросы, htpasswd с cost 4, поддельный core с серийными маршрутами и поддельный admin API core
     access.rs                 proxy admin API, сессия, Origin, no-store, ошибки core
     auth.rs                   вход, перечитывание htpasswd, TTL, Origin, блокировка
+    devices.rs                QR pairing, обмен токена, разрешённые device routes, отзыв, лимит устройств и миграция
     password.rs               смена пароля и сохранение остальных строк
     passkey.rs                церемония с SoftPasskey, отказ challenge
     live.rs                   поддельный core: дедупликация, ошибки, остановка опроса

@@ -22,6 +22,7 @@ use crate::alerts;
 use crate::auth::{self, LoginLimiter};
 use crate::config::Config;
 use crate::core_client::{CoreClient, CoreError};
+use crate::devices;
 use crate::htpasswd::Htpasswd;
 use crate::infra;
 use crate::issues;
@@ -42,7 +43,10 @@ pub struct App {
     pub htpasswd: Htpasswd,
     pub store: Store,
     pub sessions: Sessions,
+    /// Интервал повторной проверки долгоживущих данных доступа для SSE.
+    pub(crate) credential_recheck_interval: Duration,
     pub limiter: LoginLimiter,
+    pub(crate) device_pairing_limiter: LoginLimiter,
     pub webauthn: webauthn_rs::Webauthn,
     pub challenges: Challenges,
     /// Общий клиент core: query-токен для логов и метрик, admin-токен для определений,
@@ -58,6 +62,11 @@ pub struct App {
 }
 
 impl App {
+    #[doc(hidden)]
+    pub fn set_credential_recheck_interval_for_tests(&mut self, interval: Duration) {
+        self.credential_recheck_interval = interval;
+    }
+
     /// Читает htpasswd и открывает каталог данных; ошибки останавливают запуск.
     pub fn open(config: Config) -> Result<AppState, Box<dyn std::error::Error + Send + Sync>> {
         let webauthn = passkey::webauthn(&config)?;
@@ -72,7 +81,9 @@ impl App {
             htpasswd,
             store,
             sessions,
+            credential_recheck_interval: Duration::from_secs(60),
             limiter: LoginLimiter::default(),
+            device_pairing_limiter: LoginLimiter::default(),
             webauthn,
             challenges: Challenges::default(),
             live: Live::new(&config, core.clone(), shutdown.clone()),
@@ -92,6 +103,7 @@ pub enum ApiError {
     /// Ошибка валидации из core; `detail` - текст core для пользователя.
     Invalid(String),
     Unauthorized,
+    InvalidCode,
     Forbidden,
     NotFound,
     RelayNotFound,
@@ -185,6 +197,7 @@ impl IntoResponse for ApiError {
                 return (StatusCode::BAD_REQUEST, body).into_response();
             }
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
+            Self::InvalidCode => (StatusCode::UNAUTHORIZED, "invalid_code"),
             Self::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found"),
             Self::RelayNotFound => (StatusCode::NOT_FOUND, "relay_not_found"),
@@ -247,6 +260,12 @@ pub fn router(app: AppState) -> Router {
         )
         .route("/me", get(account::me))
         .route("/account/password", post(account::change_password))
+        .route("/devices/pairing", post(devices::create_pairing))
+        .route("/devices/pairing/{id}", get(devices::pairing_status))
+        .route("/devices/pair", post(devices::pair))
+        .route("/devices", get(devices::list))
+        .route("/devices/current", delete(devices::revoke_current))
+        .route("/devices/{id}", delete(devices::revoke))
         .route("/account/passkeys", get(passkey::list))
         .route("/account/passkeys/start", post(passkey::register_start))
         .route("/account/passkeys/finish", post(passkey::register_finish))
@@ -368,6 +387,7 @@ pub fn router(app: AppState) -> Router {
         .route("/health/live", get(|| async { StatusCode::OK }))
         .route("/health/ready", get(ready))
         .fallback_service(spa)
+        .layer(middleware::from_fn(session::require_device_route_allowlist))
         .layer(SetResponseHeaderLayer::if_not_present(
             X_CONTENT_TYPE_OPTIONS,
             HeaderValue::from_static("nosniff"),

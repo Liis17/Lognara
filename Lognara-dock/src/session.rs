@@ -1,7 +1,10 @@
 //! Сессии в cookie: в SQLite хранится только SHA-256 токена.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use axum::extract::{FromRequestParts, Request, State};
-use axum::http::header::{COOKIE, ORIGIN};
+use axum::http::header::{AUTHORIZATION, COOKIE, ORIGIN};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, Method};
 use axum::middleware::Next;
@@ -126,22 +129,38 @@ impl Sessions {
             .map(drop)
     }
 
-    /// Удаляет все сессии пользователя, кроме `keep`.
-    pub async fn revoke_others(&self, username: &str, keep: TokenHash) -> Result<(), StoreError> {
+    /// Завершает остальные сессии и отзывает устройства и незавершённые pairing.
+    pub async fn revoke_after_password_change(
+        &self,
+        username: &str,
+        keep: TokenHash,
+    ) -> Result<(), StoreError> {
         let username = username.to_owned();
         self.store
             .call(move |conn| {
-                conn.execute(
+                let tx = conn.transaction()?;
+                let now = now_ms();
+                tx.execute(
                     "DELETE FROM sessions WHERE username = ?1 AND token_hash != ?2",
                     params![username, keep],
-                )
+                )?;
+                tx.execute(
+                    "UPDATE devices SET revoked_at=?2 WHERE username=?1 AND revoked_at IS NULL",
+                    params![username, now],
+                )?;
+                tx.execute(
+                    "UPDATE device_pairings SET replaced_at=?2
+                     WHERE username=?1 AND used_at IS NULL AND replaced_at IS NULL",
+                    params![username, now],
+                )?;
+                tx.commit()
             })
             .await
             .map(drop)
     }
 }
 
-fn hash_token(token: &str) -> TokenHash {
+pub(crate) fn hash_token(token: &str) -> TokenHash {
     Sha256::digest(token.as_bytes()).into()
 }
 
@@ -174,25 +193,107 @@ pub struct AuthUser {
     pub token_hash: TokenHash,
 }
 
+#[derive(Clone, Debug)]
+pub enum ApiCredential {
+    Session(TokenHash),
+    Device { id: String, token_hash: TokenHash },
+}
+
+/// Учётные данные для маршрутов, которые разрешают и сессию, и устройство.
+pub struct ApiUser {
+    pub username: String,
+    pub credential: ApiCredential,
+}
+
 impl FromRequestParts<AppState> for AuthUser {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, app: &AppState) -> Result<Self, ApiError> {
-        let token = read_cookie(&parts.headers, SESSION_COOKIE).ok_or(ApiError::Unauthorized)?;
-        let (username, token_hash) = app
-            .sessions
-            .lookup(token)
-            .await?
-            .ok_or(ApiError::Unauthorized)?;
-        if !app.htpasswd.contains(&username) {
-            app.sessions.revoke(token_hash).await?;
+        if parts.headers.contains_key(AUTHORIZATION) {
             return Err(ApiError::Unauthorized);
         }
+        let (username, token_hash) = session_user(app, &parts.headers).await?;
         Ok(Self {
             username,
             token_hash,
         })
     }
+}
+
+impl FromRequestParts<AppState> for ApiUser {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, app: &AppState) -> Result<Self, ApiError> {
+        let authorization = parts.headers.get_all(AUTHORIZATION);
+        let mut values = authorization.iter();
+        if let Some(value) = values.next() {
+            if values.next().is_some() {
+                return Err(ApiError::Unauthorized);
+            }
+            let value = value.to_str().map_err(|_| ApiError::Unauthorized)?;
+            let bearer = value
+                .strip_prefix("Bearer ")
+                .ok_or(ApiError::Unauthorized)?;
+            let token = bearer.strip_prefix("lgd_").ok_or(ApiError::Unauthorized)?;
+            let decoded = URL_SAFE_NO_PAD
+                .decode(token)
+                .map_err(|_| ApiError::Unauthorized)?;
+            if decoded.len() != 32 || URL_SAFE_NO_PAD.encode(&decoded) != token {
+                return Err(ApiError::Unauthorized);
+            }
+            let users = htpasswd_users(app).await?.ok_or(ApiError::Unauthorized)?;
+            let token_hash = hash_token(bearer);
+            let device = app
+                .store
+                .authenticate_device(token_hash)
+                .await?
+                .ok_or(ApiError::Unauthorized)?;
+            if !users.contains_key(&device.username) {
+                app.store.revoke_user_devices(device.username).await?;
+                return Err(ApiError::Unauthorized);
+            }
+            return Ok(Self {
+                username: device.username,
+                credential: ApiCredential::Device {
+                    id: device.id,
+                    token_hash,
+                },
+            });
+        }
+
+        let (username, token_hash) = session_user(app, &parts.headers).await?;
+        Ok(Self {
+            username,
+            credential: ApiCredential::Session(token_hash),
+        })
+    }
+}
+
+async fn session_user(
+    app: &AppState,
+    headers: &HeaderMap,
+) -> Result<(String, TokenHash), ApiError> {
+    let token = read_cookie(headers, SESSION_COOKIE).ok_or(ApiError::Unauthorized)?;
+    let (username, token_hash) = app
+        .sessions
+        .lookup(token)
+        .await?
+        .ok_or(ApiError::Unauthorized)?;
+    let users = htpasswd_users(app).await?;
+    if !users.is_some_and(|users| users.contains_key(&username)) {
+        app.sessions.revoke(token_hash).await?;
+        return Err(ApiError::Unauthorized);
+    }
+    Ok((username, token_hash))
+}
+
+pub(crate) async fn htpasswd_users(
+    app: &AppState,
+) -> Result<Option<Arc<HashMap<String, String>>>, ApiError> {
+    let app = app.clone();
+    tokio::task::spawn_blocking(move || app.htpasswd.users())
+        .await
+        .map_err(|_| ApiError::Internal)
 }
 
 /// Изменяющие запросы принимаются только со страниц самого dock (защита от CSRF).
@@ -206,8 +307,80 @@ pub async fn require_origin(
         Method::GET | Method::HEAD | Method::OPTIONS
     );
     let origin = request.headers().get(ORIGIN).and_then(|v| v.to_str().ok());
-    if !safe && origin != Some(app.config.public_origin.as_str()) {
+    let pairing_exchange = *request.method() == Method::POST
+        && matches!(request.uri().path(), "/devices/pair" | "/api/devices/pair");
+    if !safe
+        && !pairing_exchange
+        && !request.headers().contains_key(AUTHORIZATION)
+        && origin != Some(app.config.public_origin.as_str())
+    {
         return Err(ApiError::Forbidden);
     }
     Ok(next.run(request).await)
+}
+
+/// Bearer устройства принимается только перечисленными read API и self-revoke.
+pub async fn require_device_route_allowlist(
+    request: Request,
+    next: Next,
+) -> Result<Response, ApiError> {
+    let path = request.uri().path();
+    if !path.starts_with("/api/")
+        || !request.headers().contains_key(AUTHORIZATION)
+        || is_device_route(request.method(), path)
+    {
+        return Ok(next.run(request).await);
+    }
+    Err(ApiError::Unauthorized)
+}
+
+fn is_device_route(method: &Method, path: &str) -> bool {
+    let method = method.as_str();
+    (method == "GET"
+        && matches!(
+            path,
+            "/api/me"
+                | "/api/logs/stream"
+                | "/api/infrastructure"
+                | "/api/series"
+                | "/api/series/favorites"
+                | "/api/series/sources"
+        ))
+        || (method == "POST"
+            && matches!(
+                path,
+                "/api/logs/search"
+                    | "/api/stats/histogram"
+                    | "/api/stats/group-by"
+                    | "/api/stats/summary"
+                    | "/api/issues/search"
+                    | "/api/series/lookup"
+                    | "/api/series/query"
+            ))
+        || (method == "DELETE" && path == "/api/devices/current")
+        || (method == "GET" && one_segment_after(path, "/api/traces/"))
+        || issue_device_route(method, path)
+}
+
+fn issue_device_route(method: &str, path: &str) -> bool {
+    for (suffix, expected_method) in [
+        ("/details", "POST"),
+        ("/resolve", "POST"),
+        ("/reopen", "POST"),
+    ] {
+        if method == expected_method
+            && path
+                .strip_prefix("/api/issues/")
+                .and_then(|value| value.strip_suffix(suffix))
+                .is_some_and(|id| !id.is_empty() && !id.contains('/'))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn one_segment_after(path: &str, prefix: &str) -> bool {
+    path.strip_prefix(prefix)
+        .is_some_and(|value| !value.is_empty() && !value.contains('/'))
 }

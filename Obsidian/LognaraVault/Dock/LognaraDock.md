@@ -25,12 +25,13 @@ Parent: [[Index]]
 - SQLite `dock.sqlite3` в `LOGNARA_DOCK_DATA_DIR`: `sessions` (SHA-256 токена), `users` (стабильный WebAuthn user handle), `passkeys` (сериализованный `Passkey`). Общее избранное метрик хранится в `favorite_metrics` по составному ключу источника и origin. Миграции через `user_version`, каталог блокируется `dock.lock`.
 - Cookie `lognara_dock_session`: `HttpOnly; Secure; SameSite=Strict`. Изменяющие запросы требуют `Origin` равный `LOGNARA_DOCK_PUBLIC_URL`. После 5 неверных паролей логин блокируется на 5 минут.
 - Passkey через webauthn-rs (feature `conditional-ui`): вход без логина по user handle. Регистрация запрашивает `residentKey: required`, добавление и удаление ключа требуют текущий пароль. Состояние церемоний хранится в памяти 5 минут под cookie `lognara_dock_challenge`.
+- Мобильные устройства подключаются одноразовым QR-кодом через `/api/devices*`. Dock хранит только SHA-256 токена устройства и принимает его Bearer только на явном allowlist методов и путей; смена пароля, отзыв устройства или удаление пользователя из htpasswd прекращают доступ. Точные маршруты, ограничения и состояния pairing описаны в [README Dock](../../../Lognara-dock/README.md#подключение-устройств).
 
 ## Логи в реальном времени
 
 Общий poller работает, пока есть подписчики SSE. Раз в `LOGNARA_DOCK_LIVE_POLL_MS` он ищет в окне `[now - LOOKBACK, now + 60s)` с `limit=1000` и рассылает только новые id через `tokio::broadcast`. Первый опрос заполняет ленту 200 последними событиями. Ограничение: при более чем 1000 новых событий за опрос лента показывает самые свежие; для полноты нужен tail-endpoint core по порядку публикации.
 
-SSE-поток каждые 60 секунд перепроверяет сессию и закрывается при остановке процесса (`App::shutdown`), иначе graceful shutdown ждал бы его вечно.
+SSE-поток каждые 60 секунд перепроверяет сессию или device credential; отозванный доступ и удалённый htpasswd-пользователь закрывают поток. При остановке процесса поток закрывается через `App::shutdown`, иначе graceful shutdown ждал бы его вечно.
 
 ## API истории и аналитики
 
