@@ -181,6 +181,7 @@ pub fn router(app: AppState) -> Router<AppState> {
         .with_allowed_origins([
             app.config.public_origin.clone(),
             "https://chatgpt.com".to_owned(),
+            "https://claude.ai".to_owned(),
         ])
         .enforce_origin_validation();
     let server_app = app.clone();

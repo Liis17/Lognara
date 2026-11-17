@@ -1,4 +1,4 @@
-//! OAuth authorization code flow for ChatGPT CIMD clients.
+//! OAuth authorization code flow for ChatGPT and Claude CIMD clients.
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::Duration,
@@ -30,6 +30,9 @@ use crate::{
 };
 
 const CHATGPT_HOST: &str = "chatgpt.com";
+const CLAUDE_HOST: &str = "claude.ai";
+const CLAUDE_CLIENT_ID: &str = "https://claude.ai/oauth/mcp-oauth-client-metadata";
+const CLAUDE_REDIRECT: &str = "https://claude.ai/api/mcp/auth_callback";
 const CIMD_LIMIT: usize = 256 * 1024;
 
 pub fn router(app: AppState) -> Router<AppState> {
@@ -147,13 +150,13 @@ async fn authorize(
         return Ok(Redirect::temporary(login.as_str()).into_response());
     };
 
-    let metadata = fetch_client_metadata(&request.client_id)
+    let (client, metadata) = fetch_client_metadata(&request.client_id)
         .await
         .map_err(|_| ApiError::BadRequest("invalid_client"))?;
     if !metadata
         .redirect_uris
         .iter()
-        .any(|uri| uri == &request.redirect_uri && valid_chatgpt_redirect(uri))
+        .any(|uri| uri == &request.redirect_uri && client.allows_redirect(uri))
     {
         return Err(ApiError::BadRequest("invalid_redirect_uri"));
     }
@@ -209,9 +212,33 @@ struct ClientMetadata {
     token_endpoint_auth_method: Option<String>,
 }
 
-async fn fetch_client_metadata(client_id: &str) -> Result<ClientMetadata, ()> {
-    let url = valid_chatgpt_client_id(client_id)?;
-    let addresses = lookup_host((CHATGPT_HOST, 443))
+/// CIMD-клиенты, которым разрешено подключение: у каждого свой origin документа и callback.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TrustedClient {
+    ChatGpt,
+    Claude,
+}
+
+impl TrustedClient {
+    fn host(self) -> &'static str {
+        match self {
+            Self::ChatGpt => CHATGPT_HOST,
+            Self::Claude => CLAUDE_HOST,
+        }
+    }
+
+    fn allows_redirect(self, uri: &str) -> bool {
+        match self {
+            Self::ChatGpt => valid_chatgpt_redirect(uri),
+            Self::Claude => uri == CLAUDE_REDIRECT,
+        }
+    }
+}
+
+async fn fetch_client_metadata(client_id: &str) -> Result<(TrustedClient, ClientMetadata), ()> {
+    let (trusted, url) = trusted_client_id(client_id)?;
+    let host = trusted.host();
+    let addresses = lookup_host((host, 443))
         .await
         .map_err(|_| ())?
         .filter(|address| is_public_ip(address.ip()))
@@ -225,7 +252,7 @@ async fn fetch_client_metadata(client_id: &str) -> Result<ClientMetadata, ()> {
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(3))
         .timeout(Duration::from_secs(5))
-        .resolve_to_addrs(CHATGPT_HOST, &addresses)
+        .resolve_to_addrs(host, &addresses)
         .build()
         .map_err(|_| ())?;
     let mut response = client
@@ -250,12 +277,13 @@ async fn fetch_client_metadata(client_id: &str) -> Result<ClientMetadata, ()> {
         bytes.extend_from_slice(&chunk);
     }
     let metadata: ClientMetadata = serde_json::from_slice(&bytes).map_err(|_| ())?;
-    validate_client_metadata(metadata, client_id)
+    validate_client_metadata(metadata, client_id, trusted).map(|metadata| (trusted, metadata))
 }
 
 fn validate_client_metadata(
     metadata: ClientMetadata,
     client_id: &str,
+    client: TrustedClient,
 ) -> Result<ClientMetadata, ()> {
     if metadata.client_id != client_id
         || metadata.client_name.trim().is_empty()
@@ -273,11 +301,19 @@ fn validate_client_metadata(
         || metadata
             .redirect_uris
             .iter()
-            .any(|uri| !valid_chatgpt_redirect(uri))
+            .any(|uri| !client.allows_redirect(uri))
     {
         return Err(());
     }
     Ok(metadata)
+}
+
+fn trusted_client_id(value: &str) -> Result<(TrustedClient, Url), ()> {
+    if value == CLAUDE_CLIENT_ID {
+        let url = Url::parse(value).map_err(|_| ())?;
+        return Ok((TrustedClient::Claude, url));
+    }
+    valid_chatgpt_client_id(value).map(|url| (TrustedClient::ChatGpt, url))
 }
 
 fn valid_chatgpt_client_id(value: &str) -> Result<Url, ()> {
@@ -413,9 +449,7 @@ async fn token(
     let Ok(Form(request)) = form else {
         return token_error("invalid_request");
     };
-    if valid_chatgpt_client_id(&request.client_id).is_err()
-        || request.resource != resource_uri(&app)
-    {
+    if trusted_client_id(&request.client_id).is_err() || request.resource != resource_uri(&app) {
         return token_error("invalid_client");
     }
     match request.grant_type.as_str() {
@@ -565,7 +599,7 @@ mod tests {
             }}"#
         ))
         .unwrap();
-        assert!(validate_client_metadata(metadata, client_id).is_ok());
+        assert!(validate_client_metadata(metadata, client_id, TrustedClient::ChatGpt).is_ok());
 
         let unsupported: ClientMetadata = serde_json::from_str(&format!(
             r#"{{
@@ -578,7 +612,60 @@ mod tests {
             }}"#
         ))
         .unwrap();
-        assert!(validate_client_metadata(unsupported, client_id).is_err());
+        assert!(validate_client_metadata(unsupported, client_id, TrustedClient::ChatGpt).is_err());
+    }
+
+    #[test]
+    fn accepts_the_current_claude_cimd_document_and_only_its_callback() {
+        assert_eq!(
+            trusted_client_id(CLAUDE_CLIENT_ID).map(|(client, _)| client),
+            Ok(TrustedClient::Claude)
+        );
+        for value in [
+            "https://claude.ai/oauth/mcp-oauth-client-metadata?x=1",
+            "https://claude.ai/oauth/other",
+            "http://claude.ai/oauth/mcp-oauth-client-metadata",
+            "https://claude.ai.evil.example/oauth/mcp-oauth-client-metadata",
+        ] {
+            assert!(trusted_client_id(value).is_err(), "{value}");
+        }
+        let document = |redirect: &str| -> ClientMetadata {
+            serde_json::from_str(&format!(
+                r#"{{
+                    "client_id":"{CLAUDE_CLIENT_ID}",
+                    "client_name":"Claude",
+                    "client_uri":"https://claude.ai",
+                    "redirect_uris":["{redirect}"],
+                    "grant_types":["authorization_code","refresh_token","urn:ietf:params:oauth:grant-type:jwt-bearer"],
+                    "response_types":["code"],
+                    "token_endpoint_auth_method":"none"
+                }}"#
+            ))
+            .unwrap()
+        };
+        assert!(
+            validate_client_metadata(
+                document(CLAUDE_REDIRECT),
+                CLAUDE_CLIENT_ID,
+                TrustedClient::Claude
+            )
+            .is_ok()
+        );
+        for redirect in [
+            "https://chatgpt.com/connector_platform_oauth_redirect",
+            "https://claude.ai/api/mcp/auth_callback/extra",
+        ] {
+            assert!(
+                validate_client_metadata(
+                    document(redirect),
+                    CLAUDE_CLIENT_ID,
+                    TrustedClient::Claude
+                )
+                .is_err(),
+                "{redirect}"
+            );
+        }
+        assert!(!TrustedClient::ChatGpt.allows_redirect(CLAUDE_REDIRECT));
     }
 
     #[test]
