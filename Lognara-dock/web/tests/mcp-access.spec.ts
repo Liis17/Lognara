@@ -139,6 +139,25 @@ test("OAuth consent names the read scope and returns only to the validated ChatG
   await expect(page).toHaveURL(/chatgpt\.com\/connector_platform_oauth_redirect\?code=code-1/u);
 });
 
+test("OAuth consent returns Claude to its exact callback", async ({ page }) => {
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (path === "/api/me") return route.fulfill({ json: { username: "liis", passkeys: 0 } });
+    if (path === "/api/oauth/consent/pending-3" && request.method() === "GET") {
+      return route.fulfill({ json: { client_name: "Claude", scope: "lognara.read lognara.write", resource: "https://dock.example.com/mcp" } });
+    }
+    if (path === "/api/oauth/consent/pending-3" && request.method() === "POST") {
+      return route.fulfill({ json: { redirect_to: "https://claude.ai/api/mcp/auth_callback?code=code-3&state=state-3&iss=https%3A%2F%2Fdock.example.com" } });
+    }
+    return route.fulfill({ status: 404, json: { error: "not_found" } });
+  });
+  await page.route("https://claude.ai/api/mcp/auth_callback?**", (route) => route.fulfill({ contentType: "text/html", body: "Claude callback" }));
+  await page.goto("/oauth/consent?request=pending-3");
+  await page.getByRole("button", { name: "Разрешить", exact: true }).click();
+  await expect(page).toHaveURL(/claude\.ai\/api\/mcp\/auth_callback\?code=code-3/u);
+});
+
 test("token with alerts write scoped to a relay is listed with its rights and node", async ({ page }) => {
   const state = await accessFixture(page);
   await page.getByLabel("Название", { exact: true }).fill("Alert bot");

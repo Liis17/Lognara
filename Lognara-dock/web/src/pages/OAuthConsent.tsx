@@ -14,10 +14,12 @@ type ConsentDetails = { client_name: string; scope: string; resource: string };
 
 function checkedRedirect(value: string): string {
   const target = new URL(value);
-  const validPath = target.pathname === "/connector_platform_oauth_redirect"
-    || /^\/connector\/oauth\/[A-Za-z0-9_-]+$/u.test(target.pathname);
-  if (target.protocol !== "https:" || target.hostname !== "chatgpt.com" || target.port
-    || target.username || target.password || !validPath
+  const chatgpt = target.hostname === "chatgpt.com"
+    && (target.pathname === "/connector_platform_oauth_redirect"
+      || /^\/connector\/oauth\/[A-Za-z0-9_-]+$/u.test(target.pathname));
+  const claude = target.hostname === "claude.ai" && target.pathname === "/api/mcp/auth_callback";
+  if (target.protocol !== "https:" || target.port
+    || target.username || target.password || !(chatgpt || claude)
     || !target.searchParams.has("state") || !target.searchParams.has("iss")) {
     throw new Error("Некорректный адрес возврата от OAuth-сервера");
   }
