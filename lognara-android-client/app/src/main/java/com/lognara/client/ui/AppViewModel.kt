@@ -16,6 +16,7 @@ import com.lognara.client.data.decodePairPayload
 import java.io.IOException
 import java.net.SocketTimeoutException
 import java.util.concurrent.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -41,6 +42,7 @@ enum class SettingsError { Network, Server, Redirect, InvalidResponse }
 enum class LoginNotice { DeviceStillListed }
 
 class AppViewModel(private val container: AppContainer) : ViewModel() {
+    private var unauthorizedSignOut: Job? = null
     private val _session = MutableStateFlow<DeviceSession?>(null)
     val session = _session.asStateFlow()
 
@@ -60,7 +62,13 @@ class AppViewModel(private val container: AppContainer) : ViewModel() {
     val loginNotice = _loginNotice.asStateFlow()
 
     init {
+        container.api.onUnauthorized = ::handleUnauthorized
         viewModelScope.launch { restoreCredentials() }
+    }
+
+    private fun handleUnauthorized() {
+        if (_session.value == null || unauthorizedSignOut?.isActive == true) return
+        unauthorizedSignOut = viewModelScope.launch { signOut() }
     }
 
     fun retryRestoreCredentials() {
@@ -126,7 +134,7 @@ class AppViewModel(private val container: AppContainer) : ViewModel() {
                 val me = container.api.getMe(session)
                 _settings.value = SettingsUiState(username = me.username)
             } catch (_: ApiException.Unauthorized) {
-                signOut()
+                // LognaraApi handles every authenticated 401 through handleUnauthorized.
             } catch (_: ApiException.InvalidResponse) {
                 _settings.value = SettingsUiState(error = SettingsError.InvalidResponse)
             } catch (_: ApiException.Redirect) {
@@ -150,7 +158,8 @@ class AppViewModel(private val container: AppContainer) : ViewModel() {
             try {
                 container.api.disconnect(session)
             } catch (_: ApiException.Unauthorized) {
-                // The token is already invalid, so no live device remains under this credential.
+                handleUnauthorized()
+                return@launch
             } catch (_: ApiException.Redirect) {
                 _settings.value = SettingsUiState(error = SettingsError.Redirect)
                 return@launch

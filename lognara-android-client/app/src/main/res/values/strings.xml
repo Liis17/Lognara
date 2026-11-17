@@ -40,6 +40,13 @@
     <string name="tab_infrastructure">Инфра</string>
     <string name="tab_metrics">Метрики</string>
     <string name="section_placeholder">Раздел появится в следующей версии.</string>
+    <string name="data_loading">Загружаем данные…</string>
+    <string name="data_load_error">Не удалось загрузить данные. Проверьте подключение и повторите запрос.</string>
+    <string name="data_empty">Нет данных за выбранный период.</string>
+    <string name="range_15m">15 мин</string>
+    <string name="range_1h">1 ч</string>
+    <string name="range_24h">24 ч</string>
+    <string name="range_7d">7 д</string>
     <string name="settings_title">Настройки</string>
     <string name="settings_server">Сервер</string>
     <string name="settings_username">Пользователь</string>

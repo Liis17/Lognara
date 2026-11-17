@@ -2,17 +2,24 @@ package com.lognara.client.data
 
 import java.io.IOException
 import java.net.SocketTimeoutException
+import java.nio.charset.StandardCharsets
 import java.util.concurrent.TimeUnit
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.serialization.SerializationException
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.json.JsonElement
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 class LognaraApi(
-    private val client: OkHttpClient = OkHttpClient.Builder()
+    client: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(40, TimeUnit.SECONDS)
         .followRedirects(false)
@@ -20,17 +27,22 @@ class LognaraApi(
         .cache(null)
         .build(),
 ) {
-    suspend fun pair(payload: PairPayload, deviceName: String): PairResult = withContext(Dispatchers.IO) {
+    private val client = client.newBuilder().followRedirects(false).followSslRedirects(false).cache(null).build()
+    @Volatile
+    var onUnauthorized: (() -> Unit)? = null
+
+    suspend fun pair(payload: PairPayload, deviceName: String): PairResult {
         val jsonBody = apiJson.encodeToString(PairRequest(payload.code, deviceName))
-        try {
+        return try {
             val request = Request.Builder()
                 .url("${payload.url}/api/devices/pair")
                 .header("Cache-Control", "no-store")
                 .post(jsonBody.toRequestBody(JSON_MEDIA_TYPE))
                 .build()
-            client.newCall(request).execute().use { response ->
-                parsePairResponse(response.code, readBody(response))
-            }
+            val response = execute(request, AUTH_RESPONSE_BODY_BYTES)
+            parsePairResponse(response.status, response.body)
+        } catch (_: ApiException.TooLarge) {
+            PairResult.Failure(PairError.InvalidResponse)
         } catch (_: SocketTimeoutException) {
             PairResult.Failure(PairError.Timeout)
         } catch (_: IllegalArgumentException) {
@@ -40,37 +52,74 @@ class LognaraApi(
         }
     }
 
-    suspend fun getMe(session: DeviceSession): MeResponse = withContext(Dispatchers.IO) {
-        val request = authenticatedRequest(session, "/api/me").get().build()
-        client.newCall(request).execute().use { response ->
-            if (response.code in 300..399) throw ApiException.Redirect
-            if (response.code == 401) throw ApiException.Unauthorized
-            val body = readBody(response)
-            if (!response.isSuccessful) throw ApiException.Server(response.code, decodeError(body))
-            try {
-                apiJson.decodeFromString<MeResponse>(body)
-            } catch (_: Exception) {
-                throw ApiException.InvalidResponse
-            }
+    suspend fun getMe(session: DeviceSession): MeResponse {
+        val body = authenticatedResponse(session, "GET", DeviceApiRoutes.ME, maxResponseBytes = AUTH_RESPONSE_BODY_BYTES).body
+        return decodeJson(body)
+    }
+
+    suspend fun disconnect(session: DeviceSession) {
+        val response = authenticatedResponse(session, "DELETE", DeviceApiRoutes.DISCONNECT, maxResponseBytes = AUTH_RESPONSE_BODY_BYTES)
+        if (response.status != 204) throw ApiException.Server(response.status, decodeError(response.body))
+    }
+
+    suspend inline fun <reified T> authenticatedJson(
+        session: DeviceSession,
+        method: String,
+        path: String,
+        body: JsonElement? = null,
+    ): T {
+        val responseBody = authenticated(session, method, path, body)
+        return try {
+            apiJson.decodeFromString<T>(responseBody)
+        } catch (_: SerializationException) {
+            throw ApiException.InvalidResponse
+        } catch (_: IllegalArgumentException) {
+            throw ApiException.InvalidResponse
         }
     }
 
-    suspend fun disconnect(session: DeviceSession) = withContext(Dispatchers.IO) {
-        val request = authenticatedRequest(session, "/api/devices/current").delete().build()
-        client.newCall(request).execute().use { response ->
-            if (response.code in 300..399) throw ApiException.Redirect
-            if (response.code == 401) throw ApiException.Unauthorized
-            if (response.code != 204) {
-                throw ApiException.Server(response.code, decodeError(readBody(response)))
-            }
+    suspend fun authenticated(
+        session: DeviceSession,
+        method: String,
+        path: String,
+        body: JsonElement? = null,
+    ): String = authenticatedResponse(session, method, path, body).body
+
+    private suspend fun authenticatedResponse(
+        session: DeviceSession,
+        method: String,
+        path: String,
+        body: JsonElement? = null,
+        maxResponseBytes: Int = DATA_RESPONSE_BODY_BYTES,
+    ): ApiHttpResponse {
+        val request = authenticatedRequest(session, method, path, body)
+        val response = execute(request, maxResponseBytes, skipRedirectAndUnauthorizedBodies = true)
+        if (response.status in 300..399) throw ApiException.Redirect
+        if (response.status == 401) {
+            onUnauthorized?.invoke()
+            throw ApiException.Unauthorized
         }
+        if (response.status !in 200..299) throw ApiException.Server(response.status, decodeError(response.body))
+        return response
     }
 
-    private fun authenticatedRequest(session: DeviceSession, path: String): Request.Builder =
-        Request.Builder()
+    private fun authenticatedRequest(
+        session: DeviceSession,
+        method: String,
+        path: String,
+        body: JsonElement? = null,
+    ): Request {
+        val builder = Request.Builder()
             .url("${session.serverUrl}$path")
             .header("Cache-Control", "no-store")
             .header("Authorization", "Bearer ${session.token}")
+        return when (method) {
+            "GET" -> builder.get().build()
+            "POST" -> builder.post((body?.toString() ?: "").toRequestBody(JSON_MEDIA_TYPE)).build()
+            "DELETE" -> builder.delete().build()
+            else -> throw IllegalArgumentException("Unsupported device API method")
+        }
+    }
 
     private fun decodeError(body: String): String = try {
         apiJson.decodeFromString<ApiErrorBody>(body).error
@@ -78,11 +127,56 @@ class LognaraApi(
         ""
     }
 
-    private fun readBody(response: Response): String = response.peekBody(MAX_RESPONSE_BODY_BYTES).string()
+    private inline fun <reified T> decodeJson(body: String): T = try {
+        apiJson.decodeFromString<T>(body)
+    } catch (_: SerializationException) {
+        throw ApiException.InvalidResponse
+    } catch (_: IllegalArgumentException) {
+        throw ApiException.InvalidResponse
+    }
+
+    private fun readBody(response: Response, maxBytes: Int): String {
+        val bytes = response.body.byteStream().readNBytes(maxBytes + 1)
+        if (bytes.size > maxBytes) throw ApiException.TooLarge
+        return String(bytes, StandardCharsets.UTF_8)
+    }
+
+    private suspend fun execute(
+        request: Request,
+        maxResponseBytes: Int,
+        skipRedirectAndUnauthorizedBodies: Boolean = false,
+    ): ApiHttpResponse = suspendCancellableCoroutine { continuation ->
+        val call = client.newCall(request)
+        continuation.invokeOnCancellation { call.cancel() }
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                if (continuation.isActive) continuation.resumeWithException(e)
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                try {
+                    val result = response.use {
+                        val body = if (skipRedirectAndUnauthorizedBodies && (it.code == 401 || it.code in 300..399)) {
+                            ""
+                        } else {
+                            readBody(it, maxResponseBytes)
+                        }
+                        ApiHttpResponse(it.code, body)
+                    }
+                    if (continuation.isActive) continuation.resume(result)
+                } catch (exception: IOException) {
+                    if (continuation.isActive) continuation.resumeWithException(exception)
+                }
+            }
+        })
+    }
+
+    private data class ApiHttpResponse(val status: Int, val body: String)
 
     private companion object {
         val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
-        const val MAX_RESPONSE_BODY_BYTES = 1024L * 1024L
+        const val AUTH_RESPONSE_BODY_BYTES = 1024 * 1024
+        const val DATA_RESPONSE_BODY_BYTES = 4 * 1024 * 1024
     }
 }
 
@@ -90,5 +184,6 @@ sealed class ApiException : IOException() {
     data object Unauthorized : ApiException()
     data object InvalidResponse : ApiException()
     data object Redirect : ApiException()
+    data object TooLarge : ApiException()
     data class Server(val status: Int, val code: String) : ApiException()
 }
