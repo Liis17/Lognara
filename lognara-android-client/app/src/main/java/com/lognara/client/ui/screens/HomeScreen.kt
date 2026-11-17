@@ -37,6 +37,7 @@ import com.lognara.client.data.LogEvent
 import com.lognara.client.data.Issue
 import com.lognara.client.data.LognaraApi
 import com.lognara.client.ui.screens.data.DataRange
+import com.lognara.client.ui.screens.infra.InfrastructureScreen
 import com.lognara.client.ui.screens.issues.IssuesScreen
 import com.lognara.client.ui.screens.logs.LogsScreen
 import com.lognara.client.ui.screens.live.LiveScreen
@@ -113,6 +114,8 @@ fun HomeScreen(
                 LiveScreen(api, session, onOpenEvent)
             } else if (selectedTab == 2) {
                 IssuesScreen(api, session, issuesRefreshKey, onOpenIssue, onIssueStatusChanged)
+            } else if (selectedTab == 3) {
+                InfrastructureScreen(api, session)
             } else {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Text(
