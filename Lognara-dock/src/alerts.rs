@@ -2700,8 +2700,112 @@ pub(crate) fn render_telegram_message(
 
 pub async fn preview_message(
     State(app): State<AppState>,
+    _user: crate::session::AuthUser,
     Json(input): Json<MessagePreviewInput>,
 ) -> Result<Json<Value>, ApiError> {
+    let rendered = render_preview_message(&app, &input)?;
+    Ok(Json(
+        json!({"html": rendered.text, "button": rendered.reply_markup.is_some()}),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TestMessageInput {
+    pub message: MessagePreviewInput,
+    pub group_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TestMessageFailure {
+    pub recipient: String,
+    pub error: &'static str,
+}
+
+/// Тестовое сообщение алерта: тот же рендер, что и предпросмотр, отправленный сразу
+/// получателям выбранных групп, без очереди доставки и без изменения состояния алерта.
+pub async fn send_test_message(
+    State(app): State<AppState>,
+    _user: crate::session::AuthUser,
+    Json(input): Json<TestMessageInput>,
+) -> Result<Json<Value>, ApiError> {
+    if input.group_ids.is_empty() || input.group_ids.len() > 100 {
+        return Err(ApiError::BadRequest("no_recipients"));
+    }
+    let rendered = render_preview_message(&app, &input.message)?;
+    let token = app
+        .store
+        .alert_token()
+        .await?
+        .ok_or(ApiError::BadRequest("bot_token_required"))?;
+    let settings = app.store.alert_settings().await?;
+    let mut recipients: Vec<&Recipient> = Vec::new();
+    for group in settings
+        .groups
+        .iter()
+        .filter(|group| input.group_ids.contains(&group.id))
+    {
+        for id in &group.recipient_ids {
+            if let Some(recipient) = settings.recipients.iter().find(|item| &item.id == id)
+                && !recipients
+                    .iter()
+                    .any(|item| item.chat_id == recipient.chat_id)
+            {
+                recipients.push(recipient);
+            }
+        }
+    }
+    if recipients.is_empty() {
+        return Err(ApiError::BadRequest("no_recipients"));
+    }
+    let text = if rendered.parse_mode.as_deref() == Some("HTML") {
+        format!(
+            "🧪 <b>Тестовое сообщение</b>
+{}",
+            rendered.text
+        )
+    } else {
+        format!(
+            "🧪 Тестовое сообщение
+{}",
+            rendered.text
+        )
+    };
+    let mut sent = 0_u32;
+    let mut failed = Vec::new();
+    for recipient in recipients {
+        match app
+            .telegram
+            .send(
+                &token,
+                recipient.chat_id,
+                &text,
+                rendered.parse_mode.as_deref(),
+                rendered.reply_markup.as_deref(),
+            )
+            .await
+        {
+            Ok(()) => sent += 1,
+            Err(TelegramFailure::InvalidToken) => {
+                return Err(ApiError::BadRequest("invalid_bot_token"));
+            }
+            Err(failure) => failed.push(TestMessageFailure {
+                recipient: recipient.name.clone(),
+                error: match failure {
+                    TelegramFailure::PermanentRecipient => "recipient_unavailable",
+                    TelegramFailure::RateLimited(_) => "telegram_rate_limited",
+                    _ => "telegram_unavailable",
+                },
+            }),
+        }
+    }
+    Ok(Json(json!({"sent": sent, "failed": failed})))
+}
+
+fn render_preview_message(
+    app: &AppState,
+    input: &MessagePreviewInput,
+) -> Result<RenderedTelegramMessage, ApiError> {
     let allowed = match input.kind.as_str() {
         "metric" => METRIC_MESSAGE_FIELDS,
         "logs" => METRIC_MESSAGE_FIELDS,
@@ -2894,9 +2998,7 @@ pub async fn preview_message(
         ],
         &link,
     );
-    Ok(Json(
-        json!({"html": rendered.text, "button": rendered.reply_markup.is_some()}),
-    ))
+    Ok(rendered)
 }
 
 fn window_text(seconds: u64) -> String {
@@ -4962,6 +5064,120 @@ mod tests {
         let settings = app.store.alert_settings().await.unwrap();
         assert!(!settings.send_paused);
         assert_eq!(settings.send_pause_reason, None);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_message_requires_session_and_reaches_each_group_chat_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = test_app(directory.path(), "http://127.0.0.1:1/");
+        let mock = MockTelegram::default();
+        mock.replies.lock().unwrap().extend([
+            (StatusCode::OK, json!({"ok":true})),
+            (
+                StatusCode::FORBIDDEN,
+                json!({"ok":false,"error_code":403,"description":"Forbidden: bot was blocked by the user"}),
+            ),
+        ]);
+        let server = install_mock_telegram(&mut app, mock.clone()).await;
+        let session = app.sessions.create("admin").await.unwrap();
+        let body = json!({
+            "message": {"kind":"metric","name":"requests","service":"billing","message_fields":["name","service"]},
+            "group_ids": [],
+        });
+
+        let (status, _) = api_request(
+            app.clone(),
+            None,
+            Some("http://localhost"),
+            "POST",
+            "/api/alerts/test",
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, _) = api_request(
+            app.clone(),
+            None,
+            Some("http://localhost"),
+            "POST",
+            "/api/alerts/preview",
+            Some(body["message"].clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        let mut recipients = Vec::new();
+        for (name, chat_id) in [("on-call", 1001), ("blocked", 1002)] {
+            recipients.push(
+                app.store
+                    .create_recipient(RecipientInput {
+                        kind: "personal".into(),
+                        name: name.into(),
+                        chat_id,
+                    })
+                    .await
+                    .unwrap()
+                    .id,
+            );
+        }
+        let mut group_ids = Vec::new();
+        for name in ["first", "second"] {
+            let group = app
+                .store
+                .save_group(
+                    None,
+                    GroupInput {
+                        kind: "personal".into(),
+                        name: name.into(),
+                        recipient_ids: recipients.clone(),
+                    },
+                )
+                .await
+                .unwrap();
+            group_ids.push(group.id);
+        }
+        let mut body = body;
+        body["group_ids"] = json!(group_ids);
+
+        let (status, response) = api_request(
+            app.clone(),
+            Some(&session),
+            Some("http://localhost"),
+            "POST",
+            "/api/alerts/test",
+            Some(body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(response["error"], "bot_token_required");
+
+        app.store.set_alert_token(BOT_TOKEN.into()).await.unwrap();
+        let (status, response) = api_request(
+            app.clone(),
+            Some(&session),
+            Some("http://localhost"),
+            "POST",
+            "/api/alerts/test",
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["sent"], 1);
+        assert_eq!(response["failed"][0]["recipient"], "blocked");
+        assert_eq!(response["failed"][0]["error"], "recipient_unavailable");
+        let requests = mock.requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].1["chat_id"], 1001);
+        assert_eq!(requests[1].1["chat_id"], 1002);
+        assert!(
+            requests[0].1["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("🧪 <b>Тестовое сообщение</b>")
+        );
+        let settings = app.store.alert_settings().await.unwrap();
+        assert_eq!(settings.pending_deliveries, 0);
         server.abort();
     }
 

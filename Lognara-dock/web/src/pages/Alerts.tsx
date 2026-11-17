@@ -6,6 +6,8 @@ import {
   errorText,
   nodeScopeLabel,
   type AlertMessagePreviewReply,
+  alertTestText,
+  type AlertTestReply,
   type LogAlert,
   type LogAlertInput,
   type LogAlertList,
@@ -224,6 +226,7 @@ export default function Alerts({ onUnauthorized }: { onUnauthorized: () => void 
   const [logMessageFields, setLogMessageFields] = useState<string[]>([...logFields]);
   const [logPreview, setLogPreview] = useState("");
   const [messagePreview, setMessagePreview] = useState<AlertMessagePreviewReply | null>(null);
+  const [logTestStatus, setLogTestStatus] = useState("");
   const tab = (params.get("tab") ?? "rules") as Tab;
 
   const fail = (cause: unknown) => {
@@ -273,6 +276,7 @@ export default function Alerts({ onUnauthorized }: { onUnauthorized: () => void 
     setSelectedMetric(null);
     setEditingLog(null);
     setMessagePreview(null);
+    setLogTestStatus("");
     setLogNodeFilters({ relay_id: "", agent_id: "" });
     setParams((current) => {
       const result = new URLSearchParams(current);
@@ -372,25 +376,38 @@ export default function Alerts({ onUnauthorized }: { onUnauthorized: () => void 
       setBusy(false);
     }
   };
+  const logPreviewBody = () => ({
+    kind: "logs",
+    name: logForm.name || "Новый алерт",
+    title: logForm.name || "Новый алерт",
+    query: logForm.query,
+    condition: `не меньше ${logForm.threshold} совпадений за проверку`,
+    value: String(logForm.threshold),
+    count: logForm.threshold,
+    time: new Date().toISOString(),
+    status: "firing",
+    message_template: logTemplate,
+    message_fields: logMessageFields,
+  });
   const previewLogMessage = async () => {
     setError("");
     try {
-      const reply = await api<AlertMessagePreviewReply>("POST", "/api/alerts/preview", {
-        kind: "logs",
-        name: logForm.name || "Новый алерт",
-        title: logForm.name || "Новый алерт",
-        query: logForm.query,
-        condition: `не меньше ${logForm.threshold} совпадений за проверку`,
-        value: String(logForm.threshold),
-        count: logForm.threshold,
-        time: new Date().toISOString(),
-        status: "firing",
-        message_template: logTemplate,
-        message_fields: logMessageFields,
-      });
-      setMessagePreview(reply);
+      setMessagePreview(await api<AlertMessagePreviewReply>("POST", "/api/alerts/preview", logPreviewBody()));
     } catch (cause) {
       fail(cause);
+    }
+  };
+  const sendLogTest = async () => {
+    setError("");
+    setLogTestStatus("");
+    setBusy(true);
+    try {
+      const reply = await api<AlertTestReply>("POST", "/api/alerts/test", { message: logPreviewBody(), group_ids: logForm.groupIds });
+      setLogTestStatus(alertTestText(reply));
+    } catch (cause) {
+      fail(cause);
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -599,7 +616,10 @@ export default function Alerts({ onUnauthorized }: { onUnauthorized: () => void 
         <div className="toolbar">
           <button type="button" disabled={busy} onClick={() => void checkLog()}>Проверить за час</button>
           <button type="button" disabled={busy} onClick={() => void previewLogMessage()}>Предпросмотр Telegram</button>
+          <button type="button" disabled={busy || !logForm.groupIds.length} onClick={() => void sendLogTest()}
+            title={logForm.groupIds.length ? undefined : "Выберите группу получателей"}>Отправить тест в Telegram</button>
         </div>
+        {logTestStatus && <p className="muted" role="status">{logTestStatus}</p>}
         {logPreview && <pre className="log-alert-preview" aria-label="Предпросмотр">{logPreview}</pre>}
         {messagePreview && <div className="telegram-preview" aria-label="Предпросмотр сообщения Telegram"><div dangerouslySetInnerHTML={{ __html: messagePreview.html }} />{messagePreview.button && <span className="telegram-preview-button">Открыть в Dock</span>}</div>}
         <div className="toolbar">

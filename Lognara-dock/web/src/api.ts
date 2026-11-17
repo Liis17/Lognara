@@ -283,6 +283,25 @@ export interface AlertMessagePreviewReply {
   button: boolean;
 }
 
+export interface AlertTestReply {
+  sent: number;
+  failed: { recipient: string; error: string }[];
+}
+
+const testFailureText: Record<string, string> = {
+  recipient_unavailable: "чат недоступен или бот заблокирован",
+  telegram_rate_limited: "Telegram просит подождать",
+  telegram_unavailable: "Telegram не ответил",
+};
+
+/** Итог тестовой отправки для строки статуса редактора алерта. */
+export function alertTestText(reply: AlertTestReply): string {
+  const sent = `Тестовое сообщение отправлено в чатов: ${reply.sent}.`;
+  if (!reply.failed.length) return sent;
+  const failed = reply.failed.map((item) => `${item.recipient} (${testFailureText[item.error] ?? item.error})`).join(", ");
+  return `${sent} Не доставлено: ${failed}.`;
+}
+
 export interface LogAlertList {
   alerts: LogAlert[];
   core_status: "unknown" | "available" | "busy" | "incompatible" | "unavailable";
@@ -336,6 +355,7 @@ const messages: Record<string, string> = {
   group_in_use: "Сначала отсоедините группу от алертов",
   group_not_found: "Группа не найдена",
   recipient_not_found: "Получатель не найден",
+  no_recipients: "Выберите группу, в которой есть получатели",
 };
 
 export function errorText(error: unknown): string {

@@ -229,7 +229,8 @@ for (const origin of ["counter", "rule"] as const) {
     await page.goto(`/metrics/detail?server=server-a&service=billing&name=requests&origin=${origin}`);
     const plot = page.locator(".line-chart-plot .u-over");
     await expect(plot).toBeVisible();
-    await plot.scrollIntoViewIfNeeded();
+    // График может пересоздаться после второй загрузки данных; ждём стабильный узел.
+    await expect(async () => plot.scrollIntoViewIfNeeded({ timeout: 1000 })).toPass();
     const box = (await plot.boundingBox())!;
     await page.mouse.move(box.x + 110, box.y + 120);
     await page.mouse.down();

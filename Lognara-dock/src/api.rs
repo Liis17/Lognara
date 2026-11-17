@@ -291,6 +291,7 @@ pub fn router(app: AppState) -> Router {
         .route("/series/preview", post(series::preview))
         .route("/alerts", get(alerts::settings))
         .route("/alerts/preview", post(alerts::preview_message))
+        .route("/alerts/test", post(alerts::send_test_message))
         .route("/alerts/summary", get(alerts::summary))
         .route(
             "/alerts/definition",

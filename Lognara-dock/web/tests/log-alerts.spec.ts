@@ -39,6 +39,10 @@ async function fixture(page: Page) {
         last_checked_at: null, last_sent_at: null, ...body });
       return route.fulfill({ status: 201, json: { id: "a1" } });
     }
+    if (path === "/api/alerts/test") {
+      state.writes.push({ method, path, body: request.postDataJSON() });
+      return route.fulfill({ json: { sent: 1, failed: [{ recipient: "bob", error: "recipient_unavailable" }] } });
+    }
     if (path.startsWith("/api/log-alerts/") && method === "PUT") {
       const body = request.postDataJSON();
       state.writes.push({ method, path, body });
@@ -118,4 +122,19 @@ test("renames a log alert from its tile and keeps the rest of the rule", async (
     name: "sudo на хосте", enabled: true, query: "service:host", filters: { service: ["host"] }, threshold: 1,
     cooldown_seconds: 300, group_ids: ["g1"], message_template: "", message_fields: ["name"],
   } }]);
+});
+
+test("sends a test log alert to the selected groups", async ({ page }) => {
+  const state = await fixture(page);
+  await page.goto(`/log-alerts?${new URLSearchParams({ q: "service:host" })}`);
+  await page.getByRole("textbox", { name: "Имя" }).fill("sudo");
+  const send = page.getByRole("button", { name: "Отправить тест в Telegram" });
+  await expect(send).toBeDisabled();
+  await page.getByLabel("Дежурные").check();
+  await send.click();
+  await expect(page.getByRole("status").filter({ hasText: "Тестовое сообщение" }))
+    .toHaveText("Тестовое сообщение отправлено в чатов: 1. Не доставлено: bob (чат недоступен или бот заблокирован).");
+  const write = state.writes.find((item) => item.path === "/api/alerts/test");
+  expect(write?.body).toMatchObject({ group_ids: ["g1"], message: { kind: "logs", name: "sudo", query: "service:host" } });
+  expect(state.alerts).toHaveLength(0);
 });
