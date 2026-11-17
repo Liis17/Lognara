@@ -1,10 +1,12 @@
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, type ReactNode, useEffect, useState } from "react";
 import {
   api,
   ApiError,
   errorText,
   nodeScopeLabel,
   type AlertMessagePreviewReply,
+  alertTestText,
+  type AlertTestReply,
   type AlertAggregate,
   type MetricAlertDefinition,
   type MetricAlertDefinitionInput,
@@ -62,7 +64,7 @@ function initialDraft(key: MetricAlertKey, metric: SeriesMetric | null): MetricA
   };
 }
 
-function definitionDraft(alert: MetricAlertDefinition): MetricAlertDefinitionInput {
+export function definitionDraft(alert: MetricAlertDefinition): MetricAlertDefinitionInput {
   return {
     key: alert.key,
     enabled: alert.enabled,
@@ -95,7 +97,9 @@ export default function MetricAlertEditor({
   onUnauthorized,
   onDone,
   onCancel,
+  picker,
 }: {
+  picker?: ReactNode;
   keyValue: MetricAlertKey;
   metric: SeriesMetric | null;
   onUnauthorized: () => void;
@@ -206,34 +210,51 @@ export default function MetricAlertEditor({
     }));
   };
 
+  const previewBody = () => {
+    const conditions = draft.triggers.map((trigger) => {
+      const window = windowParts(trigger.window_seconds);
+      const units: Record<WindowUnit, string> = { sec: "сек", min: "мин", hour: "ч", day: "дн" };
+      return `${aggregateLabels[trigger.aggregate]} за ${window.amount} ${units[window.unit]} ${trigger.comparator} ${trigger.threshold}`;
+    });
+    return {
+      kind: "metric",
+      name: keyValue.name,
+      title: draft.title ?? metric?.definition?.title ?? keyValue.name,
+      description: draft.description ?? metric?.definition?.description ?? "",
+      server: keyValue.server,
+      service: keyValue.service,
+      origin: keyValue.origin,
+      environment: draft.environment,
+      condition: `${draft.combine === "and" ? "Все условия" : "Любое условие"}: ${conditions.join("; ")}`,
+      value: "5",
+      time: new Date().toISOString(),
+      last_point: metric?.last_seen ?? "нет данных",
+      status: "firing",
+      message_template: draft.message_template,
+      message_fields: fieldList(draft.message_fields),
+    };
+  };
+
   const previewMessage = async () => {
     setError("");
     try {
-      const conditions = draft.triggers.map((trigger) => {
-        const window = windowParts(trigger.window_seconds);
-        const units: Record<WindowUnit, string> = { sec: "сек", min: "мин", hour: "ч", day: "дн" };
-        return `${aggregateLabels[trigger.aggregate]} за ${window.amount} ${units[window.unit]} ${trigger.comparator} ${trigger.threshold}`;
-      });
-      const reply = await api<AlertMessagePreviewReply>("POST", "/api/alerts/preview", {
-        kind: "metric",
-        name: keyValue.name,
-        title: draft.title ?? metric?.definition?.title ?? keyValue.name,
-        description: draft.description ?? metric?.definition?.description ?? "",
-        server: keyValue.server,
-        service: keyValue.service,
-        origin: keyValue.origin,
-        environment: draft.environment,
-        condition: `${draft.combine === "and" ? "Все условия" : "Любое условие"}: ${conditions.join("; ")}`,
-        value: "5",
-        time: new Date().toISOString(),
-        last_point: metric?.last_seen ?? "нет данных",
-        status: "firing",
-        message_template: draft.message_template,
-        message_fields: fieldList(draft.message_fields),
-      });
-      setPreview(reply);
+      setPreview(await api<AlertMessagePreviewReply>("POST", "/api/alerts/preview", previewBody()));
     } catch (cause) {
       fail(cause);
+    }
+  };
+
+  const sendTest = async () => {
+    setError("");
+    setMessage("");
+    setBusy(true);
+    try {
+      const reply = await api<AlertTestReply>("POST", "/api/alerts/test", { message: previewBody(), group_ids: draft.group_ids });
+      setMessage(alertTestText(reply));
+    } catch (cause) {
+      fail(cause);
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -272,6 +293,7 @@ export default function MetricAlertEditor({
         </div>
         {alert && <span className={`tag alert-state-${alert.state}`}>{alert.state}</span>}
       </div>
+      {picker}
       {!ready ? (
         <p className="muted">Загрузка настроек алерта…</p>
       ) : (
@@ -462,6 +484,8 @@ export default function MetricAlertEditor({
           </fieldset>
           <div className="toolbar">
             <button type="button" disabled={busy} onClick={previewMessage}>Предпросмотр Telegram</button>
+            <button type="button" disabled={busy || !draft.group_ids.length} onClick={() => void sendTest()}
+              title={draft.group_ids.length ? undefined : "Выберите группу получателей"}>Отправить тест в Telegram</button>
           </div>
           {preview && <div className="telegram-preview" aria-label="Предпросмотр Telegram">
             <div dangerouslySetInnerHTML={{ __html: preview.html }} />

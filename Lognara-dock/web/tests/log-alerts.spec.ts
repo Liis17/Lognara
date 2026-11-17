@@ -39,6 +39,17 @@ async function fixture(page: Page) {
         last_checked_at: null, last_sent_at: null, ...body });
       return route.fulfill({ status: 201, json: { id: "a1" } });
     }
+    if (path === "/api/alerts/test") {
+      state.writes.push({ method, path, body: request.postDataJSON() });
+      return route.fulfill({ json: { sent: 1, failed: [{ recipient: "bob", error: "recipient_unavailable" }] } });
+    }
+    if (path.startsWith("/api/log-alerts/") && method === "PUT") {
+      const body = request.postDataJSON();
+      state.writes.push({ method, path, body });
+      const index = state.alerts.findIndex((alert) => `/api/log-alerts/${alert.id}` === path);
+      state.alerts[index] = { ...state.alerts[index], ...body };
+      return route.fulfill({ status: 204 });
+    }
     return route.fulfill({ status: 404, json: { error: "not_found" } });
   });
   return state;
@@ -92,4 +103,38 @@ test("single-event fields are rejected before saving", async ({ page }) => {
   await page.getByRole("button", { name: "Создать алерт" }).click();
   await expect(page.getByText("Поле trace_id нельзя использовать в алерте")).toBeVisible();
   expect(state.writes.some((write) => write.path === "/api/log-alerts")).toBe(false);
+});
+
+test("renames a log alert from its tile and keeps the rest of the rule", async ({ page }) => {
+  const state = await fixture(page);
+  state.alerts.push({ id: "a1", revision: 1, no_recipients: false, last_count: 0, last_match_at: null,
+    last_checked_at: null, last_sent_at: null, name: "sudo", enabled: true, query: "service:host",
+    filters: { service: ["host"] }, threshold: 1, cooldown_seconds: 300, group_ids: ["g1"],
+    message_template: "", message_fields: ["name"] });
+  await page.goto("/alerts");
+  const tile = page.locator(".alert-rule-row");
+  await tile.hover();
+  await tile.getByRole("button", { name: "Переименовать" }).click();
+  await tile.getByLabel("Публичное имя алерта").fill("sudo на хосте");
+  await tile.getByRole("button", { name: "Сохранить" }).click();
+  await expect(tile.getByText("sudo на хосте", { exact: true })).toBeVisible();
+  expect(state.writes).toEqual([{ method: "PUT", path: "/api/log-alerts/a1", body: {
+    name: "sudo на хосте", enabled: true, query: "service:host", filters: { service: ["host"] }, threshold: 1,
+    cooldown_seconds: 300, group_ids: ["g1"], message_template: "", message_fields: ["name"],
+  } }]);
+});
+
+test("sends a test log alert to the selected groups", async ({ page }) => {
+  const state = await fixture(page);
+  await page.goto(`/log-alerts?${new URLSearchParams({ q: "service:host" })}`);
+  await page.getByRole("textbox", { name: "Имя" }).fill("sudo");
+  const send = page.getByRole("button", { name: "Отправить тест в Telegram" });
+  await expect(send).toBeDisabled();
+  await page.getByLabel("Дежурные").check();
+  await send.click();
+  await expect(page.getByRole("status").filter({ hasText: "Тестовое сообщение" }))
+    .toHaveText("Тестовое сообщение отправлено в чатов: 1. Не доставлено: bob (чат недоступен или бот заблокирован).");
+  const write = state.writes.find((item) => item.path === "/api/alerts/test");
+  expect(write?.body).toMatchObject({ group_ids: ["g1"], message: { kind: "logs", name: "sudo", query: "service:host" } });
+  expect(state.alerts).toHaveLength(0);
 });

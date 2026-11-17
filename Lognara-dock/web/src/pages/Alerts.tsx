@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { Link, useSearchParams } from "react-router";
 import {
   api,
@@ -6,6 +6,8 @@ import {
   errorText,
   nodeScopeLabel,
   type AlertMessagePreviewReply,
+  alertTestText,
+  type AlertTestReply,
   type LogAlert,
   type LogAlertInput,
   type LogAlertList,
@@ -15,10 +17,23 @@ import {
 } from "../api";
 import type { SummaryResponse } from "../types";
 import { type LogAlertForm, logAlertInput } from "../logs";
-import MetricAlertEditor from "./MetricAlertEditor";
+import MetricAlertEditor, { definitionDraft } from "./MetricAlertEditor";
 import MetricAlertSettingsPage from "./MetricAlertSettings";
 
 type Tab = "rules" | "recipients" | "telegram";
+
+const iconPaths: Record<"rename" | "edit" | "power" | "delete", ReactNode> = {
+  rename: <><path d="M4 20h4L19 9l-4-4L4 16v4Z" /><path d="M13 7l4 4" /></>,
+  edit: <><path d="M4 7h10M18 7h2M4 17h4M12 17h8" /><circle cx="16" cy="7" r="2" /><circle cx="10" cy="17" r="2" /></>,
+  power: <><path d="M12 3v8" /><path d="M6.4 6.6a8 8 0 1 0 11.2 0" /></>,
+  delete: <><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13" /></>,
+};
+
+function IconButton({ icon, label, disabled, onClick }: { icon: keyof typeof iconPaths; label: string; disabled: boolean; onClick: () => void }) {
+  return <button type="button" className="icon-button" aria-label={label} title={label} disabled={disabled} onClick={onClick}>
+    <svg viewBox="0 0 24 24" aria-hidden="true">{iconPaths[icon]}</svg>
+  </button>;
+}
 type RuleType = "metric" | "logs";
 type RuleStatus = "ok" | "firing" | "disabled" | "no-recipients" | "no-data";
 
@@ -194,6 +209,7 @@ export default function Alerts({ onUnauthorized }: { onUnauthorized: () => void 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [renaming, setRenaming] = useState<{ id: string; value: string } | null>(null);
   const [search, setSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState(params.get("type") ?? "all");
   const [statusFilter, setStatusFilter] = useState("all");
@@ -210,6 +226,7 @@ export default function Alerts({ onUnauthorized }: { onUnauthorized: () => void 
   const [logMessageFields, setLogMessageFields] = useState<string[]>([...logFields]);
   const [logPreview, setLogPreview] = useState("");
   const [messagePreview, setMessagePreview] = useState<AlertMessagePreviewReply | null>(null);
+  const [logTestStatus, setLogTestStatus] = useState("");
   const tab = (params.get("tab") ?? "rules") as Tab;
 
   const fail = (cause: unknown) => {
@@ -259,6 +276,7 @@ export default function Alerts({ onUnauthorized }: { onUnauthorized: () => void 
     setSelectedMetric(null);
     setEditingLog(null);
     setMessagePreview(null);
+    setLogTestStatus("");
     setLogNodeFilters({ relay_id: "", agent_id: "" });
     setParams((current) => {
       const result = new URLSearchParams(current);
@@ -358,25 +376,38 @@ export default function Alerts({ onUnauthorized }: { onUnauthorized: () => void 
       setBusy(false);
     }
   };
+  const logPreviewBody = () => ({
+    kind: "logs",
+    name: logForm.name || "Новый алерт",
+    title: logForm.name || "Новый алерт",
+    query: logForm.query,
+    condition: `не меньше ${logForm.threshold} совпадений за проверку`,
+    value: String(logForm.threshold),
+    count: logForm.threshold,
+    time: new Date().toISOString(),
+    status: "firing",
+    message_template: logTemplate,
+    message_fields: logMessageFields,
+  });
   const previewLogMessage = async () => {
     setError("");
     try {
-      const reply = await api<AlertMessagePreviewReply>("POST", "/api/alerts/preview", {
-        kind: "logs",
-        name: logForm.name || "Новый алерт",
-        title: logForm.name || "Новый алерт",
-        query: logForm.query,
-        condition: `не меньше ${logForm.threshold} совпадений за проверку`,
-        value: String(logForm.threshold),
-        count: logForm.threshold,
-        time: new Date().toISOString(),
-        status: "firing",
-        message_template: logTemplate,
-        message_fields: logMessageFields,
-      });
-      setMessagePreview(reply);
+      setMessagePreview(await api<AlertMessagePreviewReply>("POST", "/api/alerts/preview", logPreviewBody()));
     } catch (cause) {
       fail(cause);
+    }
+  };
+  const sendLogTest = async () => {
+    setError("");
+    setLogTestStatus("");
+    setBusy(true);
+    try {
+      const reply = await api<AlertTestReply>("POST", "/api/alerts/test", { message: logPreviewBody(), group_ids: logForm.groupIds });
+      setLogTestStatus(alertTestText(reply));
+    } catch (cause) {
+      fail(cause);
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -421,6 +452,26 @@ export default function Alerts({ onUnauthorized }: { onUnauthorized: () => void 
     try {
       if (type === "metric") await api("DELETE", `/api/alerts/rules/${encodeURIComponent((alert as MetricAlertDefinition).id)}`);
       else await api("DELETE", `/api/log-alerts/${(alert as LogAlert).id}`);
+      await load();
+    } catch (cause) {
+      fail(cause);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const saveRename = async (row: { metric: MetricAlertDefinition | null; log: LogAlert | null }) => {
+    const name = renaming?.value.trim();
+    if (!name) return;
+    setBusy(true);
+    setError("");
+    try {
+      if (row.metric) await api("PUT", "/api/alerts/definition", { ...definitionDraft(row.metric), title: name });
+      else if (row.log) {
+        const { id: _id, revision: _revision, no_recipients: _noRecipients, last_count: _lastCount,
+          last_match_at: _lastMatch, last_checked_at: _lastChecked, last_sent_at: _lastSent, ...input } = row.log;
+        await api("PUT", `/api/log-alerts/${row.log.id}`, { ...input, name });
+      }
+      setRenaming(null);
       await load();
     } catch (cause) {
       fail(cause);
@@ -479,28 +530,41 @@ export default function Alerts({ onUnauthorized }: { onUnauthorized: () => void 
         </div>
       </div>
       {loading ? <p className="muted">Загрузка правил…</p> : <div className="alert-rule-list">
-        {visibleRows.map((row) => <article className="alert-rule-row" key={row.id}>
-          <div className="alert-rule-main">
-            <div className="alert-rule-title-line"><span className={`alert-type-tag alert-type-${row.type}`}>{row.type === "metric" ? "Метрика" : "Логи"}</span>
-              <strong>{row.name}</strong><span className={`alert-status-chip alert-status-${row.status}`}>{statusLabels[row.status]}</span></div>
+        {visibleRows.map((row) => {
+          const editable = row.log !== null || row.metric?.node_scope.kind === "all";
+          const isRenaming = renaming?.id === row.id;
+          return <article className="alert-rule-row" key={row.id} aria-label={`Алерт ${row.name}`}>
+            <div className="alert-rule-head">
+              <div className="alert-rule-title-line">
+                <span className={`alert-type-tag alert-type-${row.type}`}>{row.type === "metric" ? "Метрика" : "Логи"}</span>
+                {isRenaming ? <form className="alert-rename-form" onSubmit={(event) => { event.preventDefault(); void saveRename(row); }}>
+                  <input aria-label="Публичное имя алерта" autoFocus maxLength={100} value={renaming.value}
+                    onChange={(event) => setRenaming({ id: row.id, value: event.target.value })}
+                    onKeyDown={(event) => { if (event.key === "Escape") setRenaming(null); }} />
+                  <button type="submit" disabled={busy || !renaming.value.trim()}>Сохранить</button>
+                  <button type="button" className="quiet" disabled={busy} onClick={() => setRenaming(null)}>Отмена</button>
+                </form> : <strong>{row.name}</strong>}
+                <span className={`alert-status-chip alert-status-${row.status}`}>{statusLabels[row.status]}</span>
+              </div>
+              {!isRenaming && <div className="alert-rule-actions">
+                {editable && <IconButton icon="rename" label="Переименовать" disabled={busy} onClick={() => setRenaming({ id: row.id, value: row.name })} />}
+                {row.metric && editable && <IconButton icon="edit" label="Изменить" disabled={busy} onClick={() => {
+                  const match = metrics.find((metric) => sameMetric(row.metric!, metric));
+                  openMetricEditor(match ?? fallbackMetric(row.metric!.key));
+                }} />}
+                {row.log && <>
+                  <IconButton icon="edit" label="Изменить" disabled={busy} onClick={() => editLog(row.log!)} />
+                  <IconButton icon="power" label={row.log.enabled ? "Отключить" : "Включить"} disabled={busy} onClick={() => void toggleLog(row.log!)} />
+                </>}
+                {(row.log || !editable) && <IconButton icon="delete" label="Удалить" disabled={busy}
+                  onClick={() => void (row.log ? removeRule(row.log, "logs") : removeRule(row.metric!, "metric"))} />}
+              </div>}
+            </div>
             <p className="alert-rule-scope">{row.scope}</p>
-            <p className="muted alert-rule-condition">{row.condition}</p>
-            <p className="muted">Получатели: {row.groups}</p>
-            <p className="muted">{row.source}</p>
-          </div>
-          <div className="alert-rule-actions">
-            {row.metric && row.metric.node_scope.kind === "all" && <button type="button" disabled={busy} onClick={() => {
-              const match = metrics.find((metric) => sameMetric(row.metric!, metric));
-              openMetricEditor(match ?? fallbackMetric(row.metric!.key));
-            }}>Изменить</button>}
-            {row.metric && row.metric.node_scope.kind !== "all" && <button type="button" disabled={busy} onClick={() => void removeRule(row.metric!, "metric")}>Удалить</button>}
-            {row.log && <>
-              <button type="button" disabled={busy} onClick={() => editLog(row.log!)}>Изменить</button>
-              <button type="button" disabled={busy} onClick={() => void toggleLog(row.log!)}>{row.log.enabled ? "Отключить" : "Включить"}</button>
-              <button type="button" disabled={busy} onClick={() => void removeRule(row.log!, "logs")}>Удалить</button>
-            </>}
-          </div>
-        </article>)}
+            <p className="alert-rule-condition">{row.condition}</p>
+            <p className="muted alert-rule-meta"><span>Получатели: {row.groups}</span> · <span>{row.source}</span></p>
+          </article>;
+        })}
         {!visibleRows.length && <p className="muted">Подходящих алертов нет.</p>}
       </div>}
     </>}
@@ -513,8 +577,8 @@ export default function Alerts({ onUnauthorized }: { onUnauthorized: () => void 
         <MetricCombobox metrics={metrics} value={selectedMetric} onChange={setSelectedMetric} />
         <div className="toolbar"><button type="button" onClick={closeEditor}>Отмена</button></div>
       </div> : <>
-        <MetricCombobox metrics={metrics} value={selectedMetric} onChange={setSelectedMetric} />
-        <MetricAlertEditor key={metricKey(selectedMetric)} keyValue={{
+        <MetricAlertEditor key={metricKey(selectedMetric)}
+          picker={<MetricCombobox metrics={metrics} value={selectedMetric} onChange={setSelectedMetric} />} keyValue={{
           server: selectedMetric.server, service: selectedMetric.service, name: selectedMetric.name, origin: selectedMetric.origin,
         }} metric={selectedMetric} onUnauthorized={onUnauthorized} onCancel={closeEditor} onDone={() => { closeEditor(); void load(); }} />
       </>}
@@ -552,7 +616,10 @@ export default function Alerts({ onUnauthorized }: { onUnauthorized: () => void 
         <div className="toolbar">
           <button type="button" disabled={busy} onClick={() => void checkLog()}>Проверить за час</button>
           <button type="button" disabled={busy} onClick={() => void previewLogMessage()}>Предпросмотр Telegram</button>
+          <button type="button" disabled={busy || !logForm.groupIds.length} onClick={() => void sendLogTest()}
+            title={logForm.groupIds.length ? undefined : "Выберите группу получателей"}>Отправить тест в Telegram</button>
         </div>
+        {logTestStatus && <p className="muted" role="status">{logTestStatus}</p>}
         {logPreview && <pre className="log-alert-preview" aria-label="Предпросмотр">{logPreview}</pre>}
         {messagePreview && <div className="telegram-preview" aria-label="Предпросмотр сообщения Telegram"><div dangerouslySetInnerHTML={{ __html: messagePreview.html }} />{messagePreview.button && <span className="telegram-preview-button">Открыть в Dock</span>}</div>}
         <div className="toolbar">

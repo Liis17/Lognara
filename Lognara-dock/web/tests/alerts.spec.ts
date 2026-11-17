@@ -380,3 +380,29 @@ test("token validation error is visible and does not enable global alerts", asyn
   await expect(telegram.getByRole("alert")).toHaveText("Telegram отклонил токен. Проверьте его и повторите");
   await expect(telegram.getByLabel("Включить отправку алертов")).toBeDisabled();
 });
+
+test("renames a metric alert from its tile without opening the editor", async ({ page }) => {
+  const { state } = await settingsFixture(page);
+  const puts: unknown[] = [];
+  await page.route("**/api/alerts/definition", async (route) => {
+    if (route.request().method() !== "PUT") return route.fallback();
+    const body = route.request().postDataJSON() as { title: string };
+    puts.push(body);
+    state.alerts[0] = { ...state.alerts[0], title: body.title };
+    return route.fulfill({ json: { id: state.alerts[0].id, alert: state.alerts[0] } });
+  });
+  state.alerts = [{
+    id: "alert-global", key, enabled: true, environment: null, no_data: "loss", combine: "and", group_ids: [],
+    triggers: [{ window_seconds: 300, aggregate: "avg", comparator: ">", threshold: 1 }], revision: 1, enabled_at: 1,
+    state: "ok", loss_registered: false, loss_at: null, last_point_at: null, last_as_of: null, no_recipients: false,
+    node_scope: { kind: "all" },
+  }];
+  await page.goto("/alerts");
+  const tile = page.locator(".alert-rule-row");
+  await tile.hover();
+  await tile.getByRole("button", { name: "Переименовать" }).click();
+  await tile.getByLabel("Публичное имя алерта").fill("Ошибки оплаты");
+  await tile.getByRole("button", { name: "Сохранить" }).click();
+  await expect(tile.getByText("Ошибки оплаты", { exact: true })).toBeVisible();
+  expect(puts).toEqual([expect.objectContaining({ key, title: "Ошибки оплаты", enabled: true })]);
+});

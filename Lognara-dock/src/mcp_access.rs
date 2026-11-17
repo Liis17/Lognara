@@ -31,6 +31,15 @@ fn token_lifetime_ms(days: Option<u16>) -> Option<i64> {
     }
 }
 
+/// Момент истечения токена; бессрочный токен хранится с `store::NEVER_EXPIRES`.
+fn token_expires_at(now: i64, days: Option<u16>, never_expires: bool) -> Option<i64> {
+    match (never_expires, days) {
+        (true, None) => Some(store::NEVER_EXPIRES),
+        (true, Some(_)) => None,
+        (false, days) => token_lifetime_ms(days).map(|lifetime| now + lifetime),
+    }
+}
+
 pub async fn access(State(app): State<AppState>, _user: AuthUser) -> Json<Value> {
     Json(json!({
         "enabled": app.config.mcp_enabled,
@@ -57,6 +66,8 @@ pub struct CreateTokenRequest {
     alerts_write: Option<bool>,
     node_scope: Option<Scope>,
     expires_in_days: Option<u16>,
+    #[serde(default)]
+    never_expires: bool,
 }
 
 pub async fn create_token(
@@ -72,14 +83,14 @@ pub async fn create_token(
     if name.is_empty() || name.len() > 80 || name.chars().any(char::is_control) {
         return Err(ApiError::BadRequest("invalid_request"));
     }
-    let lifetime_ms =
-        token_lifetime_ms(body.expires_in_days).ok_or(ApiError::BadRequest("invalid_request"))?;
     let permissions = permissions(body.logs, body.metrics, body.alerts_write, body.node_scope)
         .ok_or(ApiError::BadRequest("invalid_request"))?;
     ensure_node_exists(&app, permissions.node_scope).await?;
     let secret = random_token();
     let hash: [u8; 32] = Sha256::digest(secret.as_bytes()).into();
     let now = store::now_ms();
+    let expires_at = token_expires_at(now, body.expires_in_days, body.never_expires)
+        .ok_or(ApiError::BadRequest("invalid_request"))?;
     let token = app
         .store
         .create_personal_token(
@@ -87,7 +98,7 @@ pub async fn create_token(
             user.username,
             name.to_owned(),
             hash,
-            now + lifetime_ms,
+            expires_at,
             permissions,
         )
         .await?;
@@ -99,7 +110,8 @@ pub async fn create_token(
 
 #[cfg(test)]
 mod tests {
-    use super::{DAY_MS, token_lifetime_ms};
+    use super::{DAY_MS, token_expires_at, token_lifetime_ms};
+    use crate::store::NEVER_EXPIRES;
 
     #[test]
     fn token_lifetime_defaults_to_thirty_days_and_accepts_supported_values() {
@@ -107,6 +119,17 @@ mod tests {
         assert_eq!(token_lifetime_ms(Some(7)), Some(7 * DAY_MS));
         assert_eq!(token_lifetime_ms(Some(30)), Some(30 * DAY_MS));
         assert_eq!(token_lifetime_ms(Some(90)), Some(90 * DAY_MS));
+    }
+
+    #[test]
+    fn never_expiring_token_uses_sentinel_and_rejects_explicit_days() {
+        assert_eq!(token_expires_at(1_000, None, true), Some(NEVER_EXPIRES));
+        assert_eq!(token_expires_at(1_000, Some(30), true), None);
+        assert_eq!(
+            token_expires_at(1_000, Some(7), false),
+            Some(1_000 + 7 * DAY_MS)
+        );
+        assert_eq!(token_expires_at(1_000, Some(14), false), None);
     }
 
     #[test]

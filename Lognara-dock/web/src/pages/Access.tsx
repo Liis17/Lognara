@@ -1,4 +1,4 @@
-import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { type FormEvent, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError, type Agent, errorText, type Relay } from "../api";
 import HostIcon from "../components/HostIcon";
 
@@ -16,7 +16,7 @@ interface Issued {
 }
 
 function kindName(kind: NodeKind) {
-  return kind === "relay" ? "relay" : kind === "host" ? "хост" : "агент";
+  return kind === "relay" ? "relay" : kind === "host" ? "hwagent" : "агент";
 }
 
 function nodePath(kind: NodeKind, id: number) {
@@ -60,6 +60,19 @@ function AddSlot({
   </form>;
 }
 
+function TokenDialog({ children }: { children: ReactNode }) {
+  const ref = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    const dialog = ref.current!;
+    dialog.showModal();
+    return () => dialog.close();
+  }, []);
+  // Esc не закрывает: токен показывается один раз, закрытие только кнопкой «Я сохранил токен».
+  return <dialog ref={ref} className="token token-dialog" aria-label="Выданный токен" onCancel={(event) => event.preventDefault()}>
+    {children}
+  </dialog>;
+}
+
 function NameEditor({
   value, disabled, onChange, onSubmit, onCancel,
 }: {
@@ -70,7 +83,7 @@ function NameEditor({
   onCancel: () => void;
 }) {
   return <form className="access-name-edit" onSubmit={onSubmit}>
-    <label className="sr-only">Новое имя<input autoFocus maxLength={64} value={value} onChange={(event) => onChange(event.target.value)} /></label>
+    <input aria-label="Новое имя" autoFocus maxLength={64} value={value} onChange={(event) => onChange(event.target.value)} />
     <button type="submit" disabled={disabled || !value.trim()}>Сохранить</button>
     <button type="button" className="quiet" disabled={disabled} onClick={onCancel}>Отмена</button>
   </form>;
@@ -182,7 +195,7 @@ export default function Access({ onUnauthorized }: { onUnauthorized: () => void 
 
   const rotate = (kind: "agent" | "host", id: number, name: string) => {
     const message = kind === "host"
-      ? `Сменить токен хоста «${name}»? Старый токен перестанет работать сразу. История и привязки алертов сохранятся.`
+      ? `Сменить токен hwagent «${name}»? Старый токен перестанет работать сразу. История и привязки алертов сохранятся.`
       : `Перевыпустить токен агента «${name}»? Старый токен перестанет работать после синхронизации relay. Новый токен нужно установить в конфигурации агента.`;
     if (!window.confirm(message)) return;
     run(async () => {
@@ -223,10 +236,10 @@ export default function Access({ onUnauthorized }: { onUnauthorized: () => void 
     </header>
     {error && <p className="error" role="alert">{error}</p>}
 
-    {issued && <div className="token" role="region" aria-label="Выданный токен">
+    {issued && <TokenDialog>
       <p><strong>{issued.rotated
-        ? `Токен ${issued.kind === "host" ? "хоста" : issued.kind === "agent" ? "агента" : "relay"} «${issued.name}» перевыпущен.`
-        : `${issued.kind === "relay" ? "Relay" : issued.kind === "host" ? "Хост" : "Агент"} «${issued.name}» создан.`}</strong>{" "}
+        ? `Токен ${issued.kind === "host" ? "hwagent" : issued.kind === "agent" ? "агента" : "relay"} «${issued.name}» перевыпущен.`
+        : `${issued.kind === "relay" ? "Relay" : issued.kind === "host" ? "hwagent" : "Агент"} «${issued.name}» создан.`}</strong>{" "}
         Токен показан только сейчас и больше не покажется: {issued.kind === "host" ? "добавьте строку в /etc/lognara/hwagent.env (права 0600)" : "добавьте строку в .env"} и сохраните её.</p>
       {issued.rotated && issued.kind === "host" && <p className="muted">Замените токен в hwagent.env и перезапустите lognara-hwagent. Старый токен уже не принимается.</p>}
       {issued.rotated && issued.kind === "agent" && <p className="muted">Обновите конфигурацию агента. Замена применяется после успешной синхронизации relay, обычно в пределах 10 секунд.</p>}
@@ -237,7 +250,7 @@ export default function Access({ onUnauthorized }: { onUnauthorized: () => void 
         <button type="button" onClick={() => { setIssued(null); setCopyStatus(""); }}>Я сохранил токен</button>
       </div>
       <p className="access-copy-status" role="status">{copyStatus}</p>
-    </div>}
+    </TokenDialog>}
 
     <section className="access-tree" aria-label="Дерево подключений">
       <header className="access-dock-node">
@@ -304,7 +317,7 @@ export default function Access({ onUnauthorized }: { onUnauthorized: () => void 
         <AddSlot label="relay" active={isAdding({ kind: "relay" })} name={nameDraft} disabled={busy || issued !== null}
           onName={setNameDraft} onOpen={() => openAdd({ kind: "relay" })} onSubmit={submitAdd}
           onCancel={() => { setAdding(null); setNameDraft(""); }} />
-        <AddSlot label="хост" active={isAdding({ kind: "host" })} name={nameDraft} disabled={busy || issued !== null}
+        <AddSlot label="hwagent" active={isAdding({ kind: "host" })} name={nameDraft} disabled={busy || issued !== null}
           onName={setNameDraft} onOpen={() => openAdd({ kind: "host" })} onSubmit={submitAdd}
           onCancel={() => { setAdding(null); setNameDraft(""); }} />
       </div>

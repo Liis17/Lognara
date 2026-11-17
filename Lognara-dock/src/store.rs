@@ -343,12 +343,16 @@ pub struct Recurrence {
     pub first_seen: String,
 }
 
+/// `expires_at` бессрочного персонального MCP-токена: проверка `expires_at>now` всегда проходит.
+pub const NEVER_EXPIRES: i64 = i64::MAX;
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PersonalTokenInfo {
     pub id: String,
     pub name: String,
     pub created_at: i64,
-    pub expires_at: i64,
+    /// `None` у бессрочного токена.
+    pub expires_at: Option<i64>,
     pub last_used_at: Option<i64>,
     #[serde(flatten)]
     pub permissions: Permissions,
@@ -695,6 +699,7 @@ impl Store {
                 "INSERT INTO mcp_personal_tokens(id,username,name,token_hash,created_at,expires_at,logs,metrics,alerts_write,scope_kind,scope_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
                 rusqlite::params![id, username, name, token_hash, created_at, expires_at, logs, metrics, alerts_write, kind, scope_id],
             )?;
+            let expires_at = (expires_at != NEVER_EXPIRES).then_some(expires_at);
             Ok(PersonalTokenInfo { id, name, created_at, expires_at, last_used_at: None, permissions })
         }).await
     }
@@ -706,7 +711,8 @@ impl Store {
         self.call(move |conn| {
             let mut statement = conn.prepare("SELECT id,name,created_at,expires_at,last_used_at,logs,metrics,alerts_write,scope_kind,scope_id FROM mcp_personal_tokens WHERE username=?1 AND revoked_at IS NULL ORDER BY created_at DESC,id")?;
             statement.query_map([username], |row| Ok(PersonalTokenInfo {
-                id: row.get(0)?, name: row.get(1)?, created_at: row.get(2)?, expires_at: row.get(3)?, last_used_at: row.get(4)?,
+                id: row.get(0)?, name: row.get(1)?, created_at: row.get(2)?,
+                expires_at: Some(row.get::<_, i64>(3)?).filter(|value| *value != NEVER_EXPIRES), last_used_at: row.get(4)?,
                 permissions: permissions_from_row(row, 5)?,
             }))?.collect()
         }).await
