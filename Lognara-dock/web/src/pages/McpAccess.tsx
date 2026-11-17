@@ -22,7 +22,8 @@ type PersonalToken = McpRights & {
   id: string;
   name: string;
   created_at: number;
-  expires_at: number;
+  /** null у бессрочного токена. */
+  expires_at: number | null;
   last_used_at: number | null;
 };
 type OAuthGrant = McpRights & {
@@ -35,6 +36,38 @@ type OAuthGrant = McpRights & {
 
 function formatTime(value: number | null): string {
   return value === null ? "не использовался" : new Date(value).toLocaleString("ru-RU");
+}
+
+const relativeFormat = new Intl.RelativeTimeFormat("ru", { numeric: "auto" });
+
+/** «через 28 дней», «2 часа назад»: крупнейшая единица, в которой разница не меньше 1. */
+function relativeTime(value: number, now: number): string {
+  const diff = value - now;
+  const units: [Intl.RelativeTimeFormatUnit, number][] = [["day", 86_400_000], ["hour", 3_600_000], ["minute", 60_000]];
+  for (const [unit, size] of units) {
+    if (Math.abs(diff) >= size) return relativeFormat.format(Math.round(diff / size), unit);
+  }
+  return "только что";
+}
+
+function usedText(lastUsed: number | null, now: number): string {
+  return lastUsed === null ? "не использовался" : `использован ${relativeTime(lastUsed, now)}`;
+}
+
+function tokenSummary(token: PersonalToken, now: number): { text: string; tone: string } {
+  const used = usedText(token.last_used_at, now);
+  if (token.expires_at === null) return { text: `Бессрочный · ${used}`, tone: "" };
+  if (token.expires_at <= now) return { text: `Истёк ${relativeTime(token.expires_at, now)} · ${used}`, tone: "expired" };
+  const soon = token.expires_at - now < 3 * 86_400_000;
+  return { text: `Истекает ${relativeTime(token.expires_at, now)} · ${used}`, tone: soon ? "soon" : "" };
+}
+
+function tokenDetails(token: PersonalToken): string {
+  return [
+    `Создан ${formatTime(token.created_at)}`,
+    token.expires_at === null ? "Срок действия не ограничен" : `Истекает ${formatTime(token.expires_at)}`,
+    `Последнее использование: ${formatTime(token.last_used_at)}`,
+  ].join("\n");
 }
 
 function rights(item: McpRights): string[] {
@@ -66,6 +99,7 @@ export default function McpAccess() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [now, setNow] = useState(() => Date.now());
 
   const refresh = async () => {
     const [nextSettings, nextTokens, nextGrants] = await Promise.all([
@@ -76,6 +110,7 @@ export default function McpAccess() {
     setSettings(nextSettings);
     setTokens(nextTokens.tokens);
     setGrants(nextGrants.grants);
+    setNow(Date.now());
   };
 
   useEffect(() => {
@@ -96,7 +131,7 @@ export default function McpAccess() {
       const reply = await api<{ token: string }>("POST", "/api/mcp/personal-tokens", {
         name,
         ...permissions,
-        expires_in_days: expiresInDays,
+        ...(expiresInDays === 0 ? { never_expires: true } : { expires_in_days: expiresInDays }),
       });
       setSecret(reply.token);
       setName("");
@@ -205,8 +240,10 @@ export default function McpAccess() {
                 <option value={7}>7 дней</option>
                 <option value={30}>30 дней</option>
                 <option value={90}>90 дней</option>
+                <option value={0}>Без ограничения</option>
               </select>
             </label>
+            {expiresInDays === 0 && <p className="muted">Бессрочный токен действует, пока его не отзовут.</p>}
             <button type="submit" className="solid" disabled={busy || !settings?.enabled || !name.trim() || !accessBody(access)}>
               Выпустить токен
             </button>
@@ -233,23 +270,20 @@ export default function McpAccess() {
             <p className="page-note">Токены, выпущенные для этого аккаунта.</p>
           </header>
           <ul className="mcp-list">
-            {tokens.map((token) => (
-              <li key={token.id}>
+            {tokens.map((token) => {
+              const summary = tokenSummary(token, now);
+              return <li key={token.id}>
                 <div className="mcp-record">
                   <strong>{token.name}</strong>
                   <div className="mcp-chips">
                     {rights(token).map((right) => <span className="mcp-chip" key={right}>{right}</span>)}
                     <span className="mcp-chip scope">{scopeText(token)}</span>
                   </div>
-                  <div className="mcp-record-dates">
-                    <span>Создан {formatTime(token.created_at)}</span>
-                    <span>Истекает {formatTime(token.expires_at)}</span>
-                    <span>Последнее использование: {formatTime(token.last_used_at)}</span>
-                  </div>
+                  <p className={`mcp-record-meta ${summary.tone}`} title={tokenDetails(token)}>{summary.text}</p>
                 </div>
                 <button type="button" className="quiet" disabled={busy} onClick={() => void revokeToken(token)}>Отозвать</button>
-              </li>
-            ))}
+              </li>;
+            })}
             {tokens.length === 0 && <li className="muted">Персональных токенов нет</li>}
           </ul>
         </article>
@@ -269,11 +303,13 @@ export default function McpAccess() {
                   {rights(grant).map((right) => <span className="mcp-chip" key={right}>{right}</span>)}
                   <span className="mcp-chip scope">{scopeText(grant)}</span>
                 </div>
-                <div className="mcp-record-dates">
-                  <span>Разрешение: {grant.scope}</span>
-                  <span>Выдано {formatTime(grant.created_at)}</span>
-                  <span>Последнее использование: {formatTime(grant.last_used_at)}</span>
-                </div>
+                <p className="mcp-record-meta" title={[
+                  `Разрешение: ${grant.scope}`,
+                  `Выдано ${formatTime(grant.created_at)}`,
+                  `Последнее использование: ${formatTime(grant.last_used_at)}`,
+                ].join("\n")}>
+                  Выдано {relativeTime(grant.created_at, now)} · {usedText(grant.last_used_at, now)}
+                </p>
               </div>
               <button type="button" className="quiet" disabled={busy} onClick={() => void revokeGrant(grant)}>Отозвать</button>
             </li>

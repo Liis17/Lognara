@@ -169,7 +169,7 @@ Telegram получает HTML `sendMessage` с `parse_mode=HTML`, длина в
 - `api::router(app: AppState): Router` — browser `/api/*`, MCP/OAuth routers, health, SPA-fallback и защитные заголовки
 - `mcp::router(app: AppState): Router` — stateless Streamable HTTP `/mcp`, Bearer validation, quotas, фиксированный allowlist инструментов с фильтрацией по правам токена
 - `oauth::router(app: AppState): Router` — protected-resource/authorization-server metadata и ChatGPT CIMD authorization code + PKCE endpoints
-- `mcp_access::{access,tokens,create_token,revoke_token,grants,revoke_grant}` — browser management PAT и OAuth grants
+- `mcp_access::{access,tokens,create_token,revoke_token,grants,revoke_grant}` — browser management PAT и OAuth grants. Срок PAT при создании: `expires_in_days` 7/30/90 (по умолчанию 30) или `never_expires: true` (вместе с днями отклоняется). Бессрочный PAT хранится с `expires_at = store::NEVER_EXPIRES` (`i64::MAX`), поэтому проверка `expires_at > now` не меняется и схема SQLite та же; в API списка у него `expires_at: null`.
 - `run(app: AppState, listener: TcpListener, shutdown: CancellationToken): io::Result<()>` — HTTP до отмены, затем закрывает SSE
 - `Htpasswd::users(&self): Option<Arc<HashMap<String, String>>>` — актуальные пользователи, `None` при некорректном файле
 - `Htpasswd::verify(&self, username: &str, password: &str): bool` — bcrypt, для неизвестного логина сравнение с фиктивным хэшем

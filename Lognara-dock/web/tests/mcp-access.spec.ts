@@ -34,7 +34,7 @@ async function accessFixture(page: Page) {
         id: "token-new",
         name: body.name,
         created_at: 1_798_761_600_000,
-        expires_at: 1_801_353_600_000,
+        expires_at: body.never_expires ? null : 1_801_353_600_000,
         last_used_at: null,
         logs: body.logs,
         metrics: body.metrics,
@@ -90,8 +90,9 @@ test("issues one-time PAT, copies it explicitly, lists expiry and revokes creden
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   const state = await accessFixture(page);
   await expect(page.getByText("https://dock.example.com/mcp")).toBeVisible();
-  await expect(page.getByText("Истекает", { exact: false })).toBeVisible();
-  await expect(page.getByText("Последнее использование: не использовался", { exact: true })).toBeVisible();
+  const meta = page.locator(".mcp-record").filter({ hasText: "Old laptop" }).locator(".mcp-record-meta");
+  await expect(meta).toHaveText(/^Истекает через \d+ (день|дня|дней) · не использовался$/u);
+  await expect(meta).toHaveAttribute("title", /Последнее использование: не использовался/u);
 
   await page.getByLabel("Название", { exact: true }).fill("Codex workstation");
   await page.getByRole("button", { name: "Выпустить токен", exact: true }).click();
@@ -279,4 +280,17 @@ test("login preserves a local OAuth authorization return path", async ({ page })
   await page.getByRole("button", { name: "Войти", exact: true }).click();
   await expect(page).toHaveURL(/\/oauth\/authorize\?response_type=code&state=state-1/u);
   await expect(page.getByText("Authorization endpoint", { exact: true })).toBeVisible();
+});
+
+test("issues a never-expiring token and lists it as unlimited", async ({ page }) => {
+  const state = await accessFixture(page);
+  await page.getByLabel("Название", { exact: true }).fill("CI bot");
+  await page.getByRole("combobox", { name: "Срок действия", exact: true }).selectOption({ label: "Без ограничения" });
+  await expect(page.getByText("Бессрочный токен действует, пока его не отзовут.")).toBeVisible();
+  await page.getByRole("button", { name: "Выпустить токен", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Выданный токен" })).toBeVisible();
+  expect(state.bodies).toEqual([{ name: "CI bot", logs: true, metrics: true, alerts_write: false, node_scope: { kind: "all" }, never_expires: true }]);
+  const meta = page.locator(".mcp-record").filter({ hasText: "CI bot" }).locator(".mcp-record-meta");
+  await expect(meta).toHaveText("Бессрочный · не использовался");
+  await expect(meta).toHaveAttribute("title", /Срок действия не ограничен/u);
 });
