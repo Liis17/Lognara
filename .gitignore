@@ -29,3 +29,12 @@ node_modules/
 /Lognara-dock/web/dist/
 /Lognara-dock/web/test-results/
 /Lognara-dock/web/playwright-report/
+# Android client
+/lognara-android-client/.gradle/
+/lognara-android-client/**/build/
+/lognara-android-client/local.properties
+/lognara-android-client/.idea/
+/lognara-android-client/**/*.iml
+/lognara-android-client/.kotlin/
+!/lognara-android-client/app/src/debug/
+!/lognara-android-client/app/src/debug/**
