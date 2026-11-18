@@ -49,6 +49,18 @@ Job `publish` в `.github/workflows/build-hwagent.yml` работает толь
 
 Тег `hwagent-YYYYMMDD-HHMMSS-<12 символов SHA>` по UTC-времени коммита; префикс не совпадает с шаблоном `release_agent.py`, поэтому changelog и latest агента выпуски hwagent не учитывают. Файлы: `lognara-hwagent-linux-amd64.tar.gz`, `lognara-hwagent-linux-arm64.tar.gz`, `SHA256SUMS`; в архиве `lognara-hwagent`, `LICENSE`, `README.md`, `examples/` и `packaging/`. Как у агента, сначала создаётся draft, затем загружаются файлы и релиз публикуется; опубликованный релиз при повторе не меняется. Релиз публикуется с `--latest=false`, чтобы отметка Latest оставалась у агента. Описание короткое: SHA и ссылки на архивы, без списка коммитов.
 
+## Релизы Android
+
+Workflow .github/workflows/release-android.yml запускается при push в dev или master, если изменились lognara-android-client/**, сам workflow или .github/scripts/release_android.py. Ручной запуск выпускает только выбранную ветку dev или master. Проверки Android в CI описаны в [[Repository/CI#Android]].
+
+Workflow запускает lint и testDebugUnitTest, затем собирает подписанный release APK и проверяет подпись через apksigner. Версия рассчитывается по UTC-времени коммита: versionCode = (секунды с 2025-01-01 00:00:00 UTC) / 60; versionName имеет формат YYYY.MM.DD.HHMM для stable и YYYY.MM.DD.HHMM-dev для dev. Теги: android-YYYYMMDD-HHMMSS-<12 символов SHA> и android-dev-YYYYMMDD-HHMMSS-<12 символов SHA>.
+
+Master выпускает стабильный релиз с названием Lognara Android <versionName>; dev выпускает prerelease с названием Lognara Android dev <versionName>. Релиз сначала создаётся как draft, затем загружаются APK и метаданные, после чего он публикуется. Для обоих каналов latest=false, чтобы GitHub Latest оставался у релизов агента. Публикации идут через общую очередь без отмены. Повтор уже опубликованного коммита не перезаливает ассеты; draft можно продолжить.
+
+Ассеты: lognara-android.apk, version.json и SHA256SUMS. В version.json указаны versionCode, versionName, channel, полный commit SHA, имя APK и SHA-256 APK. APK подписывается ключом из ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS и ANDROID_KEY_PASSWORD; workflow декодирует keystore во временный каталог runner и передаёт пути и пароли Gradle через ANDROID_SIGNING_*.
+
+Changelog перечисляет коммиты с изменениями lognara-android-client/** после предыдущего опубликованного Android-релиза того же канала в истории текущего коммита; первый релиз включает всю историю этого пути. Затем приводятся исходный SHA, файлы и инструкции по установке и обновлению приложения.
+
 ## Связи
 
 - [[Repository/CI]] — проверки, предшествующие публикации.
