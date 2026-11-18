@@ -1,11 +1,18 @@
 package com.lognara.client.ui
 
+import android.content.ActivityNotFoundException
+import android.content.Intent
 import android.net.Uri
+import android.provider.Settings
+import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -14,6 +21,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavType
@@ -26,6 +37,7 @@ import com.lognara.client.data.DeviceSession
 import com.lognara.client.data.Issue
 import com.lognara.client.data.MetricKey
 import com.lognara.client.data.SeriesMetric
+import com.lognara.client.data.UpdateChannel
 import com.lognara.client.ui.screens.logs.EventDetailScreen
 import com.lognara.client.ui.screens.logs.TraceDetailScreen
 import com.lognara.client.ui.screens.HomeScreen
@@ -36,17 +48,18 @@ import com.lognara.client.ui.screens.LoginScreen
 import com.lognara.client.ui.screens.ManualEntryScreen
 import com.lognara.client.ui.screens.ScannerScreen
 import com.lognara.client.ui.screens.SettingsScreen
+import com.lognara.client.ui.screens.AppSettingsScreen
 import com.lognara.client.ui.screens.CredentialsRestoreErrorScreen
+import com.lognara.client.ui.theme.LognaraPalette
 import java.time.Instant
 import java.time.format.DateTimeFormatter
-import androidx.compose.material3.Text
-import androidx.compose.ui.res.stringResource
 
 private const val LOGIN = "login"
 private const val MANUAL = "manual"
 private const val SCANNER = "scanner"
 private const val HOME = "home"
 private const val SETTINGS = "settings"
+private const val APP_SETTINGS = "app-settings"
 private const val EVENT_DETAIL = "event-detail?eventId={eventId}"
 private const val TRACE_DETAIL = "trace-detail?traceId={traceId}&from={from}&to={to}"
 private const val ISSUE_DETAIL = "issue-detail?fingerprint={fingerprint}&range={range}&service={service}"
@@ -59,6 +72,9 @@ fun AppNavigation(viewModel: AppViewModel) {
     val credentialsRestoreError by viewModel.credentialsRestoreError.collectAsStateWithLifecycle()
     val pairing by viewModel.pairing.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val appSettings by viewModel.appSettings.collectAsStateWithLifecycle()
+    val appUpdate by viewModel.appUpdate.collectAsStateWithLifecycle()
+    val showUpdatePrompt by viewModel.showUpdatePrompt.collectAsStateWithLifecycle()
     val notice by viewModel.loginNotice.collectAsStateWithLifecycle()
     val selectedEvents by viewModel.selectedEvents.collectAsStateWithLifecycle()
     val issuesRefreshKey by viewModel.issuesRefreshKey.collectAsStateWithLifecycle()
@@ -260,8 +276,80 @@ fun AppNavigation(viewModel: AppViewModel) {
                     onLoad = viewModel::loadSettings,
                     onRetry = viewModel::loadSettings,
                     onDisconnect = viewModel::disconnect,
+                    onOpenAppSettings = { navController.navigate(APP_SETTINGS) },
                 )
             }
         }
+        composable(APP_SETTINGS) {
+            AppSettingsScreen(
+                settings = appSettings,
+                update = appUpdate,
+                onBack = { navController.popBackStack() },
+                onAutoCheckChanged = viewModel::setAutoCheck,
+                onChannelChanged = viewModel::setUpdateChannel,
+                onCheckNow = { viewModel.checkForUpdates() },
+                onInstall = viewModel::installUpdate,
+            )
+        }
+    }
+
+    val availableUpdate = appUpdate.update
+    if (showUpdatePrompt && availableUpdate != null) {
+        val context = LocalContext.current
+        val phase = appUpdate.phase
+        AlertDialog(
+            onDismissRequest = viewModel::dismissUpdatePrompt,
+            title = { Text(stringResource(R.string.app_startup_update_title, availableUpdate.manifest.versionName)) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        stringResource(
+                            R.string.app_startup_update_channel,
+                            stringResource(if (availableUpdate.manifest.channel == UpdateChannel.Stable) R.string.app_channel_stable else R.string.app_channel_dev),
+                        ),
+                        fontSize = 14.sp,
+                    )
+                    if (appUpdate.error != null) {
+                        Text(appUpdate.error.orEmpty(), fontSize = 13.sp, color = LognaraPalette.TextMuted)
+                    } else if (phase == UpdatePhase.Downloading) {
+                        Text(
+                            stringResource(R.string.app_download_in_progress, availableUpdate.manifest.versionName),
+                            fontSize = 13.sp,
+                            color = LognaraPalette.TextMuted,
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        if (!viewModel.installUpdate()) openUnknownSourcesSettings(context)
+                    },
+                    enabled = phase != UpdatePhase.Downloading && phase != UpdatePhase.Installing,
+                ) {
+                    Text(
+                        stringResource(if (phase == UpdatePhase.PermissionRequired) R.string.app_allow_install else R.string.app_update_now),
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = viewModel::dismissUpdatePrompt) { Text(stringResource(R.string.app_later)) }
+            },
+            shape = androidx.compose.foundation.shape.RoundedCornerShape(28.dp),
+            containerColor = LognaraPalette.Surface,
+            titleContentColor = LognaraPalette.Text,
+            textContentColor = LognaraPalette.TextSecondary,
+        )
+    }
+}
+
+private fun openUnknownSourcesSettings(context: android.content.Context) {
+    try {
+        context.startActivity(
+            Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:${context.packageName}"))
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        )
+    } catch (_: ActivityNotFoundException) {
+        Toast.makeText(context, R.string.app_unknown_sources_settings_not_found, Toast.LENGTH_LONG).show()
     }
 }
