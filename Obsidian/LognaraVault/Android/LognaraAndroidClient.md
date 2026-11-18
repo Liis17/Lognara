@@ -15,7 +15,7 @@ Parent: [[Index]]
 Контракт со стороны сервера описан в [README Dock](../../../Lognara-dock/README.md#подключение-устройств) и [[Dock/LognaraDock]].
 
 - `data/PairPayload.kt` декодирует payload (base64url JSON `v=1`, `url`, `code`). Разрешён только https; http только для `localhost`/`127.0.0.1` в debug-сборке. Порт и URL дополнительно проверяются парсером OkHttp.
-- `data/LognaraApi.kt` обменивает код на токен (`POST /api/devices/pair` без Authorization), затем ходит с `Bearer lgd_...`. Редиректы выключены, тело ответа читается не больше 1 МиБ. Любой 401 означает потерю доступа: локальные данные стираются, приложение возвращается к входу. Dock отвечает 401 и на маршруты вне allowlist токена устройства, поэтому клиент обращается только к разрешённым маршрутам.
+- `data/LognaraApi.kt` обменивает код на токен (`POST /api/devices/pair` без Authorization), затем ходит с `Bearer lgd_...`. Редиректы выключены; лимит тела для pairing, `/api/me` и отключения устройства — 1 МиБ, для запросов данных — 4 МиБ. Любой 401 означает потерю доступа: локальные данные стираются, приложение возвращается к входу. Dock отвечает 401 и на маршруты вне allowlist токена устройства, поэтому клиент обращается только к разрешённым маршрутам.
 - Сканер `ui/screens/ScannerScreen.kt`: CameraX + ZXing (только QR), запасной путь — ручной ввод кода.
 
 ## Хранение токена
@@ -34,4 +34,12 @@ Material You (dynamic color) по системной теме. Шрифты Comm
 
 ## Состояние
 
-Реализованы вход, настройки и отключение устройства. Вкладки «Логи», «Live», «Проблемы», «Инфра», «Метрики» пока заглушки.
+Пять вкладок данных реализованы в `ui/screens/{logs,live,issues,infra,metrics}/`; общие модели и transport находятся в `data/DataModels.kt`, `data/DeviceApiRoutes.kt` и `data/LognaraApi.kt`. `DataScreenComponents.kt` даёт экранам общие состояния загрузки, пустоты и ошибки с повтором запроса, диапазоны времени и локальное форматирование дат. Неизвестные JSON-поля пропускаются; тела запросов сериализуются моделями Dock.
+
+- Авторизованные data-запросы используют только `DeviceApiRoutes`: GET `/api/me`, `/api/infrastructure`, `/api/series`, `/api/series/favorites`, `/api/series/sources`, `/api/traces/{id}`; POST `/api/logs/search`, `/api/stats/summary`, `/api/stats/group-by`, `/api/issues/search`, `/api/issues/{id}/details|resolve|reopen`, `/api/series/lookup`, `/api/series/query`; DELETE `/api/devices/current`; SSE GET `/api/logs/stream`. Динамические идентификаторы пути кодируются как отдельный сегмент URL. `DeviceApiRoutesTest` сравнивает перечень клиента с allowlist из `Lognara-dock/src/session.rs`.
+- «Логи» начинает с одного `POST /api/stats/summary`, содержащего `text`, `filters`, `interval_seconds` и `search_limit=50`; продолжение идёт через `POST /api/logs/search` с cursor. Детали события открывают `GET /api/traces/{id}?from&to&limit` для trace.
+- «Live» работает, только пока вкладка выбрана и экран в состоянии `RESUMED`. Обрабатываются SSE-события `logs`, `lagged`, `core_error`, `core_ok`; после обрыва выполняется `GET /api/me`, при сохранённой сессии действует экспоненциальный reconnect с пределом 30 с. Буфер ограничен 500 событиями, повторные `id` удаляются; доступны фильтры сервиса/уровней и пауза.
+- «Проблемы» сначала запрашивает `POST /api/issues/search`, затем последовательно получает список сервисов через `POST /api/stats/group-by`. Детали загружаются по `/api/issues/{id}/details`; resolve/reopen вызываются отдельными POST после подтверждения. Статус общий для Dock.
+- «Инфра» использует только `GET /api/infrastructure`: показывает Core, WAL, хранилище, Dock и узлы с причиной/heartbeat, группируя узлы по relay; обновление доступно жестом pull-to-refresh.
+- «Метрики» читает избранное через GET `/api/series/favorites` и POST `/api/series/lookup`, источники через GET `/api/series/sources`, каталог источника через GET `/api/series?group_by=server&server&service`, точки через POST `/api/series/query`. Избранное только для чтения; запросы мини-графиков ограничены двумя одновременно. Графики рисуются Compose Canvas, `null` начинает новый сегмент линии, без соединения через пропуск.
+- Новых runtime-зависимостей для графиков нет. Тесты моделей и запросов лежат в `app/src/test/`; транспорт использует test-only `mockwebserver3` и `kotlinx-coroutines-test`.

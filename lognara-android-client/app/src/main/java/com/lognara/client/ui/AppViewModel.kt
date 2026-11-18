@@ -7,6 +7,7 @@ import com.lognara.client.BuildConfig
 import com.lognara.client.AppContainer
 import com.lognara.client.data.ApiException
 import com.lognara.client.data.DeviceSession
+import com.lognara.client.data.LogEvent
 import com.lognara.client.data.PairError
 import com.lognara.client.data.PairPayloadException
 import com.lognara.client.data.PairResult
@@ -16,9 +17,12 @@ import com.lognara.client.data.decodePairPayload
 import java.io.IOException
 import java.net.SocketTimeoutException
 import java.util.concurrent.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.update
 
 data class PairingUiState(
     val isConnecting: Boolean = false,
@@ -40,9 +44,19 @@ data class SettingsUiState(
 enum class SettingsError { Network, Server, Redirect, InvalidResponse }
 enum class LoginNotice { DeviceStillListed }
 
-class AppViewModel(private val container: AppContainer) : ViewModel() {
+internal fun isCurrentUnauthorizedSession(requestSession: DeviceSession, currentSession: DeviceSession?): Boolean =
+    requestSession == currentSession
+
+class AppViewModel(val container: AppContainer) : ViewModel() {
+    private var unauthorizedSignOut: Job? = null
     private val _session = MutableStateFlow<DeviceSession?>(null)
     val session = _session.asStateFlow()
+
+    private val _selectedEvents = MutableStateFlow<Map<String, LogEvent>>(emptyMap())
+    val selectedEvents = _selectedEvents.asStateFlow()
+
+    private val _issuesRefreshKey = MutableStateFlow(0)
+    val issuesRefreshKey = _issuesRefreshKey.asStateFlow()
 
     private val _isRestoring = MutableStateFlow(true)
     val isRestoring = _isRestoring.asStateFlow()
@@ -60,7 +74,17 @@ class AppViewModel(private val container: AppContainer) : ViewModel() {
     val loginNotice = _loginNotice.asStateFlow()
 
     init {
+        container.api.onUnauthorized = ::handleUnauthorized
         viewModelScope.launch { restoreCredentials() }
+    }
+
+    private fun handleUnauthorized(requestSession: DeviceSession) {
+        viewModelScope.launch(Dispatchers.Main.immediate) {
+            if (!isCurrentUnauthorizedSession(requestSession, _session.value) || unauthorizedSignOut?.isActive == true) {
+                return@launch
+            }
+            unauthorizedSignOut = viewModelScope.launch(Dispatchers.Main.immediate) { signOut() }
+        }
     }
 
     fun retryRestoreCredentials() {
@@ -83,6 +107,14 @@ class AppViewModel(private val container: AppContainer) : ViewModel() {
 
     fun clearPairingError() {
         if (!_pairing.value.isConnecting) _pairing.value = PairingUiState()
+    }
+
+    fun selectEvent(event: LogEvent) {
+        _selectedEvents.update { it + (event.id to event) }
+    }
+
+    fun refreshIssues() {
+        _issuesRefreshKey.value += 1
     }
 
     fun connect(payloadText: String) {
@@ -126,7 +158,7 @@ class AppViewModel(private val container: AppContainer) : ViewModel() {
                 val me = container.api.getMe(session)
                 _settings.value = SettingsUiState(username = me.username)
             } catch (_: ApiException.Unauthorized) {
-                signOut()
+                // LognaraApi handles every authenticated 401 through handleUnauthorized.
             } catch (_: ApiException.InvalidResponse) {
                 _settings.value = SettingsUiState(error = SettingsError.InvalidResponse)
             } catch (_: ApiException.Redirect) {
@@ -150,7 +182,8 @@ class AppViewModel(private val container: AppContainer) : ViewModel() {
             try {
                 container.api.disconnect(session)
             } catch (_: ApiException.Unauthorized) {
-                // The token is already invalid, so no live device remains under this credential.
+                handleUnauthorized(session)
+                return@launch
             } catch (_: ApiException.Redirect) {
                 _settings.value = SettingsUiState(error = SettingsError.Redirect)
                 return@launch
@@ -167,6 +200,7 @@ class AppViewModel(private val container: AppContainer) : ViewModel() {
             container.credentialsStore.clear()
         } finally {
             _session.value = null
+            _selectedEvents.value = emptyMap()
             _settings.value = SettingsUiState()
         }
     }

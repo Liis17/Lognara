@@ -52,7 +52,7 @@ sealed interface PairResult {
     data class Failure(val error: PairError) : PairResult
 }
 
-val apiJson = Json { ignoreUnknownKeys = true }
+val apiJson = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
 fun parsePairResponse(status: Int, body: String): PairResult {
     if (status in 300..399) return PairResult.Failure(PairError.Redirect)

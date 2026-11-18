@@ -205,6 +205,8 @@ private fun CameraQrPreview(
                                 view.post { currentOnPayload(decoded) }
                             }
                         }
+                    } catch (_: Exception) {
+                        // Ignore malformed frames and continue analyzing the next one.
                     } finally {
                         image.close()
                     }
@@ -287,10 +289,16 @@ private fun decodeQrFromYuv(image: ImageProxy): String? {
             rotated.height,
             false,
         )
-        QRCodeReader().decode(BinaryBitmap(HybridBinarizer(source))).text
+        decodeQrFromSource(source)
     } catch (_: Exception) {
         null
     }
+}
+
+internal fun decodeQrFromSource(source: LuminanceSource): String? = try {
+    QRCodeReader().decode(BinaryBitmap(HybridBinarizer(source))).text
+} catch (_: Exception) {
+    null
 }
 
 internal data class RotatedLuminance(val pixels: ByteArray, val width: Int, val height: Int)

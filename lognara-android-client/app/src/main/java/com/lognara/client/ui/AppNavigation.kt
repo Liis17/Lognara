@@ -1,5 +1,6 @@
 package com.lognara.client.ui
 
+import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,22 +16,41 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavGraph.Companion.findStartDestination
+import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
+import com.lognara.client.R
 import com.lognara.client.data.DeviceSession
+import com.lognara.client.data.Issue
+import com.lognara.client.data.MetricKey
+import com.lognara.client.data.SeriesMetric
+import com.lognara.client.ui.screens.logs.EventDetailScreen
+import com.lognara.client.ui.screens.logs.TraceDetailScreen
 import com.lognara.client.ui.screens.HomeScreen
+import com.lognara.client.ui.screens.data.DataRange
+import com.lognara.client.ui.screens.issues.IssueDetailsScreen
+import com.lognara.client.ui.screens.metrics.MetricDetailsScreen
 import com.lognara.client.ui.screens.LoginScreen
 import com.lognara.client.ui.screens.ManualEntryScreen
 import com.lognara.client.ui.screens.ScannerScreen
 import com.lognara.client.ui.screens.SettingsScreen
 import com.lognara.client.ui.screens.CredentialsRestoreErrorScreen
+import java.time.Instant
+import java.time.format.DateTimeFormatter
+import androidx.compose.material3.Text
+import androidx.compose.ui.res.stringResource
 
 private const val LOGIN = "login"
 private const val MANUAL = "manual"
 private const val SCANNER = "scanner"
 private const val HOME = "home"
 private const val SETTINGS = "settings"
+private const val EVENT_DETAIL = "event-detail?eventId={eventId}"
+private const val TRACE_DETAIL = "trace-detail?traceId={traceId}&from={from}&to={to}"
+private const val ISSUE_DETAIL = "issue-detail?fingerprint={fingerprint}&range={range}&service={service}"
+private const val METRIC_DETAIL = "metric-detail?server={server}&service={service}&name={name}&origin={origin}"
 
 @Composable
 fun AppNavigation(viewModel: AppViewModel) {
@@ -40,6 +60,8 @@ fun AppNavigation(viewModel: AppViewModel) {
     val pairing by viewModel.pairing.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val notice by viewModel.loginNotice.collectAsStateWithLifecycle()
+    val selectedEvents by viewModel.selectedEvents.collectAsStateWithLifecycle()
+    val issuesRefreshKey by viewModel.issuesRefreshKey.collectAsStateWithLifecycle()
 
     if (isRestoring) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -106,7 +128,127 @@ fun AppNavigation(viewModel: AppViewModel) {
             )
         }
         composable(HOME) {
-            HomeScreen(onSettings = { navController.navigate(SETTINGS) })
+            session?.let { activeSession ->
+                HomeScreen(
+                    session = activeSession,
+                    api = viewModel.container.api,
+                    onSettings = { navController.navigate(SETTINGS) },
+                    onOpenEvent = { event ->
+                        viewModel.selectEvent(event)
+                        navController.navigate("event-detail?eventId=${Uri.encode(event.id)}")
+                    },
+                    onOpenIssue = { issue: Issue, range: DataRange, service: String ->
+                        navController.navigate(
+                            "issue-detail?fingerprint=${Uri.encode(issue.fingerprint)}&range=${range.name}&service=${Uri.encode(service)}",
+                        )
+                    },
+                    issuesRefreshKey = issuesRefreshKey,
+                    onIssueStatusChanged = viewModel::refreshIssues,
+                    onOpenMetric = { metric: SeriesMetric ->
+                        navController.navigate(
+                            "metric-detail?server=${Uri.encode(metric.server)}&service=${Uri.encode(metric.service)}&name=${Uri.encode(metric.name)}&origin=${Uri.encode(metric.origin)}",
+                        )
+                    },
+                )
+            }
+        }
+        composable(
+            route = METRIC_DETAIL,
+            arguments = listOf(
+                navArgument("server") { type = NavType.StringType; defaultValue = "" },
+                navArgument("service") { type = NavType.StringType },
+                navArgument("name") { type = NavType.StringType },
+                navArgument("origin") { type = NavType.StringType },
+            ),
+        ) { entry ->
+            val activeSession: DeviceSession? = session
+            if (activeSession != null) {
+                MetricDetailsScreen(
+                    api = viewModel.container.api,
+                    session = activeSession,
+                    key = MetricKey(
+                        server = entry.arguments?.getString("server").orEmpty(),
+                        service = entry.arguments?.getString("service").orEmpty(),
+                        name = entry.arguments?.getString("name").orEmpty(),
+                        origin = entry.arguments?.getString("origin").orEmpty(),
+                    ),
+                    onBack = { navController.popBackStack() },
+                )
+            }
+        }
+        composable(
+            route = ISSUE_DETAIL,
+            arguments = listOf(
+                navArgument("fingerprint") { type = NavType.StringType },
+                navArgument("range") { type = NavType.StringType; defaultValue = DataRange.TwentyFourHours.name },
+                navArgument("service") { type = NavType.StringType; defaultValue = "" },
+            ),
+        ) { entry ->
+            val activeSession: DeviceSession? = session
+            if (activeSession != null) {
+                IssueDetailsScreen(
+                    api = viewModel.container.api,
+                    session = activeSession,
+                    fingerprint = entry.arguments?.getString("fingerprint").orEmpty(),
+                    range = DataRange.entries.firstOrNull { it.name == entry.arguments?.getString("range") }
+                        ?: DataRange.TwentyFourHours,
+                    service = entry.arguments?.getString("service").orEmpty(),
+                    onBack = { navController.popBackStack() },
+                    onStatusChanged = viewModel::refreshIssues,
+                    onOpenEvent = { event ->
+                        viewModel.selectEvent(event)
+                        navController.navigate("event-detail?eventId=${Uri.encode(event.id)}")
+                    },
+                )
+            }
+        }
+        composable(
+            route = EVENT_DETAIL,
+            arguments = listOf(navArgument("eventId") { type = NavType.StringType }),
+        ) { entry ->
+            val event = selectedEvents[entry.arguments?.getString("eventId").orEmpty()]
+            if (event != null) {
+                EventDetailScreen(
+                    event = event,
+                    onBack = { navController.popBackStack() },
+                    onOpenTrace = { selected ->
+                        val center = runCatching { Instant.parse(selected.timestamp) }.getOrDefault(Instant.now())
+                        val from = DateTimeFormatter.ISO_INSTANT.format(center.minusSeconds(300))
+                        val to = DateTimeFormatter.ISO_INSTANT.format(center.plusSeconds(300))
+                        navController.navigate(
+                            "trace-detail?traceId=${Uri.encode(selected.trace_id.orEmpty())}&from=${Uri.encode(from)}&to=${Uri.encode(to)}",
+                        )
+                    },
+                )
+            } else {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text(stringResource(R.string.event_missing))
+                }
+            }
+        }
+        composable(
+            route = TRACE_DETAIL,
+            arguments = listOf(
+                navArgument("traceId") { type = NavType.StringType },
+                navArgument("from") { type = NavType.StringType },
+                navArgument("to") { type = NavType.StringType },
+            ),
+        ) { entry ->
+            val activeSession: DeviceSession? = session
+            if (activeSession != null) {
+                TraceDetailScreen(
+                    api = viewModel.container.api,
+                    session = activeSession,
+                    traceId = entry.arguments?.getString("traceId").orEmpty(),
+                    from = entry.arguments?.getString("from").orEmpty(),
+                    to = entry.arguments?.getString("to").orEmpty(),
+                    onBack = { navController.popBackStack() },
+                    onOpenEvent = { event ->
+                        viewModel.selectEvent(event)
+                        navController.navigate("event-detail?eventId=${Uri.encode(event.id)}")
+                    },
+                )
+            }
         }
         composable(SETTINGS) {
             val activeSession: DeviceSession? = session
