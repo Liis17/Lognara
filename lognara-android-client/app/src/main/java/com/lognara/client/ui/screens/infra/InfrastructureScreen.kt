@@ -397,7 +397,11 @@ private fun RelayGroupCard(group: InfrastructureNodeGroup, asOf: String, spoolWa
             )
         }
         RowDivider()
-        group.nodes.filter { it.kind != "relay" }.forEachIndexed { index, node ->
+        val detailNodes = buildList {
+            relay?.let(::add)
+            addAll(group.nodes.filter { it.kind != "relay" })
+        }
+        detailNodes.forEachIndexed { index, node ->
             if (index > 0) RowDivider()
             InfrastructureNodeContent(node, asOf, spoolWarnPercent)
         }
@@ -412,7 +416,7 @@ private fun InfrastructureNodeContent(node: InfrastructureNode, asOf: String, sp
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
-                node.name,
+                stringResource(nodeKindLabel(node.kind), node.name),
                 modifier = Modifier.weight(1f),
                 style = monoStyle(13, FontWeight.W500),
                 color = LognaraPalette.Text,
@@ -455,6 +459,13 @@ private fun InfrastructureNodeContent(node: InfrastructureNode, asOf: String, sp
         if (metadata.isNotEmpty()) {
             Text(metadata, style = monoStyle(12), color = LognaraPalette.TextMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
+        node.events_per_second?.let {
+            Text(
+                stringResource(R.string.infra_events_rate, number(it)),
+                fontSize = 12.sp,
+                color = LognaraPalette.TextMuted,
+            )
+        }
     }
 }
 
@@ -463,7 +474,12 @@ private fun SpoolUsageContent(spool: SpoolUsage, warnPercent: Long) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
             Text(
-                stringResource(R.string.infra_ui_spool_line, byteValue(spool.used_bytes), byteValue(spool.limit_bytes)),
+                stringResource(
+                    R.string.infra_ui_spool_line,
+                    byteValue(spool.used_bytes),
+                    byteValue(spool.limit_bytes),
+                    number(spool.records),
+                ),
                 fontSize = 12.sp,
                 color = LognaraPalette.TextMuted,
                 maxLines = 1,
@@ -479,7 +495,12 @@ private fun SpoolUsageContent(spool: SpoolUsage, warnPercent: Long) {
         }
         if (spool.limit_bytes > 0) {
             val fraction = (spool.used_bytes.toDouble() / spool.limit_bytes).toFloat().coerceIn(0f, 1f)
-            val description = stringResource(R.string.infra_ui_spool_line, byteValue(spool.used_bytes), byteValue(spool.limit_bytes))
+            val description = stringResource(
+                R.string.infra_ui_spool_line,
+                byteValue(spool.used_bytes),
+                byteValue(spool.limit_bytes),
+                number(spool.records),
+            )
             UsageBar(
                 fraction = fraction,
                 color = LognaraPalette.Accent,
@@ -540,6 +561,12 @@ private fun nodeStatusLabel(status: String): Int = when (status) {
     "offline" -> R.string.infra_status_offline
     "degraded" -> R.string.infra_status_degraded
     else -> R.string.infra_status_unknown
+}
+
+private fun nodeKindLabel(kind: String): Int = when (kind) {
+    "relay" -> R.string.infra_node_relay
+    "host" -> R.string.infra_node_host
+    else -> R.string.infra_node_agent
 }
 
 private fun nodeReasonLabel(reason: String): Int = when (reason) {

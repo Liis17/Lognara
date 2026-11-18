@@ -13,10 +13,13 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -51,6 +54,7 @@ import com.lognara.client.data.LognaraApi
 import com.lognara.client.data.SearchResponse
 import com.lognara.client.data.apiJson
 import com.lognara.client.ui.components.DetailTopBar
+import com.lognara.client.ui.components.EventCardListItem
 import com.lognara.client.ui.components.LevelBadge
 import com.lognara.client.ui.components.LogEventRow
 import com.lognara.client.ui.components.LognaraCard
@@ -85,7 +89,12 @@ fun EventDetailScreen(event: LogEvent, onBack: () -> Unit, onOpenTrace: (LogEven
     val fields = eventFields(event)
     val hiddenFields = hiddenEventFields(event)
 
-    Column(Modifier.fillMaxSize().background(LognaraPalette.Background)) {
+    Column(
+        Modifier.fillMaxSize()
+            .background(LognaraPalette.Background)
+            .statusBarsPadding()
+            .navigationBarsPadding(),
+    ) {
         DetailTopBar(
             title = stringResource(R.string.event_detail_title),
             onBack = onBack,
@@ -386,7 +395,12 @@ fun TraceDetailScreen(
     }
     val state by viewModel.state.collectAsStateWithLifecycle()
 
-    Column(Modifier.fillMaxSize().background(LognaraPalette.Background)) {
+    Column(
+        Modifier.fillMaxSize()
+            .background(LognaraPalette.Background)
+            .statusBarsPadding()
+            .navigationBarsPadding(),
+    ) {
         DetailTopBar(title = stringResource(R.string.logs_trace_title), onBack = onBack)
         when (val result = state) {
             DataLoadState.Loading -> DetailState(
@@ -409,17 +423,14 @@ fun TraceDetailScreen(
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalArrangement = Arrangement.Top,
                 ) {
-                    item {
-                        LognaraCard(
-                            contentPadding = PaddingValues(0.dp),
-                            verticalArrangement = Arrangement.spacedBy(0.dp),
+                    itemsIndexed(result.value.events, key = { _, event -> event.id }) { index, event ->
+                        EventCardListItem(
+                            isFirst = index == 0,
+                            isLast = index == result.value.events.lastIndex,
                         ) {
-                            result.value.events.forEachIndexed { index, event ->
-                                if (index > 0) RowDivider()
-                                TraceEventRow(event = event, onClick = { onOpenEvent(event) })
-                            }
+                            TraceEventRow(event = event, onClick = { onOpenEvent(event) })
                         }
                     }
                 }

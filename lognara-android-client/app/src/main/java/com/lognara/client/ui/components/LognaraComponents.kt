@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -39,8 +40,12 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
@@ -219,6 +224,74 @@ fun LognaraCard(
         verticalArrangement = verticalArrangement,
         content = content,
     )
+}
+
+/** Строка в ленивом списке, оформленная как часть одной карточки. */
+@Composable
+fun EventCardListItem(isFirst: Boolean, isLast: Boolean, content: @Composable () -> Unit) {
+    val shape = remember(isFirst, isLast) {
+        RoundedCornerShape(
+            topStart = if (isFirst) 20.dp else 0.dp,
+            topEnd = if (isFirst) 20.dp else 0.dp,
+            bottomEnd = if (isLast) 20.dp else 0.dp,
+            bottomStart = if (isLast) 20.dp else 0.dp,
+        )
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(LognaraPalette.Surface)
+            .drawWithContent {
+                drawContent()
+                val strokeWidth = 1.dp.toPx()
+                val halfStroke = strokeWidth / 2
+                val radius = minOf(20.dp.toPx(), size.height / 2, size.width / 2)
+                val leftStart = if (isFirst) radius else 0f
+                val rightStart = if (isFirst) radius else 0f
+                val leftEnd = if (isLast) size.height - radius else size.height
+                val rightEnd = if (isLast) size.height - radius else size.height
+                val borderColor = LognaraPalette.Border
+
+                drawLine(borderColor, Offset(halfStroke, leftStart), Offset(halfStroke, leftEnd), strokeWidth)
+                drawLine(borderColor, Offset(size.width - halfStroke, rightStart), Offset(size.width - halfStroke, rightEnd), strokeWidth)
+                if (isFirst) {
+                    drawLine(borderColor, Offset(radius, halfStroke), Offset(size.width - radius, halfStroke), strokeWidth)
+                    val topLeft = Path().apply {
+                        moveTo(halfStroke, radius)
+                        quadraticTo(halfStroke, halfStroke, radius, halfStroke)
+                    }
+                    val topRight = Path().apply {
+                        moveTo(size.width - radius, halfStroke)
+                        quadraticTo(size.width - halfStroke, halfStroke, size.width - halfStroke, radius)
+                    }
+                    drawPath(topLeft, borderColor, style = Stroke(strokeWidth))
+                    drawPath(topRight, borderColor, style = Stroke(strokeWidth))
+                }
+                if (isLast) {
+                    drawLine(
+                        borderColor,
+                        Offset(radius, size.height - halfStroke),
+                        Offset(size.width - radius, size.height - halfStroke),
+                        strokeWidth,
+                    )
+                    val bottomLeft = Path().apply {
+                        moveTo(radius, size.height - halfStroke)
+                        quadraticTo(halfStroke, size.height - halfStroke, halfStroke, size.height - radius)
+                    }
+                    val bottomRight = Path().apply {
+                        moveTo(size.width - halfStroke, size.height - radius)
+                        quadraticTo(size.width - halfStroke, size.height - halfStroke, size.width - radius, size.height - halfStroke)
+                    }
+                    drawPath(bottomLeft, borderColor, style = Stroke(strokeWidth))
+                    drawPath(bottomRight, borderColor, style = Stroke(strokeWidth))
+                }
+            },
+        verticalArrangement = Arrangement.spacedBy(0.dp),
+    ) {
+        content()
+        if (!isLast) RowDivider(Modifier.padding(horizontal = 1.dp))
+    }
 }
 
 /** Тонкий разделитель строк внутри карточки. */
@@ -457,7 +530,7 @@ fun SearchField(
                 cursorBrush = SolidColor(LognaraPalette.Accent),
                 keyboardOptions = KeyboardOptions(imeAction = if (onSearch != null) ImeAction.Search else ImeAction.Done),
                 keyboardActions = androidx.compose.foundation.text.KeyboardActions(onSearch = { onSearch?.invoke() }),
-                modifier = Modifier.fillMaxWidth().semantics { contentDescription = placeholder },
+                modifier = Modifier.fillMaxWidth(),
             )
         }
         trailing?.invoke()
@@ -588,6 +661,9 @@ fun LognaraBottomBar(items: List<BottomNavItem>, selected: Int, onSelect: (Int) 
         ) {
             items.forEachIndexed { index, item ->
                 val isSelected = index == selected
+                val accessibilityLabel = item.badge?.takeIf { it > 0 }?.let { count ->
+                    stringResource(R.string.nav_count_description, item.label, count)
+                }
                 Column(
                     modifier = Modifier
                         .weight(1f)
@@ -597,6 +673,11 @@ fun LognaraBottomBar(items: List<BottomNavItem>, selected: Int, onSelect: (Int) 
                             interactionSource = remember { MutableInteractionSource() },
                             indication = ripple(bounded = false, radius = 36.dp),
                             onClick = { onSelect(index) },
+                        )
+                        .then(
+                            accessibilityLabel?.let { label ->
+                                Modifier.semantics { contentDescription = label }
+                            } ?: Modifier,
                         )
                         .padding(top = 6.dp, bottom = 4.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -639,14 +720,16 @@ fun LognaraBottomBar(items: List<BottomNavItem>, selected: Int, onSelect: (Int) 
 fun CountBadge(count: Long, modifier: Modifier = Modifier) {
     Box(
         modifier = modifier
-            .size(20.dp)
-            .clip(CircleShape)
+            .heightIn(min = 20.dp)
+            .defaultMinSize(minWidth = 20.dp)
+            .clip(PillShape)
             .background(LognaraSemanticColors.error)
-            .border(2.dp, LognaraPalette.Surface, CircleShape),
+            .border(2.dp, LognaraPalette.Surface, PillShape)
+            .padding(horizontal = 4.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(
-            if (count > 99) "99" else count.toString(),
+            if (count > 99) "99+" else count.toString(),
             fontSize = 11.sp,
             lineHeight = 12.sp,
             fontWeight = FontWeight.W700,

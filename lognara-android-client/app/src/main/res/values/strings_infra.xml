@@ -20,6 +20,6 @@
     <string name="infra_ui_heartbeat">Heartbeat</string>
     <string name="infra_ui_last_event">Событие</string>
     <string name="infra_ui_failures">Сбоев</string>
-    <string name="infra_ui_spool_line">Спул %1$s из %2$s</string>
+    <string name="infra_ui_spool_line">Спул %1$s из %2$s · записей %3$s</string>
     <string name="infra_ui_spool_threshold">порог %1$d%%</string>
 </resources>

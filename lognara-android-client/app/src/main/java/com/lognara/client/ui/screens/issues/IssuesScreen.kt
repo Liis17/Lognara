@@ -29,6 +29,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -92,6 +94,7 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 @Composable
+@OptIn(ExperimentalMaterial3Api::class)
 fun IssuesScreen(
     api: LognaraApi,
     session: DeviceSession,
@@ -151,31 +154,40 @@ fun IssuesScreen(
             )
             IssueSortSelector(sort = sort, onSelect = { sortName = it.name })
         }
-        DataStateContent(
-            state = state.result,
-            isEmpty = { false },
-            onRetry = viewModel::reload,
+        PullToRefreshBox(
+            isRefreshing = state.result is DataLoadState.Loading,
+            onRefresh = viewModel::reload,
             modifier = Modifier.weight(1f).fillMaxWidth(),
-        ) { data ->
-            if (data.response.issues.isEmpty()) {
-                Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
-                    Text(
-                        text = if (state.status == IssueStatus.NEW && data.response.counts.new == null) {
-                            stringResource(R.string.issue_new_unknown)
-                        } else {
-                            stringResource(R.string.issue_empty)
-                        },
-                        color = LognaraPalette.TextMuted,
-                    )
-                }
-            } else {
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                    contentPadding = PaddingValues(top = 12.dp, bottom = 16.dp),
-                ) {
-                    items(sortIssues(data.response.issues, sort), key = { it.fingerprint }) { issue ->
-                        IssueCard(issue) { onOpenIssue(issue, state.range, state.service) }
+        ) {
+            DataStateContent(
+                state = state.result,
+                isEmpty = { false },
+                onRetry = viewModel::reload,
+                modifier = Modifier.fillMaxSize(),
+            ) { data ->
+                if (data.response.issues.isEmpty()) {
+                    Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
+                        Text(
+                            text = if (state.status == IssueStatus.NEW && data.response.counts.new == null) {
+                                stringResource(R.string.issue_new_unknown)
+                            } else {
+                                stringResource(R.string.issue_empty)
+                            },
+                            color = LognaraPalette.TextMuted,
+                        )
+                    }
+                } else {
+                    val sortedIssues = remember(data.response.issues, sort, state.status) {
+                        sortIssues(data.response.issues, sort, state.status)
+                    }
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                        contentPadding = PaddingValues(top = 12.dp, bottom = 16.dp),
+                    ) {
+                        items(sortedIssues, key = { it.fingerprint }) { issue ->
+                            IssueCard(issue) { onOpenIssue(issue, state.range, state.service) }
+                        }
                     }
                 }
             }
@@ -199,15 +211,18 @@ private fun statusCount(status: IssueStatus, data: IssuesPageData?): String = wh
 
 internal enum class IssueSort { FREQUENT, NEWEST }
 
-internal fun sortIssues(issues: List<Issue>, sort: IssueSort): List<Issue> = when (sort) {
-    IssueSort.FREQUENT -> issues.sortedWith(
-        compareByDescending<Issue> { it.count }
-            .thenByDescending { issueInstant(it.last_seen) },
-    )
-    IssueSort.NEWEST -> issues.sortedWith(
-        compareByDescending<Issue> { issueInstant(it.last_seen) }
-            .thenByDescending { it.count },
-    )
+internal fun sortIssues(issues: List<Issue>, sort: IssueSort, status: IssueStatus? = null): List<Issue> {
+    if (status == IssueStatus.RESOLVED) return issues
+    return when (sort) {
+        IssueSort.FREQUENT -> issues.sortedWith(
+            compareByDescending<Issue> { it.count }
+                .thenByDescending { issueInstant(it.last_seen) },
+        )
+        IssueSort.NEWEST -> issues.sortedWith(
+            compareByDescending<Issue> { issueInstant(it.last_seen) }
+                .thenByDescending { it.count },
+        )
+    }
 }
 
 private fun issueInstant(timestamp: String): Instant =
@@ -511,9 +526,9 @@ private fun IssueDetailsContent(
     val statusIssue = details.issue.copy(state = details.state)
     val statusColor = issueStatusColor(statusIssue)
     LazyColumn(
-        modifier = modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+        modifier = modifier.fillMaxWidth().padding(horizontal = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
-        contentPadding = PaddingValues(bottom = 12.dp),
+        contentPadding = PaddingValues(top = 24.dp, bottom = 24.dp),
     ) {
         item {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(horizontal = 4.dp)) {
@@ -639,6 +654,53 @@ private fun IssueDetailsContent(
                 }
             }
         }
+        if (details.other_servers > 0) {
+            item {
+                Text(
+                    stringResource(R.string.issue_other_servers, details.other_servers),
+                    modifier = Modifier.padding(horizontal = 8.dp),
+                    fontSize = 12.sp,
+                    color = LognaraPalette.TextMuted,
+                )
+            }
+        }
+        item {
+            SectionLabel(stringResource(R.string.issue_history), Modifier.padding(horizontal = 4.dp))
+        }
+        if (details.history.isEmpty()) {
+            item {
+                LognaraCard(contentPadding = PaddingValues(14.dp), shape = RoundedCornerShape(14.dp)) {
+                    Text(stringResource(R.string.issue_no_history), fontSize = 13.sp, color = LognaraPalette.TextMuted)
+                }
+            }
+        } else {
+            item {
+                LognaraCard(
+                    contentPadding = PaddingValues(0.dp),
+                    shape = CardShape,
+                    verticalArrangement = Arrangement.spacedBy(0.dp),
+                ) {
+                    details.history.forEachIndexed { index, history ->
+                        Text(
+                            stringResource(
+                                when (history.action) {
+                                    "resolved" -> R.string.issue_history_resolved
+                                    "reopened" -> R.string.issue_history_reopened
+                                    else -> R.string.issue_history_regressed
+                                },
+                                localTimestamp(history.at),
+                                history.actor ?: stringResource(R.string.issue_actor_system),
+                            ),
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                            fontSize = 13.sp,
+                            lineHeight = 19.sp,
+                            color = LognaraPalette.TextSecondary,
+                        )
+                        if (index < details.history.lastIndex) RowDivider()
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -674,31 +736,41 @@ private fun FingerprintCard(fingerprint: String) {
 
 @Composable
 private fun IssueExampleRow(event: LogEvent, color: Color, onClick: () -> Unit) {
-    Row(
+    Column(
         modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Box(Modifier.size(8.dp).clip(CircleShape).background(color))
-        Text(
-            localTimestamp(event.timestamp),
-            style = monoStyle(12),
-            color = LognaraPalette.TextMuted,
-            maxLines = 1,
-        )
-        Text(
-            event.server,
-            style = monoStyle(12),
-            color = LognaraPalette.TextSecondary,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f),
-        )
-        Icon(
-            painterResource(R.drawable.ic_chevron_right),
-            contentDescription = null,
-            tint = LognaraPalette.TextMuted,
-            modifier = Modifier.size(16.dp),
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Box(Modifier.size(8.dp).clip(CircleShape).background(color))
+            Text(
+                localTimestamp(event.timestamp),
+                style = monoStyle(12),
+                color = LognaraPalette.TextMuted,
+                maxLines = 1,
+            )
+            Text(
+                event.server,
+                style = monoStyle(12),
+                color = LognaraPalette.TextSecondary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Icon(
+                painterResource(R.drawable.ic_chevron_right),
+                contentDescription = null,
+                tint = LognaraPalette.TextMuted,
+                modifier = Modifier.size(16.dp),
+            )
+        }
+        IssueMessageText(
+            text = event.message,
+            modifier = Modifier.padding(start = 18.dp),
+            maxLines = 2,
+            styleSize = 12,
         )
     }
 }

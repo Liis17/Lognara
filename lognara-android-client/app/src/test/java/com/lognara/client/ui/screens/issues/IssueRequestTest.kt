@@ -55,6 +55,17 @@ class IssueRequestTest {
         assertEquals(listOf("recent", "tied", "frequent"), sortIssues(listOf(frequent, tiedButOlder, recent), IssueSort.NEWEST).map { it.fingerprint })
     }
 
+    @Test
+    fun resolvedIssuesKeepServerOrder() {
+        val issues = listOf(
+            issue("recent", count = 3, lastSeen = "2026-11-17T11:00:00Z"),
+            issue("frequent", count = 8, lastSeen = "2026-11-16T10:00:00Z"),
+            issue("tied", count = 8, lastSeen = "2026-11-17T09:00:00Z"),
+        )
+
+        assertEquals(issues, sortIssues(issues, IssueSort.FREQUENT, IssueStatus.RESOLVED))
+    }
+
     private fun issue(fingerprint: String, count: Long, lastSeen: String) = Issue(
         fingerprint = fingerprint,
         service = "api",

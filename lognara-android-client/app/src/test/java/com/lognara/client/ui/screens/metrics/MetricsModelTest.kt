@@ -77,9 +77,17 @@ class MetricsModelTest {
     fun chartAxisUsesRoundedTicksAroundObservedRange() {
         val axis = chartAxis(ChartScale(minimum = 1_101.0, maximum = 2_310.0))
 
-        assertEquals(1_100.0, axis.minimum, 0.0)
+        assertEquals(800.0, axis.minimum, 0.0)
         assertEquals(2_400.0, axis.maximum, 0.0)
-        assertEquals(listOf(2_400.0, 2_000.0, 1_600.0, 1_200.0), axis.ticks)
+        assertEquals(listOf(2_400.0, 2_000.0, 1_600.0, 1_200.0, 800.0), axis.ticks)
+        assertEquals(axis.maximum, axis.ticks.first(), 0.0)
+        assertEquals(axis.minimum, axis.ticks.last(), 0.0)
+    }
+
+    @Test
+    fun chartAxisPrecisionFollowsTickStepForSmallValues() {
+        assertEquals(1, chartAxisDecimalPlaces(2.5))
+        assertEquals(4, chartAxisDecimalPlaces(0.0004))
     }
 
     private fun chart(vararg series: SeriesLine) = SeriesReply(

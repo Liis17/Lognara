@@ -1,6 +1,8 @@
 package com.lognara.client.ui.screens
 
 import android.content.Intent
+import android.content.ActivityNotFoundException
+import android.widget.Toast
 import androidx.core.net.toUri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -138,7 +140,11 @@ fun SettingsScreen(
                     RowDivider()
                     WebConsoleRow(
                         onClick = {
-                            context.startActivity(Intent(Intent.ACTION_VIEW, session.serverUrl.toUri()))
+                            try {
+                                context.startActivity(Intent(Intent.ACTION_VIEW, session.serverUrl.toUri()))
+                            } catch (_: ActivityNotFoundException) {
+                                Toast.makeText(context, R.string.settings_browser_not_found, Toast.LENGTH_SHORT).show()
+                            }
                         },
                     )
                 }

@@ -12,13 +12,16 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -97,6 +100,8 @@ import com.lognara.client.ui.theme.LognaraSemanticColors
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.math.BigDecimal
+import java.text.NumberFormat
 import java.util.Locale
 import java.util.concurrent.CancellationException
 import kotlin.math.abs
@@ -485,7 +490,12 @@ fun MetricDetailsScreen(
     val state by viewModel.state.collectAsStateWithLifecycle()
     var environmentMenu by remember { mutableStateOf(false) }
 
-    Column(Modifier.fillMaxSize()) {
+    Column(
+        Modifier.fillMaxSize()
+            .background(LognaraPalette.Background)
+            .statusBarsPadding()
+            .navigationBarsPadding(),
+    ) {
         DetailTopBar(
             title = stringResource(R.string.metric_detail_title),
             onBack = onBack,
@@ -662,24 +672,44 @@ private fun MetricSplitChip(text: String, selected: Boolean, onClick: () -> Unit
 
 @Composable
 private fun MetricSeriesChart(chart: SeriesReply, metric: SeriesMetric, range: DataRange) {
-    val scale = chartScale(chart.series.flatMap { it.values }) ?: return
-    val bucketCount = maxOf(chart.buckets.size, chart.series.maxOfOrNull { it.values.size } ?: 0)
+    val scale = remember(chart.series) {
+        chartScale(chart.series.flatMap { it.values })
+    } ?: return
+    val bucketCount = remember(chart.buckets, chart.series) {
+        maxOf(chart.buckets.size, chart.series.maxOfOrNull { it.values.size } ?: 0)
+    }
     if (bucketCount == 0) return
     val initialIndex = remember(chart) { maximumPointIndex(chart)?.let { nearestPointIndex(chart, it) } ?: 0 }
     var selectedIndex by remember(chart) { mutableIntStateOf(initialIndex) }
-    val seriesColors = chart.series.indices.map { MetricSeriesColors[it % MetricSeriesColors.size] }
-    val selectedPoint = chart.series.mapIndexedNotNull { seriesIndex, line ->
-        line.values.getOrNull(selectedIndex)?.takeIf(Double::isFinite)?.let { Triple(seriesIndex, line, it) }
-    }.firstOrNull()
-    val selectedTimestamp = chart.buckets.getOrNull(selectedIndex)?.let(::metricTimestamp).orEmpty()
+    val seriesColors = remember(chart.series.size) {
+        chart.series.indices.map { MetricSeriesColors[it % MetricSeriesColors.size] }
+    }
+    val selectedPoint = remember(chart.series, selectedIndex) {
+        chart.series.mapIndexedNotNull { seriesIndex, line ->
+            line.values.getOrNull(selectedIndex)?.takeIf(Double::isFinite)?.let { Triple(seriesIndex, line, it) }
+        }.firstOrNull()
+    }
+    val selectedTimestamp = remember(chart.buckets, selectedIndex) {
+        chart.buckets.getOrNull(selectedIndex)?.let(::metricTimestamp).orEmpty()
+    }
     val axis = remember(scale) { chartAxis(scale) }
+    val valueFormatter = remember {
+        NumberFormat.getNumberInstance(Locale.forLanguageTag("ru")).apply { maximumFractionDigits = 1 }
+    }
+    val axisFormatter = remember(axis.tickStep) {
+        NumberFormat.getNumberInstance(Locale.forLanguageTag("ru")).apply {
+            val decimalPlaces = chartAxisDecimalPlaces(axis.tickStep)
+            minimumFractionDigits = decimalPlaces
+            maximumFractionDigits = decimalPlaces
+        }
+    }
     val stepText = intervalLabel(range)
     val chartDescription = stringResource(
         R.string.metrics_chart_accessibility,
         metric.definition?.title?.takeIf(String::isNotBlank) ?: metric.name,
         stringResource(range.label),
-        number(scale.maximum),
-        number(scale.minimum),
+        axisFormatter.format(scale.maximum),
+        axisFormatter.format(scale.minimum),
     )
     val accessibleActionLabel = stringResource(R.string.metrics_chart_accessible_action)
     val selectIndex: (Float, Float) -> Unit = { x, plotWidth ->
@@ -724,6 +754,10 @@ private fun MetricSeriesChart(chart: SeriesReply, metric: SeriesMetric, range: D
             val axisWidth = 52.dp
             val graphWidth = maxWidth - axisWidth
             val graphWidthPx = with(LocalDensity.current) { graphWidth.toPx() }
+            val verticalPadding = 10.dp
+            val axisPlotHeight = maxHeight - verticalPadding * 2
+            val axisLabelHeight = 15.dp
+            val axisLabelStyle = monoStyle(10).copy(lineHeight = 15.sp)
             Canvas(
                 Modifier
                     .fillMaxSize()
@@ -749,11 +783,11 @@ private fun MetricSeriesChart(chart: SeriesReply, metric: SeriesMetric, range: D
             ) {
                 val axisWidthPx = axisWidth.toPx()
                 val plotWidth = (size.width - axisWidthPx).coerceAtLeast(1f)
-                val verticalPadding = 6.dp.toPx()
-                val plotHeight = (size.height - verticalPadding * 2).coerceAtLeast(1f)
+                val verticalPaddingPx = verticalPadding.toPx()
+                val plotHeight = (size.height - verticalPaddingPx * 2).coerceAtLeast(1f)
                 axis.ticks.forEach { tick ->
                     val ratio = ((tick - axis.minimum) / (axis.maximum - axis.minimum)).toFloat()
-                    val y = verticalPadding + plotHeight * (1f - ratio)
+                    val y = verticalPaddingPx + plotHeight * (1f - ratio)
                     drawLine(
                         LognaraPalette.Divider,
                         Offset(0f, y),
@@ -771,7 +805,7 @@ private fun MetricSeriesChart(chart: SeriesReply, metric: SeriesMetric, range: D
                         } else {
                             val x = plotWidth * index / denominator
                             val ratio = ((value - axis.minimum) / (axis.maximum - axis.minimum)).toFloat().coerceIn(0f, 1f)
-                            val y = verticalPadding + plotHeight * (1f - ratio)
+                            val y = verticalPaddingPx + plotHeight * (1f - ratio)
                             if (previous) path.lineTo(x, y) else path.moveTo(x, y)
                             previous = true
                         }
@@ -789,19 +823,26 @@ private fun MetricSeriesChart(chart: SeriesReply, metric: SeriesMetric, range: D
                 )
                 selectedPoint?.let { (seriesIndex, _, value) ->
                     val ratio = ((value - axis.minimum) / (axis.maximum - axis.minimum)).toFloat().coerceIn(0f, 1f)
-                    val center = Offset(selectedX, verticalPadding + plotHeight * (1f - ratio))
+                    val center = Offset(selectedX, verticalPaddingPx + plotHeight * (1f - ratio))
                     drawCircle(LognaraPalette.Background, radius = 5.dp.toPx(), center = center)
                     drawCircle(seriesColors[seriesIndex], radius = 4.dp.toPx(), center = center, style = Stroke(width = 2.dp.toPx()))
                 }
             }
 
-            Column(
-                modifier = Modifier.align(Alignment.TopEnd).width(axisWidth).height(172.dp).padding(start = 3.dp),
-                verticalArrangement = Arrangement.SpaceBetween,
-                horizontalAlignment = Alignment.End,
+            Box(
+                modifier = Modifier.align(Alignment.TopEnd).width(axisWidth).fillMaxHeight().padding(start = 3.dp),
             ) {
                 axis.ticks.forEach { value ->
-                    Text(number(value), style = monoStyle(10), color = LognaraPalette.TextMuted, maxLines = 1)
+                    val fraction = ((axis.maximum - value) / (axis.maximum - axis.minimum)).toFloat()
+                    val y = verticalPadding + axisPlotHeight * fraction - axisLabelHeight / 2
+                    Text(
+                        axisFormatter.format(value),
+                        modifier = Modifier.align(Alignment.TopEnd).offset(y = y).fillMaxWidth(),
+                        style = axisLabelStyle,
+                        color = LognaraPalette.TextMuted,
+                        maxLines = 1,
+                        textAlign = TextAlign.End,
+                    )
                 }
             }
 
@@ -821,7 +862,7 @@ private fun MetricSeriesChart(chart: SeriesReply, metric: SeriesMetric, range: D
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(selectedTimestamp, style = monoStyle(12), color = LognaraPalette.TextMuted, maxLines = 1)
-                    Text(number(selectedPoint.third), style = monoStyle(12, FontWeight.W500), color = LognaraPalette.Text, maxLines = 1)
+                    Text(valueFormatter.format(selectedPoint.third), style = monoStyle(12, FontWeight.W500), color = LognaraPalette.Text, maxLines = 1)
                 }
             }
         }
@@ -869,7 +910,7 @@ internal fun nearestPointIndex(chart: SeriesReply, target: Int): Int? {
         .minByOrNull { abs(it - target) }
 }
 
-internal data class ChartAxis(val minimum: Double, val maximum: Double, val ticks: List<Double>)
+internal data class ChartAxis(val minimum: Double, val maximum: Double, val tickStep: Double, val ticks: List<Double>)
 
 internal fun chartAxis(scale: ChartScale): ChartAxis {
     val rawStep = (scale.maximum - scale.minimum) / 3
@@ -884,11 +925,23 @@ internal fun chartAxis(scale: ChartScale): ChartAxis {
         else -> 10.0
     }
     val step = factor * magnitude
-    val roundingUnit = step / 4
-    val minimum = floor(scale.minimum / roundingUnit) * roundingUnit
-    val maximum = ceil(scale.maximum / step) * step
-    return ChartAxis(minimum, maximum, (0..3).map { maximum - step * it })
+    val minimumTick = floor(scale.minimum / step)
+    val maximumTick = ceil(scale.maximum / step)
+    val intervals = (maximumTick - minimumTick).toInt().coerceAtLeast(1)
+    val minimum = minimumTick * step
+    val maximum = maximumTick * step
+    val ticks = (0..intervals).map { index ->
+        when (index) {
+            0 -> maximum
+            intervals -> minimum
+            else -> (maximumTick - index) * step
+        }
+    }
+    return ChartAxis(minimum, maximum, step, ticks)
 }
+
+internal fun chartAxisDecimalPlaces(tickStep: Double): Int =
+    BigDecimal.valueOf(tickStep).stripTrailingZeros().scale().coerceAtLeast(0)
 
 private val MetricSeriesColors = listOf(
     LognaraPalette.Accent,

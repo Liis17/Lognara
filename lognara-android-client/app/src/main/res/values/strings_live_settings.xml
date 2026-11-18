@@ -16,6 +16,7 @@
     <string name="settings_connection_section">Подключение</string>
     <string name="settings_device_section">Устройство</string>
     <string name="settings_open_web_console">Открыть веб-консоль</string>
+    <string name="settings_browser_not_found">Не удалось открыть веб-консоль: браузер не найден.</string>
     <string name="settings_disconnect_description">После отключения приложение потеряет доступ к Dock. Вы сможете снова подключить устройство в любой момент.</string>
     <string name="settings_android_client">Android-клиент</string>
 </resources>

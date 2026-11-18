@@ -9,20 +9,20 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -49,7 +49,6 @@ import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -64,6 +63,7 @@ import com.lognara.client.ui.components.LogEventRow as SharedLogEventRow
 import com.lognara.client.data.SummaryBucket
 import com.lognara.client.data.SummaryResponse
 import com.lognara.client.ui.components.ChipRow
+import com.lognara.client.ui.components.EventCardListItem
 import com.lognara.client.ui.components.FieldHint
 import com.lognara.client.ui.components.FilterPill
 import com.lognara.client.ui.components.LevelDot
@@ -80,8 +80,6 @@ import com.lognara.client.ui.screens.data.DataRange
 import com.lognara.client.ui.screens.data.RangeSelector
 import com.lognara.client.ui.screens.data.formatDataNumber
 import com.lognara.client.ui.screens.data.localTimestamp
-import com.lognara.client.ui.theme.LognaraSemanticColors
-import com.lognara.client.ui.theme.MachineTextStyle
 import com.lognara.client.ui.theme.LognaraPalette
 import java.net.URI
 import java.time.Instant
@@ -112,7 +110,7 @@ fun LogsScreen(
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(bottom = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        verticalArrangement = Arrangement.Top,
     ) {
         item {
             ScreenHeader(
@@ -121,6 +119,7 @@ fun LogsScreen(
                 actions = { SettingsButton(onSettings) },
             )
         }
+        item(key = "space-search") { Spacer(Modifier.height(12.dp)) }
         item {
             SearchField(
                 value = query,
@@ -131,6 +130,7 @@ fun LogsScreen(
                 modifier = Modifier.padding(horizontal = 16.dp),
             )
         }
+        item(key = "space-range") { Spacer(Modifier.height(12.dp)) }
         item {
             RangeSelector(
                 selected = state.range,
@@ -138,6 +138,7 @@ fun LogsScreen(
                 modifier = Modifier.padding(horizontal = 16.dp),
             )
         }
+        item(key = "space-filters") { Spacer(Modifier.height(12.dp)) }
         item {
             ChipRow(horizontalPadding = 16.dp) {
                 FilterPill(
@@ -172,6 +173,7 @@ fun LogsScreen(
                 }
             }
         }
+        item(key = "space-results") { Spacer(Modifier.height(12.dp)) }
 
         when (val result = state.result) {
             DataLoadState.Loading -> item {
@@ -190,6 +192,7 @@ fun LogsScreen(
                     item(key = "summary") {
                         SummaryCard(summary = summary, range = state.range)
                     }
+                    item(key = "space-summary") { Spacer(Modifier.height(12.dp)) }
                 }
                 item(key = "event-day") {
                     Row(
@@ -205,6 +208,7 @@ fun LogsScreen(
                         )
                     }
                 }
+                item(key = "space-events") { Spacer(Modifier.height(12.dp)) }
                 if (data.events.isEmpty()) {
                     item(key = "empty") {
                         Text(
@@ -214,17 +218,20 @@ fun LogsScreen(
                             modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp),
                         )
                     }
+                    if (state.pagingError || data.nextCursor != null) {
+                        item(key = "space-empty-page") { Spacer(Modifier.height(12.dp)) }
+                    }
                 } else {
-                    item(key = "events") {
-                        LognaraCard(
-                            contentPadding = PaddingValues(0.dp),
-                            verticalArrangement = Arrangement.spacedBy(0.dp),
+                    itemsIndexed(data.events, key = { _, event -> event.id }) { index, event ->
+                        EventCardListItem(
+                            isFirst = index == 0,
+                            isLast = index == data.events.lastIndex,
                         ) {
-                            data.events.forEachIndexed { index, event ->
-                                if (index > 0) RowDivider()
-                                EventListRow(event = event, onClick = { onOpenEvent(event) })
-                            }
+                            EventListRow(event = event, onClick = { onOpenEvent(event) })
                         }
+                    }
+                    if (state.pagingError || data.nextCursor != null) {
+                        item(key = "space-event-page") { Spacer(Modifier.height(12.dp)) }
                     }
                 }
                 if (state.pagingError) item(key = "paging-error") {
@@ -232,6 +239,9 @@ fun LogsScreen(
                         Text(stringResource(R.string.logs_page_error), color = LognaraPalette.TextMuted)
                         TextButton(onClick = viewModel::loadNextPage) { Text(stringResource(R.string.retry)) }
                     }
+                }
+                if (state.pagingError && data.nextCursor != null) {
+                    item(key = "space-next-page") { Spacer(Modifier.height(12.dp)) }
                 }
                 if (data.nextCursor != null) item(key = "next-page") {
                     TextButton(
@@ -481,60 +491,6 @@ private fun EventListRow(event: LogEvent, onClick: () -> Unit) {
         message = event.message,
         onClick = onClick,
     )
-}
-
-/** Сохраняет прежний helper для LiveScreen, который использует этот экранный пакет. */
-@Composable
-fun LogEventRow(event: LogEvent, onClick: () -> Unit, modifier: Modifier = Modifier) {
-    Surface(
-        modifier = modifier.fillMaxWidth().clickable(onClick = onClick),
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        shape = MaterialTheme.shapes.medium,
-    ) {
-        Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Text(
-                    stringResource(levelLabel(event.level)),
-                    color = levelColor(event.level, LognaraSemanticColors),
-                    style = MaterialTheme.typography.labelLarge,
-                )
-                Text(localTimestamp(event.timestamp), style = MachineTextStyle, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text(event.service, style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            }
-            Text(event.message, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
-            Text(
-                text = "${event.server} · ${event.backend}",
-                style = MachineTextStyle,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-    }
-}
-
-internal fun levelLabel(level: LogLevel): Int = when (level) {
-    LogLevel.TRACE -> R.string.log_level_trace
-    LogLevel.DEBUG -> R.string.log_level_debug
-    LogLevel.INFO -> R.string.log_level_info
-    LogLevel.WARN -> R.string.log_level_warn
-    LogLevel.ERROR -> R.string.log_level_error
-    LogLevel.FATAL -> R.string.log_level_fatal
-    LogLevel.UNKNOWN -> R.string.log_level_unknown
-}
-
-private fun levelColor(level: LogLevel, colors: com.lognara.client.ui.theme.LognaraColors): Color = when (level) {
-    LogLevel.TRACE -> colors.trace
-    LogLevel.DEBUG -> colors.debug
-    LogLevel.INFO -> colors.info
-    LogLevel.WARN -> colors.warn
-    LogLevel.ERROR -> colors.error
-    LogLevel.FATAL -> colors.fatal
-    LogLevel.UNKNOWN -> colors.unknown
 }
 
 private fun eventTime(value: String): String {
