@@ -32,7 +32,7 @@ class LognaraApi(
 ) {
     private val client = client.newBuilder().followRedirects(false).followSslRedirects(false).cache(null).build()
     @Volatile
-    var onUnauthorized: (() -> Unit)? = null
+    var onUnauthorized: ((DeviceSession) -> Unit)? = null
 
     suspend fun pair(payload: PairPayload, deviceName: String): PairResult {
         val jsonBody = apiJson.encodeToString(PairRequest(payload.code, deviceName))
@@ -80,7 +80,7 @@ class LognaraApi(
 
             override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {
                 val status = response?.code
-                if (status == 401) onUnauthorized?.invoke()
+                if (status == 401) onUnauthorized?.invoke(session)
                 listener.onFailure(status)
             }
         })
@@ -121,7 +121,7 @@ class LognaraApi(
         val response = execute(request, maxResponseBytes, skipRedirectAndUnauthorizedBodies = true)
         if (response.status in 300..399) throw ApiException.Redirect
         if (response.status == 401) {
-            onUnauthorized?.invoke()
+            onUnauthorized?.invoke(session)
             throw ApiException.Unauthorized
         }
         if (response.status !in 200..299) throw ApiException.Server(response.status, decodeError(response.body))

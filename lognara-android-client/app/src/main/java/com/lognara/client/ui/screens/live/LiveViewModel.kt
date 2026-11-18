@@ -6,9 +6,11 @@ import com.lognara.client.data.DeviceSession
 import com.lognara.client.data.LogEvent
 import com.lognara.client.data.LogLevel
 import com.lognara.client.data.LognaraApi
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 
 enum class LiveNotice { Lagged, CoreUnavailable, InvalidData }
 
@@ -32,7 +34,9 @@ class LiveViewModel(private val api: LognaraApi, private val session: DeviceSess
         openStream = { listener -> api.openLogsStream(session, listener) },
         checkSession = { api.getMe(session).let { } },
         onStatus = { status -> _state.update { it.copy(status = status) } },
-        onEvent = ::handleEvent,
+        onEvent = { type, data ->
+            viewModelScope.launch(Dispatchers.Main.immediate) { handleEvent(type, data) }
+        },
     )
 
     fun start() = controller.start()

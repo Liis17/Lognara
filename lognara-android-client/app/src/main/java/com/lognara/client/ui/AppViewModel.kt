@@ -17,6 +17,7 @@ import com.lognara.client.data.decodePairPayload
 import java.io.IOException
 import java.net.SocketTimeoutException
 import java.util.concurrent.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -41,6 +42,9 @@ data class SettingsUiState(
 
 enum class SettingsError { Network, Server, Redirect, InvalidResponse }
 enum class LoginNotice { DeviceStillListed }
+
+internal fun isCurrentUnauthorizedSession(requestSession: DeviceSession, currentSession: DeviceSession?): Boolean =
+    requestSession == currentSession
 
 class AppViewModel(val container: AppContainer) : ViewModel() {
     private var unauthorizedSignOut: Job? = null
@@ -73,9 +77,13 @@ class AppViewModel(val container: AppContainer) : ViewModel() {
         viewModelScope.launch { restoreCredentials() }
     }
 
-    private fun handleUnauthorized() {
-        if (_session.value == null || unauthorizedSignOut?.isActive == true) return
-        unauthorizedSignOut = viewModelScope.launch { signOut() }
+    private fun handleUnauthorized(requestSession: DeviceSession) {
+        viewModelScope.launch(Dispatchers.Main.immediate) {
+            if (!isCurrentUnauthorizedSession(requestSession, _session.value) || unauthorizedSignOut?.isActive == true) {
+                return@launch
+            }
+            unauthorizedSignOut = viewModelScope.launch(Dispatchers.Main.immediate) { signOut() }
+        }
     }
 
     fun retryRestoreCredentials() {
@@ -173,7 +181,7 @@ class AppViewModel(val container: AppContainer) : ViewModel() {
             try {
                 container.api.disconnect(session)
             } catch (_: ApiException.Unauthorized) {
-                handleUnauthorized()
+                handleUnauthorized(session)
                 return@launch
             } catch (_: ApiException.Redirect) {
                 _settings.value = SettingsUiState(error = SettingsError.Redirect)
