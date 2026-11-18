@@ -41,7 +41,13 @@ import java.time.Instant
 
 @Composable
 @OptIn(ExperimentalMaterial3Api::class)
-fun InfrastructureScreen(api: LognaraApi, session: DeviceSession) {
+fun InfrastructureScreen(api: LognaraApi, session: DeviceSession, onSettings: () -> Unit) {
+    androidx.compose.foundation.layout.Column(Modifier.fillMaxSize()) {
+        com.lognara.client.ui.components.ScreenHeader(
+            title = stringResource(R.string.tab_infrastructure),
+            actions = { com.lognara.client.ui.components.SettingsButton(onSettings) },
+        )
+        androidx.compose.foundation.layout.Box(Modifier.weight(1f)) {
     val viewModel: InfrastructureViewModel = viewModel(key = "infrastructure-${session.deviceId}") {
         InfrastructureViewModel(api, session)
     }
@@ -59,6 +65,8 @@ fun InfrastructureScreen(api: LognaraApi, session: DeviceSession) {
             modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
         ) { response ->
             InfrastructureContent(response, viewModel::reload)
+        }
+    }
         }
     }
 }

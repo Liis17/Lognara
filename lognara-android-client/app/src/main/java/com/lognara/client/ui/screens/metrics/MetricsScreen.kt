@@ -71,7 +71,14 @@ fun MetricsScreen(
     api: LognaraApi,
     session: DeviceSession,
     onOpenMetric: (SeriesMetric) -> Unit,
+    onSettings: () -> Unit,
 ) {
+    androidx.compose.foundation.layout.Column(Modifier.fillMaxSize()) {
+        com.lognara.client.ui.components.ScreenHeader(
+            title = stringResource(R.string.tab_metrics),
+            actions = { com.lognara.client.ui.components.SettingsButton(onSettings) },
+        )
+        androidx.compose.foundation.layout.Box(Modifier.weight(1f)) {
     val viewModel: MetricsViewModel = viewModel(key = "metrics-${session.deviceId}") {
         MetricsViewModel(api, session)
     }
@@ -158,6 +165,8 @@ fun MetricsScreen(
                     }
                 }
             }
+        }
+    }
         }
     }
 }

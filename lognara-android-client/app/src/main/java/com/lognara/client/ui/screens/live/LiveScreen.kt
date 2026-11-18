@@ -41,7 +41,13 @@ import com.lognara.client.ui.screens.logs.LogEventRow
 import com.lognara.client.ui.screens.logs.levelLabel
 
 @Composable
-fun LiveScreen(api: LognaraApi, session: DeviceSession, onOpenEvent: (LogEvent) -> Unit) {
+fun LiveScreen(api: LognaraApi, session: DeviceSession, onOpenEvent: (LogEvent) -> Unit, onSettings: () -> Unit) {
+    androidx.compose.foundation.layout.Column(Modifier.fillMaxSize()) {
+        com.lognara.client.ui.components.ScreenHeader(
+            title = stringResource(R.string.tab_live),
+            actions = { com.lognara.client.ui.components.SettingsButton(onSettings) },
+        )
+        androidx.compose.foundation.layout.Box(Modifier.weight(1f)) {
     val viewModel: LiveViewModel = viewModel(key = "live-${session.deviceId}") {
         LiveViewModel(api, session)
     }
@@ -128,6 +134,8 @@ fun LiveScreen(api: LognaraApi, session: DeviceSession, onOpenEvent: (LogEvent) 
                     LogEventRow(event = event, onClick = { onOpenEvent(event) })
                 }
             }
+        }
+    }
         }
     }
 }

@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -17,6 +16,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.lognara.client.R
+import com.lognara.client.ui.components.SegmentedSelector
 import java.text.NumberFormat
 import java.time.Instant
 import java.time.ZoneId
@@ -55,16 +55,19 @@ fun formatDataNumber(value: Number, locale: Locale): String =
     NumberFormat.getNumberInstance(locale).apply { maximumFractionDigits = 1 }.format(value)
 
 @Composable
-fun RangeSelector(selected: DataRange, onSelect: (DataRange) -> Unit, modifier: Modifier = Modifier) {
-    Row(modifier = modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        DataRange.entries.forEach { range ->
-            FilterChip(
-                selected = selected == range,
-                onClick = { onSelect(range) },
-                label = { Text(stringResource(range.label)) },
-            )
-        }
-    }
+fun RangeSelector(
+    selected: DataRange,
+    onSelect: (DataRange) -> Unit,
+    modifier: Modifier = Modifier,
+    ranges: List<DataRange> = DataRange.entries,
+) {
+    SegmentedSelector(
+        options = ranges,
+        selected = selected,
+        label = { stringResource(it.label) },
+        onSelect = onSelect,
+        modifier = modifier,
+    )
 }
 
 @Composable

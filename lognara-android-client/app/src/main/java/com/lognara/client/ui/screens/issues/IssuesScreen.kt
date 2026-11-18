@@ -61,10 +61,17 @@ fun IssuesScreen(
     refreshKey: Int,
     onOpenIssue: (Issue, DataRange, String) -> Unit,
     onStatusChanged: () -> Unit,
+    onSettings: () -> Unit,
 ) {
     val viewModel: IssuesViewModel = viewModel(key = "issues-${session.deviceId}") {
         IssuesViewModel(api, session)
     }
+    androidx.compose.foundation.layout.Column(Modifier.fillMaxSize()) {
+        com.lognara.client.ui.components.ScreenHeader(
+            title = stringResource(R.string.tab_issues),
+            actions = { com.lognara.client.ui.components.SettingsButton(onSettings) },
+        )
+        Box(Modifier.weight(1f)) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     LaunchedEffect(refreshKey) {
         if (refreshKey > 0) viewModel.reload()
@@ -124,6 +131,8 @@ fun IssuesScreen(
                     }
                 }
             }
+        }
+    }
         }
     }
 }

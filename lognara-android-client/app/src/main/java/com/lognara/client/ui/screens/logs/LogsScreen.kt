@@ -52,7 +52,14 @@ fun LogsScreen(
     api: LognaraApi,
     session: DeviceSession,
     onOpenEvent: (LogEvent) -> Unit,
+    onSettings: () -> Unit,
 ) {
+    androidx.compose.foundation.layout.Column(Modifier.fillMaxSize()) {
+        com.lognara.client.ui.components.ScreenHeader(
+            title = stringResource(R.string.tab_logs),
+            actions = { com.lognara.client.ui.components.SettingsButton(onSettings) },
+        )
+        androidx.compose.foundation.layout.Box(Modifier.weight(1f)) {
     val viewModel: LogsViewModel = viewModel(key = "logs-${session.deviceId}") {
         LogsViewModel(api, session)
     }
@@ -128,6 +135,8 @@ fun LogsScreen(
                     }
                 }
             }
+        }
+    }
         }
     }
 }
