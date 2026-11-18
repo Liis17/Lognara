@@ -72,6 +72,7 @@ fun SettingsScreen(
     onLoad: () -> Unit,
     onRetry: () -> Unit,
     onDisconnect: () -> Unit,
+    onOpenAppSettings: () -> Unit,
 ) {
     var showDisconnectConfirmation by remember { mutableStateOf(false) }
     val context = LocalContext.current
@@ -147,6 +148,17 @@ fun SettingsScreen(
                             }
                         },
                     )
+                }
+            }
+
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SectionLabel(stringResource(R.string.app_settings_section), Modifier.padding(horizontal = 4.dp))
+                LognaraCard(
+                    contentPadding = PaddingValues(0.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(0.dp),
+                ) {
+                    AppSettingsRow(onClick = onOpenAppSettings)
                 }
             }
 
@@ -253,6 +265,35 @@ private fun SettingsValueRow(label: String, value: String) {
             color = LognaraPalette.Text,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun AppSettingsRow(onClick: () -> Unit) {
+    val label = stringResource(R.string.app_settings_title)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 56.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = 16.dp)
+            .semantics(mergeDescendants = true) { contentDescription = label },
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Text(
+            stringResource(R.string.app_settings_title),
+            fontSize = 14.sp,
+            fontWeight = FontWeight.W500,
+            color = LognaraPalette.Text,
+        )
+        Icon(
+            painterResource(R.drawable.ic_chevron_right),
+            contentDescription = null,
+            tint = LognaraPalette.TextMuted,
+            modifier = Modifier.size(18.dp),
         )
     }
 }

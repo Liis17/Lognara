@@ -8,7 +8,8 @@ Parent: [[Index]]
 
 - Kotlin, Jetpack Compose, Material 3; один модуль `app`, пакет `com.lognara.client`, minSdk 35, target/compileSdk 37. Версии в `gradle/libs.versions.toml`, Gradle wrapper 9.4.1 (AGP 9.2.1 требует именно его).
 - Без DI и Room: ручной контейнер в `LognaraApplication.kt`.
-- Сборка требует JDK 21 (JBR Android Studio): `./gradlew lint testDebugUnitTest assembleDebug`. В CI Android-проверок нет.
+- Сборка требует JDK 21 (JBR Android Studio): `./gradlew lint testDebugUnitTest assembleDebug`. Без Gradle-свойств создаётся локальная версия `0.0.0-local` с кодом `1`, без канала обновления.
+- Релизные свойства `lognaraVersionCode`, `lognaraVersionName` и `lognaraUpdateChannel` задаются совместно; канал — `stable` или `dev`. BuildConfig содержит `UPDATE_CHANNEL` и `UPDATE_REPOSITORY` (`Liis17/Lognara`). Релизная подпись включается только при наличии всех `ANDROID_SIGNING_*` переменных; иначе release APK остаётся неподписанным.
 
 ## Вход по QR
 
@@ -45,3 +46,11 @@ Parent: [[Index]]
 - «Инфра» использует только `GET /api/infrastructure`: показывает Core, WAL, хранилище, Dock и узлы с причиной/heartbeat, группируя узлы по relay; обновление доступно жестом pull-to-refresh.
 - «Метрики» читает избранное через GET `/api/series/favorites` и POST `/api/series/lookup`, источники через GET `/api/series/sources`, каталог источника через GET `/api/series?group_by=server&server&service`, точки через POST `/api/series/query`. Избранное только для чтения; запросы мини-графиков ограничены двумя одновременно. Графики рисуются Compose Canvas, `null` начинает новый сегмент линии, без соединения через пропуск.
 - Новых runtime-зависимостей для графиков нет. Тесты моделей и запросов лежат в `app/src/test/`; транспорт использует test-only `mockwebserver3` и `kotlinx-coroutines-test`.
+
+## Настройки приложения и обновления
+
+- Из настроек устройства открывается отдельный экран настроек приложения с версией, кодом версии, каналом сборки, авто-проверкой, каналом обновлений и ссылкой на GitHub Releases. Все UI-строки экрана находятся в `app/src/main/res/values/strings_app_settings.xml`.
+- `data/AppSettingsStore.kt` хранит `autoCheck`, канал и время последней проверки в отдельном DataStore `app_settings`; очистка сессии и ответы 401 его не затрагивают. Канал по умолчанию — `dev` для dev-сборки и `stable` иначе; локальная сборка отключает автообновление.
+- `data/GitHubReleaseUpdater.kt` использует отдельный OkHttp-клиент с HTTPS и редиректами, не меняя Dock-клиент. Список релизов ограничен 1 МиБ, `version.json` — 64 КиБ, APK — 150 МиБ. Проверяются SHA-256, package name, версия APK и подпись установленного приложения до установки через PackageInstaller. Для подтверждения установки используется `UpdateInstallReceiver`.
+- Android-клиент получает релизы из `Liis17/Lognara`: stable тег `android-YYYYMMDD-HHMMSS-<sha12>` без prerelease; dev тег `android-dev-YYYYMMDD-HHMMSS-<sha12>` с prerelease; ни один Android-релиз не назначается latest. Ассеты: `lognara-android.apk`, `version.json`, `SHA256SUMS`. `version.json` содержит `versionCode`, `versionName`, `channel`, `commit`, имя APK и его SHA-256. Код версии вычисляется CI от UTC-времени коммита: `(секунды − 1735689600) / 60`.
+- Установка требует `REQUEST_INSTALL_PACKAGES`. Если Android запрещает установку из источника, приложение открывает системную страницу разрешения для своего пакета; PackageInstaller затем показывает подтверждение пользователю.
