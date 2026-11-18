@@ -30,7 +30,9 @@ Parent: [[Index]]
 
 ## Тема
 
-Material You (dynamic color) по системной теме. Шрифты Commissioner (variable, веса задаются через `FontVariation`) и IBM Plex Mono для машинных данных; источники и лицензии в `app/font-licenses/`. Цвета уровней логов и статусов фиксированы и не зависят от dynamic color (`LognaraColors`).
+Только тёмная тема по макетам редизайна (`lognara-android-design`, экраны 390×844); dynamic color и светлая тема не используются. Палитра `LognaraPalette` и цвета уровней и статусов `LognaraSemanticColors` лежат в `ui/theme/Theme.kt`; системные панели всегда со светлыми значками (`MainActivity`). Шрифты Commissioner (variable, веса задаются через `FontVariation`) и IBM Plex Mono для машинных данных; источники и лицензии в `app/font-licenses/`.
+
+Общие элементы дизайна собраны в `ui/components/LognaraComponents.kt`: заголовки разделов и вложенных экранов, сегментированный выбор периода, капсулы-фильтры, карточки, бейджи уровней и статусов, строка события, нижняя навигация. Иконки — векторные `res/drawable/ic_*.xml` из макетов. Каждый раздел сам рисует свой заголовок с кнопкой настроек. `HomeScreen` держит нижнюю навигацию и счётчик открытых проблем за 24 ч: один `POST /api/issues/search` при входе и после resolve/reopen. Строки экранов лежат в отдельных `res/values/strings_<раздел>.xml`.
 
 ## Состояние
 
