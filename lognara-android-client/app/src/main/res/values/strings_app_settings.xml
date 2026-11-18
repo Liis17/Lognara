@@ -28,6 +28,8 @@
     <string name="app_update_error_network">Не удалось проверить обновления. Проверьте подключение и повторите запрос.</string>
     <string name="app_update_error_retry">Не удалось проверить обновления. Повторите запрос.</string>
     <string name="app_update_error_install_retry">Не удалось загрузить или установить обновление. Повторите попытку.</string>
+    <string name="app_update_error_channel_mismatch">Канал обновления не совпадает с выбранным. Проверьте обновления ещё раз.</string>
+    <string name="app_update_install_timeout">Android не сообщил результат установки за две минуты. Можно повторить установку.</string>
     <string name="app_update_error_permission">Разрешите установку приложений из этого источника в настройках Android.</string>
     <string name="app_update_error_release_status">В ответе GitHub отсутствует статус релиза.</string>
     <string name="app_update_error_release_list">Не удалось разобрать список релизов GitHub.</string>

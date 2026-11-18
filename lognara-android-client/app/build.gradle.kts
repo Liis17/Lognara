@@ -28,7 +28,15 @@ val signingStoreFile = providers.environmentVariable("ANDROID_SIGNING_STORE_FILE
 val signingStorePassword = providers.environmentVariable("ANDROID_SIGNING_STORE_PASSWORD").orNull
 val signingKeyAlias = providers.environmentVariable("ANDROID_SIGNING_KEY_ALIAS").orNull
 val signingKeyPassword = providers.environmentVariable("ANDROID_SIGNING_KEY_PASSWORD").orNull
-val hasReleaseSigning = listOf(signingStoreFile, signingStorePassword, signingKeyAlias, signingKeyPassword).all { it != null }
+val releaseSigningValues = listOf(signingStoreFile, signingStorePassword, signingKeyAlias, signingKeyPassword)
+val configuredSigningValues = releaseSigningValues.count { !it.isNullOrBlank() }
+if (configuredSigningValues in 1..3) {
+    throw GradleException(
+        "Для release-сборки задайте все четыре переменные: ANDROID_SIGNING_STORE_FILE, " +
+            "ANDROID_SIGNING_STORE_PASSWORD, ANDROID_SIGNING_KEY_ALIAS и ANDROID_SIGNING_KEY_PASSWORD",
+    )
+}
+val hasReleaseSigning = configuredSigningValues == releaseSigningValues.size
 
 android {
     namespace = "com.lognara.client"

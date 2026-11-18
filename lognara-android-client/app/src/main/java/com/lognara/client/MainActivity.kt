@@ -44,4 +44,14 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    override fun onResume() {
+        super.onResume()
+        (application as LognaraApplication).container.updater.onAppResumed()
+    }
+
+    override fun onPause() {
+        (application as LognaraApplication).container.updater.onAppPaused()
+        super.onPause()
+    }
 }

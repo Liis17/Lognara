@@ -1,10 +1,14 @@
 package com.lognara.client.data
 
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.security.MessageDigest
 import com.lognara.client.R
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
@@ -109,6 +113,89 @@ internal fun chooseNewestUpdate(
     .asSequence()
     .filter { it.manifest.versionCode > installedVersionCode }
     .maxByOrNull { it.manifest.versionCode }
+
+internal fun isManifestChannelAllowed(manifestChannel: UpdateChannel, selectedChannel: UpdateChannel): Boolean =
+    selectedChannel == UpdateChannel.Dev || manifestChannel == UpdateChannel.Stable
+
+internal fun isCurrentUpdateRequest(
+    requestChannel: UpdateChannel,
+    currentChannel: UpdateChannel,
+    requestGeneration: Long,
+    currentGeneration: Long,
+): Boolean = requestChannel == currentChannel && requestGeneration == currentGeneration
+
+internal fun metadataFailureWithoutValidCandidate(
+    metadataProblem: UpdateFailure?,
+    validCandidateCount: Int,
+): UpdateFailure? = metadataProblem?.takeIf { validCandidateCount == 0 }
+
+internal class DeferredInstallerAction<T> {
+    private var appResumed = false
+    private var pendingAction: T? = null
+
+    @Synchronized
+    fun onResumed(): T? {
+        appResumed = true
+        return pendingAction.also { pendingAction = null }
+    }
+
+    @Synchronized
+    fun onPaused() {
+        appResumed = false
+    }
+
+    @Synchronized
+    fun receive(action: T): T? {
+        if (appResumed) return action
+        pendingAction = action
+        return null
+    }
+}
+
+internal suspend fun writeApkBody(
+    input: InputStream,
+    partialFile: File,
+    contentLength: Long?,
+    maximumBytes: Long,
+    sizeErrorResource: Int,
+    onProgress: (Long, Long?) -> Unit,
+): String {
+    try {
+        if (contentLength != null && contentLength > maximumBytes) {
+            throw UpdateFailure(sizeErrorResource)
+        }
+        val digest = MessageDigest.getInstance("SHA-256")
+        var totalBytes = 0L
+        var lastReportedBytes = 0L
+        input.use { source ->
+            FileOutputStream(partialFile).use { output ->
+                val buffer = ByteArray(64 * 1024)
+                while (true) {
+                    currentCoroutineContext().ensureActive()
+                    val read = source.read(buffer)
+                    currentCoroutineContext().ensureActive()
+                    if (read < 0) break
+                    totalBytes += read
+                    if (totalBytes > maximumBytes) throw UpdateFailure(sizeErrorResource)
+                    output.write(buffer, 0, read)
+                    digest.update(buffer, 0, read)
+                    if (contentLength != null &&
+                        (totalBytes - lastReportedBytes >= APK_PROGRESS_INTERVAL_BYTES || totalBytes == contentLength)
+                    ) {
+                        lastReportedBytes = totalBytes
+                        onProgress(totalBytes, contentLength)
+                    }
+                }
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
+    } catch (failure: Exception) {
+        partialFile.delete()
+        throw failure
+    }
+}
+
+private const val APK_PROGRESS_INTERVAL_BYTES = 512L * 1024
 
 internal fun verifySha256(bytes: ByteArray, expectedSha256: String) {
     val actual = MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }

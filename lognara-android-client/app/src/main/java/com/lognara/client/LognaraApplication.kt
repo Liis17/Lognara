@@ -7,6 +7,8 @@ import com.lognara.client.data.CredentialsStore
 import com.lognara.client.data.GitHubReleaseUpdater
 import com.lognara.client.data.LognaraApi
 import com.lognara.client.data.UpdateChannel
+import com.lognara.client.data.clearUpdateCache
+import java.io.File
 
 class LognaraApplication : Application() {
     lateinit var container: AppContainer
@@ -14,6 +16,7 @@ class LognaraApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        clearUpdateCache(File(cacheDir, "updates"))
         container = AppContainer(this)
     }
 }

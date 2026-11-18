@@ -45,7 +45,7 @@ Lognara — система сбора логов: агент в контейне
 
 | Файл | Компонент | Описание |
 |------|-----------|----------|
-| [[Android/LognaraAndroidClient]] | lognara-android-client | Приложение на Compose: вход по QR-коду Dock, токен устройства в Android Keystore, отключение устройства; разделы данных пока заглушки. |
+| [[Android/LognaraAndroidClient]] | lognara-android-client | Приложение на Compose: вход по QR-коду Dock, токен устройства в Android Keystore, экраны логов, Live, проблем, инфраструктуры и метрик, обновления APK из GitHub Releases. |
 
 ### Delivery
 

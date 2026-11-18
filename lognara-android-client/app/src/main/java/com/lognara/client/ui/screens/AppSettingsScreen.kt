@@ -257,10 +257,13 @@ private fun UpdateStatus(update: AppUpdateUiState) {
         UpdatePhase.Idle -> Text(stringResource(R.string.app_update_idle), fontSize = 13.sp, color = LognaraPalette.TextMuted)
         UpdatePhase.Checking -> StatusPill(stringResource(R.string.app_checking), LognaraSemanticColors.statusInfo)
         UpdatePhase.UpToDate -> StatusPill(stringResource(R.string.app_up_to_date), LognaraSemanticColors.statusOk)
-        UpdatePhase.Available -> StatusPill(
-            stringResource(R.string.app_update_available, updateVersion),
-            LognaraSemanticColors.statusWarn,
-        )
+        UpdatePhase.Available -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            StatusPill(
+                stringResource(R.string.app_update_available, updateVersion),
+                LognaraSemanticColors.statusWarn,
+            )
+            update.error?.let { UpdateError(it) }
+        }
         UpdatePhase.Downloading -> Text(
             stringResource(R.string.app_download_in_progress, updateVersion),
             fontSize = 13.sp,

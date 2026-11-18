@@ -10,9 +10,7 @@ import com.lognara.client.BuildConfig
 import com.lognara.client.R
 import java.io.File
 import java.io.FileInputStream
-import java.io.FileOutputStream
 import java.io.IOException
-import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -85,27 +83,30 @@ class GitHubReleaseUpdater(
     private val appContext = context.applicationContext
     private val installerEventMutable = MutableStateFlow<InstallerEvent?>(null)
     val installerEvent = installerEventMutable.asStateFlow()
+    private val deferredInstallerAction = DeferredInstallerAction<Intent>()
 
     fun clearInstallerEvent(event: InstallerEvent) {
         installerEventMutable.compareAndSet(event, null)
     }
 
+    fun onAppResumed() {
+        deferredInstallerAction.onResumed()?.let { startInstallConfirmation(appContext, it, reportPendingEvent = false) }
+    }
+
+    fun onAppPaused() {
+        deferredInstallerAction.onPaused()
+    }
+
     suspend fun checkForUpdate(channel: UpdateChannel): AvailableUpdate? {
-        val releasesJson = requestText(
-            Request.Builder()
-                .url("$apiBaseUrl/repos/$repository/releases?per_page=30")
-                .header("Accept", "application/vnd.github+json")
-                .header("X-GitHub-Api-Version", "2022-11-28")
-                .header("User-Agent", "Lognara-Android")
-                .get()
-                .build(),
-            RELEASE_LIST_MAX_BYTES,
-        )
-        val eligible = releasesForChannel(parseGithubReleases(releasesJson), channel)
-            .take(RELEASE_MANIFESTS_TO_CHECK)
+        val eligible = mutableListOf<GithubRelease>()
+        for (page in 1..MAX_RELEASE_PAGES) {
+            val releases = parseGithubReleases(requestText(releasesRequest(page), RELEASE_LIST_MAX_BYTES))
+            eligible += releasesForChannel(releases, channel)
+            if (eligible.size >= RELEASE_MANIFESTS_TO_CHECK || releases.size < RELEASE_PAGE_SIZE) break
+        }
         val candidates = mutableListOf<AvailableUpdate>()
         var metadataProblem: UpdateFailure? = null
-        for (release in eligible) {
+        for (release in eligible.sortedByDescending { it.createdAt }.take(RELEASE_MANIFESTS_TO_CHECK)) {
             val versionAsset = release.assets.firstOrNull { it.name == VERSION_JSON_ASSET }
             val apkAsset = release.assets.firstOrNull { it.name == ANDROID_APK_ASSET }
             if (versionAsset == null || apkAsset == null) {
@@ -125,9 +126,7 @@ class GitHubReleaseUpdater(
                 metadataProblem = failure
             }
         }
-        if (metadataProblem != null && candidates.none { it.manifest.versionCode > installedVersionCode }) {
-            throw metadataProblem
-        }
+        metadataFailureWithoutValidCandidate(metadataProblem, candidates.size)?.let { throw it }
         return chooseNewestUpdate(candidates, installedVersionCode)
     }
 
@@ -144,37 +143,19 @@ class GitHubReleaseUpdater(
             apkFile.delete()
 
             try {
-                execute(assetRequest(update.apkAsset)) { response ->
+                val response = executeResponse(assetRequest(update.apkAsset))
+                response.use {
                     val body = response.body
                     val contentLength = body.contentLength().takeIf { it >= 0 }
-                    if (contentLength != null && contentLength > APK_MAX_BYTES) {
-                        throw UpdateFailure(R.string.app_update_error_apk_too_large)
-                    }
-                    val digest = MessageDigest.getInstance("SHA-256")
-                    var totalBytes = 0L
-                    var lastReportedBytes = 0L
-                    body.byteStream().use { input ->
-                        FileOutputStream(partialFile).use { output ->
-                            val buffer = ByteArray(64 * 1024)
-                            while (true) {
-                                val read = input.read(buffer)
-                                if (read < 0) break
-                                totalBytes += read
-                                if (totalBytes > APK_MAX_BYTES) {
-                                    throw UpdateFailure(R.string.app_update_error_apk_too_large)
-                                }
-                                output.write(buffer, 0, read)
-                                digest.update(buffer, 0, read)
-                                if (contentLength != null &&
-                                    (totalBytes - lastReportedBytes >= PROGRESS_INTERVAL_BYTES || totalBytes == contentLength)
-                                ) {
-                                    lastReportedBytes = totalBytes
-                                    onProgress(totalBytes, contentLength)
-                                }
-                            }
-                        }
-                    }
-                    verifySha256Hex(digest.digest().joinToString("") { "%02x".format(it) }, update.manifest.sha256)
+                    val actualSha256 = writeApkBody(
+                        body.byteStream(),
+                        partialFile,
+                        contentLength,
+                        APK_MAX_BYTES,
+                        R.string.app_update_error_apk_too_large,
+                        onProgress,
+                    )
+                    verifySha256Hex(actualSha256, update.manifest.sha256)
                     if (!partialFile.renameTo(apkFile)) {
                         throw UpdateFailure(R.string.app_update_error_save_apk)
                     }
@@ -227,17 +208,9 @@ class GitHubReleaseUpdater(
                     installerEventMutable.value = InstallerEvent.Failed(R.string.app_update_error_install_confirmation)
                     return
                 }
-                userAction.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                try {
-                    context.startActivity(userAction)
-                } catch (_: ActivityNotFoundException) {
-                    installerEventMutable.value = InstallerEvent.Failed(R.string.app_update_error_install_confirmation)
-                    return
-                } catch (_: SecurityException) {
-                    installerEventMutable.value = InstallerEvent.Failed(R.string.app_update_error_install_security)
-                    return
-                }
-                installerEventMutable.value = InstallerEvent.UserActionRequired
+                val actionToLaunch = deferredInstallerAction.receive(Intent(userAction))
+                if (actionToLaunch != null) startInstallConfirmation(context, actionToLaunch)
+                else installerEventMutable.value = InstallerEvent.UserActionRequired
             }
             PackageInstaller.STATUS_SUCCESS -> installerEventMutable.value = InstallerEvent.Succeeded
             else -> installerEventMutable.value = InstallerEvent.Failed(installerErrorMessage(intent))
@@ -251,6 +224,30 @@ class GitHubReleaseUpdater(
             if (contentLength > maximumBytes) throw UpdateFailure(R.string.app_update_error_response_too_large)
             String(readLimited(body.byteStream(), maximumBytes), Charsets.UTF_8)
         }
+
+    private fun releasesRequest(page: Int): Request = Request.Builder()
+        .url("$apiBaseUrl/repos/$repository/releases?per_page=$RELEASE_PAGE_SIZE&page=$page")
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("User-Agent", "Lognara-Android")
+        .get()
+        .build()
+
+    private fun startInstallConfirmation(
+        context: Context,
+        userAction: Intent,
+        reportPendingEvent: Boolean = true,
+    ) {
+        userAction.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        try {
+            context.startActivity(userAction)
+            if (reportPendingEvent) installerEventMutable.value = InstallerEvent.UserActionRequired
+        } catch (_: ActivityNotFoundException) {
+            installerEventMutable.value = InstallerEvent.Failed(R.string.app_update_error_install_confirmation)
+        } catch (_: SecurityException) {
+            installerEventMutable.value = InstallerEvent.Failed(R.string.app_update_error_install_security)
+        }
+    }
 
     private fun assetRequest(asset: ReleaseAsset): Request {
         requireHttps(asset.downloadUrl)
@@ -290,6 +287,33 @@ class GitHubReleaseUpdater(
             })
         }
 
+    private suspend fun executeResponse(request: Request): Response = suspendCancellableCoroutine { continuation ->
+        val call = client.newCall(request)
+        continuation.invokeOnCancellation { call.cancel() }
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                if (continuation.isActive) continuation.resumeWithException(e)
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                val failure = when {
+                    response.code == 403 || response.code == 429 ->
+                        UpdateFailure(R.string.app_update_error_rate_limit, temporary = true)
+                    !response.isSuccessful -> UpdateFailure(R.string.app_update_error_http_status, listOf(response.code))
+                    else -> null
+                }
+                if (failure != null) {
+                    response.close()
+                    if (continuation.isActive) continuation.resumeWithException(failure)
+                } else if (continuation.isActive) {
+                    continuation.resume(response) { _, value, _ -> value.close() }
+                } else {
+                    response.close()
+                }
+            }
+        })
+    }
+
     private fun installerErrorMessage(intent: Intent): Int = when (intent.getIntExtra(PackageInstaller.EXTRA_STATUS, -1)) {
         PackageInstaller.STATUS_FAILURE_ABORTED -> R.string.app_update_error_install_aborted
         PackageInstaller.STATUS_FAILURE_BLOCKED -> R.string.app_update_error_install_blocked
@@ -311,9 +335,10 @@ class GitHubReleaseUpdater(
         const val VERSION_JSON_ASSET = "version.json"
         const val ANDROID_APK_ASSET = "lognara-android.apk"
         const val RELEASE_LIST_MAX_BYTES = 1024 * 1024
+        const val RELEASE_PAGE_SIZE = 30
+        const val MAX_RELEASE_PAGES = 10
         const val VERSION_JSON_MAX_BYTES = 64 * 1024
         const val APK_MAX_BYTES = 150L * 1024 * 1024
-        const val PROGRESS_INTERVAL_BYTES = 512L * 1024
         const val RELEASE_MANIFESTS_TO_CHECK = 5
         const val INSTALL_RESULT_ACTION = "com.lognara.client.UPDATE_INSTALL_RESULT"
 
