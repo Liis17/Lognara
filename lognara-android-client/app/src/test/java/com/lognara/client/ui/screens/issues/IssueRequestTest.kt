@@ -1,6 +1,7 @@
 package com.lognara.client.ui.screens.issues
 
 import com.lognara.client.data.GroupRequest
+import com.lognara.client.data.Issue
 import com.lognara.client.data.IssueDetailsRequest
 import com.lognara.client.data.IssueSearchRequest
 import com.lognara.client.data.IssueStatus
@@ -43,4 +44,26 @@ class IssueRequestTest {
         assertEquals(setOf("from", "to", "filters", "interval_seconds"), body.keys)
         assertEquals(3_600L, request.interval_seconds)
     }
+
+    @Test
+    fun issueSortOrdersByFrequencyAndLastSeen() {
+        val frequent = issue("frequent", count = 8, lastSeen = "2026-11-16T10:00:00Z")
+        val recent = issue("recent", count = 3, lastSeen = "2026-11-17T11:00:00Z")
+        val tiedButOlder = issue("tied", count = 8, lastSeen = "2026-11-17T09:00:00Z")
+
+        assertEquals(listOf("tied", "frequent", "recent"), sortIssues(listOf(recent, tiedButOlder, frequent), IssueSort.FREQUENT).map { it.fingerprint })
+        assertEquals(listOf("recent", "tied", "frequent"), sortIssues(listOf(frequent, tiedButOlder, recent), IssueSort.NEWEST).map { it.fingerprint })
+    }
+
+    private fun issue(fingerprint: String, count: Long, lastSeen: String) = Issue(
+        fingerprint = fingerprint,
+        service = "api",
+        pattern_id = "pattern",
+        template = "failure",
+        exact = false,
+        count = count,
+        servers = 1,
+        first_seen = "2026-11-16T09:00:00Z",
+        last_seen = lastSeen,
+    )
 }

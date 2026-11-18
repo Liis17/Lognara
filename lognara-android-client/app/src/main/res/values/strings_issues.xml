@@ -1,0 +1,31 @@
+<resources>
+    <string name="issue_subtitle">Группы похожих ошибок за %1$s</string>
+    <string name="issue_filter_open">Открытые</string>
+    <string name="issue_filter_new">Новые</string>
+    <string name="issue_filter_regressed">Возвращаются</string>
+    <string name="issue_filter_resolved">Решённые</string>
+    <string name="issue_sort_frequent">Сначала частые</string>
+    <string name="issue_sort_newest">Сначала новые</string>
+    <string name="issue_last_event_label">Последнее событие</string>
+    <string name="issue_count_summary">%1$s · %2$s</string>
+    <string name="issue_stat_events">Событий</string>
+    <string name="issue_stat_servers">Серверов</string>
+    <string name="issue_stat_first">Первое</string>
+    <string name="issue_stat_last">Последнее</string>
+    <string name="issue_chart_title">Динамика</string>
+    <string name="issue_fingerprint_label">Fingerprint</string>
+    <string name="issue_copy_fingerprint">Скопировать fingerprint</string>
+    <string name="issue_examples_count">%1$d последних</string>
+    <plurals name="issue_events_count">
+        <item quantity="one">%1$d событие</item>
+        <item quantity="few">%1$d события</item>
+        <item quantity="many">%1$d событий</item>
+        <item quantity="other">%1$d события</item>
+    </plurals>
+    <plurals name="issue_servers_count">
+        <item quantity="one">%1$d сервер</item>
+        <item quantity="few">%1$d сервера</item>
+        <item quantity="many">%1$d серверов</item>
+        <item quantity="other">%1$d сервера</item>
+    </plurals>
+</resources>
