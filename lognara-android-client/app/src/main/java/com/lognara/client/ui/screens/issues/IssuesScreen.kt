@@ -208,7 +208,7 @@ fun IssueDetailsScreen(
             state = state.result,
             isEmpty = { false },
             onRetry = viewModel::retry,
-            modifier = Modifier.fillMaxSize().padding(insets).padding(horizontal = 12.dp),
+            modifier = Modifier.fillMaxSize().padding(insets).padding(horizontal = 16.dp),
         ) { details ->
             IssueDetailsContent(
                 details = details,
@@ -260,7 +260,7 @@ private fun IssueDetailsContent(
 ) {
     val resolve = details.state.status != "resolved"
     Column(
-        Modifier.fillMaxSize().padding(horizontal = 16.dp, vertical = 12.dp),
+        Modifier.fillMaxSize().padding(vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         LazyColumn(

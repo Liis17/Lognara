@@ -22,6 +22,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.update
 
 data class PairingUiState(
     val isConnecting: Boolean = false,
@@ -51,8 +52,8 @@ class AppViewModel(val container: AppContainer) : ViewModel() {
     private val _session = MutableStateFlow<DeviceSession?>(null)
     val session = _session.asStateFlow()
 
-    private val _selectedEvent = MutableStateFlow<LogEvent?>(null)
-    val selectedEvent = _selectedEvent.asStateFlow()
+    private val _selectedEvents = MutableStateFlow<Map<String, LogEvent>>(emptyMap())
+    val selectedEvents = _selectedEvents.asStateFlow()
 
     private val _issuesRefreshKey = MutableStateFlow(0)
     val issuesRefreshKey = _issuesRefreshKey.asStateFlow()
@@ -108,8 +109,8 @@ class AppViewModel(val container: AppContainer) : ViewModel() {
         if (!_pairing.value.isConnecting) _pairing.value = PairingUiState()
     }
 
-    fun selectEvent(event: LogEvent?) {
-        _selectedEvent.value = event
+    fun selectEvent(event: LogEvent) {
+        _selectedEvents.update { it + (event.id to event) }
     }
 
     fun refreshIssues() {
@@ -199,7 +200,7 @@ class AppViewModel(val container: AppContainer) : ViewModel() {
             container.credentialsStore.clear()
         } finally {
             _session.value = null
-            _selectedEvent.value = null
+            _selectedEvents.value = emptyMap()
             _settings.value = SettingsUiState()
         }
     }

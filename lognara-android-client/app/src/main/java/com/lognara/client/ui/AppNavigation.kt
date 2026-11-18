@@ -47,7 +47,7 @@ private const val MANUAL = "manual"
 private const val SCANNER = "scanner"
 private const val HOME = "home"
 private const val SETTINGS = "settings"
-private const val EVENT_DETAIL = "event-detail"
+private const val EVENT_DETAIL = "event-detail?eventId={eventId}"
 private const val TRACE_DETAIL = "trace-detail?traceId={traceId}&from={from}&to={to}"
 private const val ISSUE_DETAIL = "issue-detail?fingerprint={fingerprint}&range={range}&service={service}"
 private const val METRIC_DETAIL = "metric-detail?server={server}&service={service}&name={name}&origin={origin}"
@@ -60,7 +60,7 @@ fun AppNavigation(viewModel: AppViewModel) {
     val pairing by viewModel.pairing.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val notice by viewModel.loginNotice.collectAsStateWithLifecycle()
-    val selectedEvent by viewModel.selectedEvent.collectAsStateWithLifecycle()
+    val selectedEvents by viewModel.selectedEvents.collectAsStateWithLifecycle()
     val issuesRefreshKey by viewModel.issuesRefreshKey.collectAsStateWithLifecycle()
 
     if (isRestoring) {
@@ -135,7 +135,7 @@ fun AppNavigation(viewModel: AppViewModel) {
                     onSettings = { navController.navigate(SETTINGS) },
                     onOpenEvent = { event ->
                         viewModel.selectEvent(event)
-                        navController.navigate(EVENT_DETAIL)
+                        navController.navigate("event-detail?eventId=${Uri.encode(event.id)}")
                     },
                     onOpenIssue = { issue: Issue, range: DataRange, service: String ->
                         navController.navigate(
@@ -197,20 +197,20 @@ fun AppNavigation(viewModel: AppViewModel) {
                     onStatusChanged = viewModel::refreshIssues,
                     onOpenEvent = { event ->
                         viewModel.selectEvent(event)
-                        navController.navigate(EVENT_DETAIL)
+                        navController.navigate("event-detail?eventId=${Uri.encode(event.id)}")
                     },
                 )
             }
         }
-        composable(EVENT_DETAIL) {
-            val event = selectedEvent
+        composable(
+            route = EVENT_DETAIL,
+            arguments = listOf(navArgument("eventId") { type = NavType.StringType }),
+        ) { entry ->
+            val event = selectedEvents[entry.arguments?.getString("eventId").orEmpty()]
             if (event != null) {
                 EventDetailScreen(
                     event = event,
-                    onBack = {
-                        viewModel.selectEvent(null)
-                        navController.popBackStack()
-                    },
+                    onBack = { navController.popBackStack() },
                     onOpenTrace = { selected ->
                         val center = runCatching { Instant.parse(selected.timestamp) }.getOrDefault(Instant.now())
                         val from = DateTimeFormatter.ISO_INSTANT.format(center.minusSeconds(300))
@@ -245,7 +245,7 @@ fun AppNavigation(viewModel: AppViewModel) {
                     onBack = { navController.popBackStack() },
                     onOpenEvent = { event ->
                         viewModel.selectEvent(event)
-                        navController.navigate(EVENT_DETAIL)
+                        navController.navigate("event-detail?eventId=${Uri.encode(event.id)}")
                     },
                 )
             }

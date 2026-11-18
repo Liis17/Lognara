@@ -56,7 +56,7 @@ fun InfrastructureScreen(api: LognaraApi, session: DeviceSession) {
             state = state,
             isEmpty = { false },
             onRetry = viewModel::reload,
-            modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
+            modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
         ) { response ->
             InfrastructureContent(response, viewModel::reload)
         }
@@ -68,7 +68,7 @@ private fun InfrastructureContent(response: InfrastructureResponse, onRefresh: (
     val groups = groupInfrastructureNodes(response.nodes)
     LazyColumn(
         verticalArrangement = Arrangement.spacedBy(10.dp),
-        modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+        modifier = Modifier.fillMaxSize(),
     ) {
         item {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {

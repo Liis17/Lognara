@@ -83,11 +83,11 @@ fun MetricsScreen(
         state = overview,
         isEmpty = { false },
         onRetry = viewModel::reload,
-        modifier = Modifier.fillMaxSize().padding(horizontal = 12.dp),
+        modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
     ) { data ->
         LazyColumn(
             verticalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+            modifier = Modifier.fillMaxSize(),
         ) {
             item {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
@@ -316,12 +316,12 @@ fun MetricDetailsScreen(
             isEmpty = { it == null },
             onRetry = viewModel::retryMetric,
             emptyText = stringResource(R.string.metric_missing),
-            modifier = Modifier.fillMaxSize().padding(insets).padding(horizontal = 12.dp),
+            modifier = Modifier.fillMaxSize().padding(insets).padding(horizontal = 16.dp),
         ) { metric ->
             if (metric != null) {
                 LazyColumn(
                     verticalArrangement = Arrangement.spacedBy(10.dp),
-                    modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+                    modifier = Modifier.fillMaxSize(),
                 ) {
                     item {
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
