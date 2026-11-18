@@ -173,10 +173,12 @@ class AppViewModel(val container: AppContainer) : ViewModel() {
     }
 
     fun setAutoCheck(enabled: Boolean) {
+        _appSettings.update { it.copy(autoCheck = enabled) }
         viewModelScope.launch { container.appSettingsStore.setAutoCheck(enabled) }
     }
 
     fun setUpdateChannel(channel: UpdateChannel) {
+        _appSettings.update { it.copy(channel = channel) }
         viewModelScope.launch { container.appSettingsStore.setChannel(channel) }
     }
 
