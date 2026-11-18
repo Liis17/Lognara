@@ -31,7 +31,7 @@ jobs:
           java-version: '21'
       - uses: android-actions/setup-android@v4
         with:
-          packages: 'platforms;android-37 build-tools;37.0.0'
+          packages: 'platforms;android-37.0 build-tools;37.0.0'
       - uses: gradle/actions/setup-gradle@v6
       - name: Lint and run unit tests
         working-directory: lognara-android-client
@@ -69,13 +69,21 @@ jobs:
         if: always()
         run: rm -f "$RUNNER_TEMP/lognara-android-release.jks"
       - name: Verify APK signature and prepare artifact
+        env:
+          EXPECTED_ANDROID_CERT_SHA256: AE9E63DB8FD4145DA347D3E1B425B2AD3C81EE0DDDD862056771EC36CD3FB092
         run: |
           set -euo pipefail
           apk="lognara-android-client/app/build/outputs/apk/release/app-release.apk"
           test -f "$apk"
           sdk_root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
           test -n "$sdk_root"
-          "$sdk_root/build-tools/37.0.0/apksigner" verify "$apk"
+          apksigner="$sdk_root/build-tools/37.0.0/apksigner"
+          "$apksigner" verify "$apk"
+          actual_fingerprint=$("$apksigner" verify --print-certs "$apk" | sed -n 's/.*certificate SHA-256 digest: //p' | tr -d '[:space:]:' | tr '[:lower:]' '[:upper:]')
+          if [ "$actual_fingerprint" != "$EXPECTED_ANDROID_CERT_SHA256" ]; then
+            echo "APK certificate fingerprint mismatch: expected $EXPECTED_ANDROID_CERT_SHA256, got ${actual_fingerprint:-<missing>}" >&2
+            exit 1
+          fi
           mkdir -p release-assets
           cp "$apk" release-assets/lognara-android.apk
       - uses: actions/upload-artifact@v7

@@ -48,9 +48,9 @@ Job `changes` использует `dorny/paths-filter@v4` после checkout �
 
 ## Android
 
-Путь lognara-android-client/** выставляет флаг android в select_ci.py. Job android выполняет lint, testDebugUnitTest и assembleDebug только для PR в dev и полного ручного запуска; promotion PR и push пропускают его вместе с остальными прикладными CI-проверками. Job использует JDK 21 Temurin, Android SDK platforms;android-37 и build-tools 37.0.0, кеш Gradle и запускает команды через sh ./gradlew. CI passed требует успеха android, если он выбран для события, и проверяет, что в остальных случаях job пропущен.
+Путь lognara-android-client/** выставляет флаг android в select_ci.py. Job android выполняет lint, testDebugUnitTest и assembleDebug только для PR в dev и полного ручного запуска; promotion PR и push пропускают его вместе с остальными прикладными CI-проверками. Job использует JDK 21 Temurin, Android SDK platforms;android-37.0 и build-tools 37.0.0, кеш Gradle и запускает команды через sh ./gradlew. CI passed требует успеха android, если он выбран для события, и проверяет, что в остальных случаях job пропущен.
 
-Python-тесты скрипта подготовки Android-релиза запускаются job automation вместе с остальными тестами .github/tests. Сборка подписанного APK и публикация при push в dev/master описаны в [[Repository/Images#Релизы Android]].
+Python-тесты скрипта подготовки Android-релиза запускаются job automation вместе с остальными тестами .github/tests. Сборка подписанного APK и публикация при push в dev/master описаны в [[Repository/Images#Релизы Android]]. Release workflow использует тот же SDK platform и проверяет сертификат APK по SHA-256 `AE9E63DB8FD4145DA347D3E1B425B2AD3C81EE0DDDD862056771EC36CD3FB092` после `apksigner verify`; несовпадение блокирует публикацию.
 
 ## Окружение
 

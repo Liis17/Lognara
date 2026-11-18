@@ -232,7 +232,7 @@ jobs:
           java-version: '21'
       - uses: android-actions/setup-android@v4
         with:
-          packages: 'platforms;android-37 build-tools;37.0.0'
+          packages: 'platforms;android-37.0 build-tools;37.0.0'
       - uses: gradle/actions/setup-gradle@v6
       - name: Lint, unit tests and debug APK
         run: sh ./gradlew lint testDebugUnitTest assembleDebug

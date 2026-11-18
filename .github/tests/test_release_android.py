@@ -158,8 +158,24 @@ class AndroidReleaseTests(unittest.TestCase):
     def test_new_and_draft_releases_upload_before_publish(self):
         self.check_publication([])
         tag = release.release_tag(self.first, "dev")
-        release.git("tag", tag)
-        self.check_publication([{"tag_name": tag, "draft": True, "prerelease": True}])
+        self.check_publication([{
+            "tag_name": tag,
+            "draft": True,
+            "prerelease": True,
+            "target_commitish": self.first,
+        }])
+
+    def test_draft_target_must_match_release_commit(self):
+        tag = release.release_tag(self.first, "dev")
+        draft = {
+            "tag_name": tag,
+            "draft": True,
+            "prerelease": True,
+            "target_commitish": "0" * 40,
+        }
+
+        with self.assertRaisesRegex(RuntimeError, "draft release .* targets another commit"):
+            release.publish("owner/repo", self.first, "dev", Path("unused"), [draft])
 
     def test_stable_release_is_not_prerelease_or_latest(self):
         assets = self.make_assets()

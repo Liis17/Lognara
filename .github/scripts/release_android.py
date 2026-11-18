@@ -183,10 +183,13 @@ def publish(repository, sha, channel, assets, releases, dry_run=False):
     tag = version["tag"]
     existing = next((release for release in releases if release["tag_name"] == tag), None)
     if existing:
-        tagged_commit = git("rev-parse", f"{tag}^{{commit}}")
-        if tagged_commit != version["commit"]:
-            raise RuntimeError(f"Android release tag {tag} points at another commit")
-        if not existing.get("draft", False):
+        if existing.get("draft", False):
+            if existing.get("target_commitish") != version["commit"]:
+                raise RuntimeError(f"Android draft release {tag} targets another commit")
+        else:
+            tagged_commit = git("rev-parse", f"{tag}^{{commit}}")
+            if tagged_commit != version["commit"]:
+                raise RuntimeError(f"Android release tag {tag} points at another commit")
             print(f"Release {tag} already published; leaving its assets unchanged")
             return
 
