@@ -1,0 +1,22 @@
+<resources>
+    <string name="live_subtitle">Поток событий в реальном времени</string>
+    <string name="live_last_event">Последнее событие</string>
+    <string name="live_last_event_empty">—</string>
+    <string name="live_stream_status_connected">Поток подключён</string>
+    <string name="live_stream_status_connecting">Подключение к потоку</string>
+    <string name="live_stream_status_reconnecting">Переподключение к потоку</string>
+    <string name="live_stream_status_core_error">Core недоступен</string>
+    <string name="live_stream_status_disconnected">Поток не подключён</string>
+    <string name="live_stream_status_paused">Поток на паузе</string>
+    <string name="live_filter_level_description">Уровень %1$s, %2$s</string>
+    <string name="live_filter_level_enabled">включён</string>
+    <string name="live_filter_level_disabled">выключен</string>
+    <string name="settings_avatar_description">Аватар пользователя</string>
+    <string name="settings_device_connected">Устройство подключено</string>
+    <string name="settings_connection_section">Подключение</string>
+    <string name="settings_device_section">Устройство</string>
+    <string name="settings_open_web_console">Открыть веб-консоль</string>
+    <string name="settings_browser_not_found">Не удалось открыть веб-консоль: браузер не найден.</string>
+    <string name="settings_disconnect_description">После отключения приложение потеряет доступ к Dock. Вы сможете снова подключить устройство в любой момент.</string>
+    <string name="settings_android_client">Android-клиент</string>
+</resources>

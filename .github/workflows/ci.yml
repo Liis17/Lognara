@@ -59,6 +59,7 @@ jobs:
       rust: ${{ steps.select.outputs.rust }}
       web: ${{ steps.select.outputs.web }}
       dotnet: ${{ steps.select.outputs.dotnet }}
+      android: ${{ steps.select.outputs.android }}
       images: ${{ steps.select.outputs.images }}
     steps:
       - uses: actions/checkout@v7
@@ -108,6 +109,8 @@ jobs:
             Lognara-dock:
               - 'Lognara-dock/**'
               - '!Lognara-dock/web/**'
+            android:
+              - 'lognara-android-client/**'
             web:
               - 'Lognara-dock/web/**'
             dotnet:
@@ -121,7 +124,7 @@ jobs:
               - '.github/workflows/publish-images.yml'
               - '.github/scripts/next-image-version.sh'
               - '.github/scripts/promote_images.py'
-      - name: Select Rust matrix, web and .NET checks
+      - name: Select Rust matrix, web, .NET and Android checks
         id: select
         env:
           CHANGED_FILTERS: ${{ steps.filter.outputs.changes }}
@@ -210,6 +213,30 @@ jobs:
       - name: Browser interaction tests
         run: npm run test:e2e
 
+  android:
+    name: Android (lint, unit tests and debug APK)
+    needs: [changes]
+    if: needs.changes.outputs.android == 'true' && ((github.event_name == 'pull_request' && github.base_ref == 'dev') || github.event_name == 'workflow_dispatch' || inputs.release_all)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: lognara-android-client
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: 'platforms;android-37.0 build-tools;37.0.0'
+      - uses: gradle/actions/setup-gradle@v6
+      - name: Lint, unit tests and debug APK
+        run: sh ./gradlew lint testDebugUnitTest assembleDebug
+
   dotnet:
     name: .NET Serilog (${{ matrix.os }})
     needs: [changes]
@@ -248,7 +275,7 @@ jobs:
   ci:
     name: CI passed
     if: ${{ always() }}
-    needs: [guard, changes, automation, rust, web, dotnet]
+    needs: [guard, changes, automation, rust, web, dotnet, android]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     env:
@@ -265,7 +292,7 @@ jobs:
 
   publish-nuget:
     name: Publish Serilog to NuGet.org
-    # Override implicit success(): optional Rust/web jobs may be skipped upstream.
+    # Override implicit success(): optional Rust/web/Android jobs may be skipped upstream.
     if: ${{ !cancelled() && needs.ci.result == 'success' && needs.changes.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/master' && needs.changes.outputs.dotnet == 'true' }}
     needs: [ci, changes]
     runs-on: ubuntu-24.04
@@ -304,7 +331,7 @@ jobs:
         run: dotnet nuget push 'artifacts/*.nupkg' --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
 
   publish-images:
-    # Override implicit success(): optional Rust/web/.NET jobs may be skipped upstream.
+    # Override implicit success(): optional Rust/web/.NET/Android jobs may be skipped upstream.
     if: ${{ !cancelled() && needs.ci.result == 'success' && needs.changes.result == 'success' && (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/master') && (github.event_name == 'push' || inputs.release_all) && (github.ref == 'refs/heads/master' || needs.changes.outputs.images != '[]') }}
     needs: [ci, changes]
     uses: ./.github/workflows/publish-images.yml

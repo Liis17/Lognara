@@ -1,30 +1,48 @@
 package com.lognara.client.ui.screens.logs
 
-import androidx.lifecycle.ViewModel
-import androidx.lifecycle.viewModelScope
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.CenterAlignedTopAppBar
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.lognara.client.R
@@ -34,69 +52,331 @@ import com.lognara.client.data.DeviceSession
 import com.lognara.client.data.LogEvent
 import com.lognara.client.data.LognaraApi
 import com.lognara.client.data.SearchResponse
+import com.lognara.client.data.apiJson
+import com.lognara.client.ui.components.DetailTopBar
+import com.lognara.client.ui.components.EventCardListItem
+import com.lognara.client.ui.components.LevelBadge
+import com.lognara.client.ui.components.LogEventRow
+import com.lognara.client.ui.components.LognaraCard
+import com.lognara.client.ui.components.PillButton
+import com.lognara.client.ui.components.RoundIconButton
+import com.lognara.client.ui.components.RowDivider
+import com.lognara.client.ui.components.SegmentedSelector
+import com.lognara.client.ui.components.SectionLabel
+import com.lognara.client.ui.components.monoStyle
 import com.lognara.client.ui.screens.data.DataLoadState
-import com.lognara.client.ui.screens.data.DataStateContent
 import com.lognara.client.ui.screens.data.localTimestamp
-import com.lognara.client.ui.theme.MachineTextStyle
+import com.lognara.client.ui.theme.LognaraPalette
 import java.util.concurrent.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import java.util.Locale
+import java.text.NumberFormat
+import kotlinx.serialization.json.doubleOrNull
+import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.JsonElement
+
+private enum class AttributeView { Table, Json }
+private val attributesJson = Json { prettyPrint = true }
 
 @Composable
-@OptIn(ExperimentalMaterial3Api::class)
 fun EventDetailScreen(event: LogEvent, onBack: () -> Unit, onOpenTrace: (LogEvent) -> Unit) {
-    Scaffold(
-        topBar = {
-            CenterAlignedTopAppBar(
-                title = { Text(stringResource(R.string.event_detail_title)) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(painterResource(R.drawable.ic_arrow_back), contentDescription = stringResource(R.string.back))
-                    }
-                },
-            )
-        },
-    ) { insets ->
+    val context = LocalContext.current
+    var attributeView by rememberSaveable { mutableStateOf(AttributeView.Table) }
+    val jsonAttributes = remember(event.attributes) {
+        attributesJson.encodeToString(JsonObject.serializer(), JsonObject(event.attributes))
+    }
+    val fields = eventFields(event)
+    val hiddenFields = hiddenEventFields(event)
+
+    Column(
+        Modifier.fillMaxSize()
+            .background(LognaraPalette.Background)
+            .statusBarsPadding()
+            .navigationBarsPadding(),
+    ) {
+        DetailTopBar(
+            title = stringResource(R.string.event_detail_title),
+            onBack = onBack,
+            actions = {
+                RoundIconButton(
+                    icon = R.drawable.ic_copy,
+                    contentDescription = stringResource(R.string.event_copy_json),
+                    onClick = {
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        val eventJson = apiJson.encodeToString(LogEvent.serializer(), event)
+                        clipboard.setPrimaryClip(ClipData.newPlainText("event-json", eventJson))
+                    },
+                )
+            },
+        )
         Column(
-            modifier = Modifier.fillMaxSize().padding(insets).verticalScroll(rememberScrollState()).padding(16.dp),
+            modifier = Modifier
+                .weight(1f)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp)
+                .padding(bottom = 16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            DetailField(stringResource(R.string.event_field_id), event.id)
-            DetailField(stringResource(R.string.event_field_time), localTimestamp(event.timestamp))
-            DetailField(stringResource(R.string.event_field_ingested), localTimestamp(event.ingested_at))
-            DetailField(stringResource(R.string.event_field_level), stringResource(levelLabel(event.level)))
-            DetailField(stringResource(R.string.event_field_service), event.service)
-            DetailField(stringResource(R.string.event_field_instance), event.service_instance)
-            DetailField(stringResource(R.string.event_field_server), event.server)
-            DetailField(stringResource(R.string.event_field_backend), event.backend)
-            DetailField(stringResource(R.string.event_field_environment), event.environment)
-            DetailField(stringResource(R.string.event_field_action), event.action)
-            DetailField(stringResource(R.string.event_field_trace), event.trace_id)
-            DetailField(stringResource(R.string.event_field_span), event.span_id)
-            DetailField(stringResource(R.string.event_field_parent_span), event.parent_span_id)
-            DetailField(stringResource(R.string.event_field_request), event.request_id)
-            DetailField(stringResource(R.string.event_message), event.message)
-            DetailField(
-                stringResource(R.string.event_field_attributes),
-                event.attributes.entries.joinToString("\n") { (key, value) -> "$key: $value" }.ifEmpty { "—" },
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                LevelBadge(event.level)
+                Text(localTimestamp(event.timestamp), style = monoStyle(12), color = LognaraPalette.TextMuted)
+                Text(
+                    event.service,
+                    fontSize = 13.sp,
+                    color = LognaraPalette.TextSecondary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(LognaraPalette.Background)
+                    .border(1.dp, LognaraPalette.BorderStrong, RoundedCornerShape(8.dp))
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+            ) {
+                Text(event.message, style = monoStyle(14), color = LognaraPalette.Text)
+            }
+
             if (event.trace_id != null) {
-                TextButton(onClick = { onOpenTrace(event) }, modifier = Modifier.fillMaxWidth()) {
-                    Text(stringResource(R.string.event_open_trace))
+                PillButton(
+                    text = stringResource(R.string.event_open_trace),
+                    onClick = { onOpenTrace(event) },
+                    modifier = Modifier.fillMaxWidth().height(44.dp),
+                    icon = R.drawable.ic_node,
+                )
+            }
+
+            LognaraCard(
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(0.dp),
+            ) {
+                fields.forEachIndexed { index, field ->
+                    DetailFieldRow(label = field.first, value = field.second)
+                    if (index < fields.lastIndex) RowDivider()
+                }
+            }
+
+            if (hiddenFields.isNotEmpty()) {
+                Text(
+                    stringResource(R.string.event_hidden_fields, hiddenFields.joinToString(", ")),
+                    modifier = Modifier.padding(horizontal = 4.dp),
+                    fontSize = 12.sp,
+                    lineHeight = 18.sp,
+                    color = LognaraPalette.TextMuted,
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(stringResource(R.string.event_field_attributes), fontSize = 16.sp, color = LognaraPalette.Text)
+                    Text(
+                        remember(event.attributes) { attributeRootName(event.attributes) } ?: event.backend,
+                        style = monoStyle(13),
+                        color = LognaraPalette.TextMuted,
+                    )
+                }
+                SegmentedSelector(
+                    options = AttributeView.entries,
+                    selected = attributeView,
+                    label = { view ->
+                        stringResource(if (view == AttributeView.Table) R.string.event_attributes_table else R.string.event_attributes_json)
+                    },
+                    onSelect = { attributeView = it },
+                    modifier = Modifier.width(184.dp),
+                    itemHeight = 30.dp,
+                )
+            }
+
+            if (attributeView == AttributeView.Json) {
+                LognaraCard(contentPadding = PaddingValues(14.dp), verticalArrangement = Arrangement.spacedBy(0.dp)) {
+                    Text(
+                        jsonAttributes.ifBlank { "{}" },
+                        style = monoStyle(12),
+                        color = LognaraPalette.TextSecondary,
+                    )
                 }
             } else {
-                Text(stringResource(R.string.trace_unavailable), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                AttributeTable(event.attributes)
             }
         }
     }
 }
 
+private data class EventField(val first: String, val second: String)
+
 @Composable
-private fun DetailField(label: String, value: String?) {
-    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-        Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Text(value ?: "—", style = MachineTextStyle)
+private fun eventFields(event: LogEvent): List<EventField> = buildList {
+    add(EventField(stringResource(R.string.event_field_time), localTimestamp(event.timestamp)))
+    add(EventField(stringResource(R.string.event_field_ingested), localTimestamp(event.ingested_at)))
+    add(EventField(stringResource(R.string.event_field_service), event.service))
+    event.service_instance?.takeIf(String::isNotBlank)?.let {
+        add(EventField(stringResource(R.string.event_field_instance), it))
+    }
+    add(EventField(stringResource(R.string.event_field_server), event.server))
+    add(EventField(stringResource(R.string.event_field_backend), event.backend))
+    event.environment?.takeIf(String::isNotBlank)?.let {
+        add(EventField(stringResource(R.string.event_field_environment), it))
+    }
+    event.action?.takeIf(String::isNotBlank)?.let {
+        add(EventField(stringResource(R.string.event_field_action), it))
+    }
+    event.trace_id?.takeIf(String::isNotBlank)?.let {
+        add(EventField(stringResource(R.string.event_field_trace), it))
+    }
+    event.span_id?.takeIf(String::isNotBlank)?.let {
+        add(EventField(stringResource(R.string.event_field_span), it))
+    }
+    event.parent_span_id?.takeIf(String::isNotBlank)?.let {
+        add(EventField(stringResource(R.string.event_field_parent_span), it))
+    }
+    event.request_id?.takeIf(String::isNotBlank)?.let {
+        add(EventField(stringResource(R.string.event_field_request), it))
+    }
+    add(EventField(stringResource(R.string.event_field_id), event.id))
+}
+
+@Composable
+private fun hiddenEventFields(event: LogEvent): List<String> = buildList {
+    if (event.service_instance.isNullOrBlank()) add(stringResource(R.string.event_field_instance))
+    if (event.environment.isNullOrBlank()) add(stringResource(R.string.event_field_environment))
+    if (event.action.isNullOrBlank()) add(stringResource(R.string.event_field_action))
+    if (event.trace_id.isNullOrBlank()) add(stringResource(R.string.event_field_trace))
+    if (event.span_id.isNullOrBlank()) add(stringResource(R.string.event_field_span))
+    if (event.parent_span_id.isNullOrBlank()) add(stringResource(R.string.event_field_parent_span))
+    if (event.request_id.isNullOrBlank()) add(stringResource(R.string.event_field_request))
+}
+
+@Composable
+private fun DetailFieldRow(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 9.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, modifier = Modifier.weight(0.9f), fontSize = 13.sp, color = LognaraPalette.TextMuted)
+        Text(
+            value,
+            modifier = Modifier.weight(1.1f),
+            style = monoStyle(12),
+            color = LognaraPalette.Text,
+            textAlign = TextAlign.End,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun AttributeTable(attributes: Map<String, kotlinx.serialization.json.JsonElement>) {
+    if (attributes.isEmpty()) {
+        Text(
+            stringResource(R.string.event_attributes_empty),
+            color = LognaraPalette.TextMuted,
+            modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp),
+        )
+        return
+    }
+    val defaultGroup = stringResource(R.string.event_field_attributes)
+    val sections = remember(attributes) { attributeSections(attributes) }
+    LognaraCard(
+        contentPadding = PaddingValues(0.dp),
+        verticalArrangement = Arrangement.spacedBy(0.dp),
+    ) {
+        sections.forEachIndexed { sectionIndex, section ->
+            Box(
+                Modifier.fillMaxWidth().background(LognaraPalette.Text.copy(alpha = 0.02f)).padding(horizontal = 14.dp, vertical = 8.dp),
+            ) {
+                SectionLabel(section.title ?: defaultGroup)
+            }
+            RowDivider()
+            section.rows.forEachIndexed { index, (key, value) ->
+                AttributeRow(key = key, value = value)
+                if (index < section.rows.lastIndex) RowDivider()
+            }
+            if (sectionIndex < sections.lastIndex) RowDivider()
+        }
+    }
+}
+
+internal data class AttributeSection(val title: String?, val rows: List<Pair<String, String>>)
+
+/**
+ * Раскладывает атрибуты события в секции таблицы: простые значения верхнего уровня
+ * попадают в общую секцию (title = null), вложенные объекты разворачиваются
+ * в секции по имени объекта, как `Metrics.Counters` → «Counters».
+ */
+internal fun attributeSections(attributes: Map<String, JsonElement>, locale: Locale = Locale.getDefault()): List<AttributeSection> {
+    val sections = mutableListOf<AttributeSection>()
+    fun walk(title: String?, values: Map<String, JsonElement>) {
+        val rows = values.entries
+            .filter { it.value !is JsonObject }
+            .sortedBy { it.key }
+            .map { it.key to attributeText(it.value, locale) }
+        if (rows.isNotEmpty()) sections += AttributeSection(title, rows)
+        values.entries
+            .filter { it.value is JsonObject }
+            .sortedBy { it.key }
+            .forEach { walk(it.key, it.value.jsonObject) }
+    }
+    walk(null, attributes)
+    return sections
+}
+
+/** Подпись при заголовке «Атрибуты»: имя единственного вложенного объекта, например `Metrics`. */
+internal fun attributeRootName(attributes: Map<String, JsonElement>): String? =
+    attributes.entries.singleOrNull()?.takeIf { it.value is JsonObject }?.key
+
+private fun attributeText(value: JsonElement, locale: Locale): String {
+    val primitive = value as? JsonPrimitive ?: return value.toString()
+    if (primitive.isString) return primitive.content
+    primitive.longOrNull?.let { return NumberFormat.getIntegerInstance(locale).format(it) }
+    primitive.doubleOrNull?.let {
+        return NumberFormat.getNumberInstance(locale).apply { maximumFractionDigits = 2 }.format(it)
+    }
+    return primitive.content
+}
+
+@Composable
+private fun AttributeRow(key: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 7.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            key,
+            modifier = Modifier.weight(1f),
+            style = monoStyle(12),
+            color = LognaraPalette.TextSecondary,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            value,
+            modifier = Modifier.weight(0.8f),
+            style = monoStyle(12),
+            color = LognaraPalette.Text,
+            textAlign = TextAlign.End,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
@@ -138,7 +418,6 @@ class TraceDetailViewModel(
 }
 
 @Composable
-@OptIn(ExperimentalMaterial3Api::class)
 fun TraceDetailScreen(
     api: LognaraApi,
     session: DeviceSession,
@@ -152,33 +431,84 @@ fun TraceDetailScreen(
         TraceDetailViewModel(api, session, traceId, from, to)
     }
     val state by viewModel.state.collectAsStateWithLifecycle()
-    Scaffold(
-        topBar = {
-            CenterAlignedTopAppBar(
-                title = { Text(stringResource(R.string.trace_detail_title)) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(painterResource(R.drawable.ic_arrow_back), contentDescription = stringResource(R.string.back))
-                    }
-                },
+
+    Column(
+        Modifier.fillMaxSize()
+            .background(LognaraPalette.Background)
+            .statusBarsPadding()
+            .navigationBarsPadding(),
+    ) {
+        DetailTopBar(title = stringResource(R.string.logs_trace_title), onBack = onBack)
+        when (val result = state) {
+            DataLoadState.Loading -> DetailState(
+                loading = true,
+                text = stringResource(R.string.data_loading),
+                modifier = Modifier.fillMaxSize(),
             )
-        },
-    ) { insets ->
-        DataStateContent(
-            state = state,
-            isEmpty = { it.events.isEmpty() },
-            onRetry = viewModel::retry,
-            emptyText = stringResource(R.string.trace_empty),
-            modifier = Modifier.fillMaxSize().padding(insets).padding(horizontal = 16.dp),
-        ) { response ->
-            LazyColumn(
-                Modifier.fillMaxSize().padding(top = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                items(response.events, key = { it.id }) { event ->
-                    LogEventRow(event = event, onClick = { onOpenEvent(event) })
+            DataLoadState.Error -> DetailState(
+                text = stringResource(R.string.data_load_error),
+                actionText = stringResource(R.string.retry),
+                onAction = viewModel::retry,
+                modifier = Modifier.fillMaxSize(),
+            )
+            is DataLoadState.Content -> if (result.value.events.isEmpty()) {
+                DetailState(
+                    text = stringResource(R.string.trace_empty),
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 16.dp),
+                    verticalArrangement = Arrangement.Top,
+                ) {
+                    itemsIndexed(result.value.events, key = { _, event -> event.id }) { index, event ->
+                        EventCardListItem(
+                            isFirst = index == 0,
+                            isLast = index == result.value.events.lastIndex,
+                        ) {
+                            TraceEventRow(event = event, onClick = { onOpenEvent(event) })
+                        }
+                    }
                 }
             }
         }
     }
+}
+
+@Composable
+private fun DetailState(
+    text: String,
+    modifier: Modifier = Modifier,
+    loading: Boolean = false,
+    actionText: String? = null,
+    onAction: (() -> Unit)? = null,
+) {
+    Box(modifier.padding(16.dp), contentAlignment = Alignment.Center) {
+        LognaraCard(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                if (loading) CircularProgressIndicator(
+                    modifier = Modifier.size(22.dp),
+                    color = LognaraPalette.Accent,
+                    strokeWidth = 2.dp,
+                )
+                Text(text, color = LognaraPalette.TextMuted)
+            }
+            if (actionText != null && onAction != null) {
+                TextButton(onClick = onAction) { Text(actionText) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TraceEventRow(event: LogEvent, onClick: () -> Unit) {
+    LogEventRow(
+        level = event.level,
+        time = localTimestamp(event.timestamp).substringAfter(' ', localTimestamp(event.timestamp)),
+        service = event.service,
+        server = event.server,
+        message = event.message,
+        onClick = onClick,
+    )
 }

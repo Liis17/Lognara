@@ -1,0 +1,17 @@
+<resources>
+    <string name="metrics_favorites_subtitle">Избранные · %1$d</string>
+    <string name="metrics_unit_per_step">%1$s за %2$s</string>
+    <string name="metrics_default_unit">значений</string>
+    <string name="metrics_min_max">мин %1$s · макс %2$s</string>
+    <string name="metrics_maximum">Максимум</string>
+    <string name="metrics_minimum">Минимум</string>
+    <string name="metrics_chart_step">шаг %1$s</string>
+    <string name="metrics_step_hours">%1$d ч</string>
+    <string name="metrics_step_minutes">%1$d мин</string>
+    <string name="metrics_step_seconds">%1$d с</string>
+    <string name="metrics_details_footer">%1$s · агрегация: %2$s · источник: %3$s</string>
+    <string name="metrics_environment_filter">Окружение · %1$s</string>
+    <string name="metrics_refresh_description">Обновить</string>
+    <string name="metrics_chart_accessibility">%1$s за %2$s. Максимум %3$s, минимум %4$s</string>
+    <string name="metrics_chart_accessible_action">Показать значение на графике</string>
+</resources>

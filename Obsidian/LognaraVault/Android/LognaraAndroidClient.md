@@ -8,7 +8,8 @@ Parent: [[Index]]
 
 - Kotlin, Jetpack Compose, Material 3; один модуль `app`, пакет `com.lognara.client`, minSdk 35, target/compileSdk 37. Версии в `gradle/libs.versions.toml`, Gradle wrapper 9.4.1 (AGP 9.2.1 требует именно его).
 - Без DI и Room: ручной контейнер в `LognaraApplication.kt`.
-- Сборка требует JDK 21 (JBR Android Studio): `./gradlew lint testDebugUnitTest assembleDebug`. В CI Android-проверок нет.
+- Сборка требует JDK 21 (JBR Android Studio): `./gradlew lint testDebugUnitTest assembleDebug`. Проверки CI и выпуск релизов описаны в [[Repository/CI#Android]]. Без Gradle-свойств создаётся локальная версия `0.0.0-local` с кодом `1`, без канала обновления.
+- Релизные свойства `lognaraVersionCode`, `lognaraVersionName` и `lognaraUpdateChannel` задаются совместно; канал — `stable` или `dev`. BuildConfig содержит `UPDATE_CHANNEL` и `UPDATE_REPOSITORY` (`Liis17/Lognara`). Без переменных подписи release APK остаётся неподписанным; частичный набор из четырёх `ANDROID_SIGNING_*` переменных останавливает конфигурацию с перечнем требуемых переменных.
 
 ## Вход по QR
 
@@ -30,7 +31,9 @@ Parent: [[Index]]
 
 ## Тема
 
-Material You (dynamic color) по системной теме. Шрифты Commissioner (variable, веса задаются через `FontVariation`) и IBM Plex Mono для машинных данных; источники и лицензии в `app/font-licenses/`. Цвета уровней логов и статусов фиксированы и не зависят от dynamic color (`LognaraColors`).
+Только тёмная тема по макетам редизайна (`lognara-android-design`, экраны 390×844); dynamic color и светлая тема не используются. Палитра `LognaraPalette` и цвета уровней и статусов `LognaraSemanticColors` лежат в `ui/theme/Theme.kt`; системные панели всегда со светлыми значками (`MainActivity`). Шрифты Commissioner (variable, веса задаются через `FontVariation`) и IBM Plex Mono для машинных данных; источники и лицензии в `app/font-licenses/`.
+
+Общие элементы дизайна собраны в `ui/components/LognaraComponents.kt`: заголовки разделов и вложенных экранов, сегментированный выбор периода, капсулы-фильтры, карточки, бейджи уровней и статусов, строка события, нижняя навигация. Иконки — векторные `res/drawable/ic_*.xml` из макетов. Каждый раздел сам рисует свой заголовок с кнопкой настроек. `HomeScreen` держит нижнюю навигацию и счётчик открытых проблем за 24 ч: один `POST /api/issues/search` при входе и после resolve/reopen. Строки экранов лежат в отдельных `res/values/strings_<раздел>.xml`.
 
 ## Состояние
 
@@ -39,7 +42,17 @@ Material You (dynamic color) по системной теме. Шрифты Comm
 - Авторизованные data-запросы используют только `DeviceApiRoutes`: GET `/api/me`, `/api/infrastructure`, `/api/series`, `/api/series/favorites`, `/api/series/sources`, `/api/traces/{id}`; POST `/api/logs/search`, `/api/stats/summary`, `/api/stats/group-by`, `/api/issues/search`, `/api/issues/{id}/details|resolve|reopen`, `/api/series/lookup`, `/api/series/query`; DELETE `/api/devices/current`; SSE GET `/api/logs/stream`. Динамические идентификаторы пути кодируются как отдельный сегмент URL. `DeviceApiRoutesTest` сравнивает перечень клиента с allowlist из `Lognara-dock/src/session.rs`.
 - «Логи» начинает с одного `POST /api/stats/summary`, содержащего `text`, `filters`, `interval_seconds` и `search_limit=50`; продолжение идёт через `POST /api/logs/search` с cursor. Детали события открывают `GET /api/traces/{id}?from&to&limit` для trace.
 - «Live» работает, только пока вкладка выбрана и экран в состоянии `RESUMED`. Обрабатываются SSE-события `logs`, `lagged`, `core_error`, `core_ok`; после обрыва выполняется `GET /api/me`, при сохранённой сессии действует экспоненциальный reconnect с пределом 30 с. Буфер ограничен 500 событиями, повторные `id` удаляются; доступны фильтры сервиса/уровней и пауза.
-- «Проблемы» сначала запрашивает `POST /api/issues/search`, затем последовательно получает список сервисов через `POST /api/stats/group-by`. Детали загружаются по `/api/issues/{id}/details`; resolve/reopen вызываются отдельными POST после подтверждения. Статус общий для Dock.
+- «Проблемы» сначала запрашивает `POST /api/issues/search`, затем последовательно получает список сервисов через `POST /api/stats/group-by`. Детали загружаются по `/api/issues/{id}/details`; resolve/reopen вызываются отдельными POST после подтверждения. Список обновляется жестом pull-to-refresh, статус общий для Dock.
 - «Инфра» использует только `GET /api/infrastructure`: показывает Core, WAL, хранилище, Dock и узлы с причиной/heartbeat, группируя узлы по relay; обновление доступно жестом pull-to-refresh.
 - «Метрики» читает избранное через GET `/api/series/favorites` и POST `/api/series/lookup`, источники через GET `/api/series/sources`, каталог источника через GET `/api/series?group_by=server&server&service`, точки через POST `/api/series/query`. Избранное только для чтения; запросы мини-графиков ограничены двумя одновременно. Графики рисуются Compose Canvas, `null` начинает новый сегмент линии, без соединения через пропуск.
 - Новых runtime-зависимостей для графиков нет. Тесты моделей и запросов лежат в `app/src/test/`; транспорт использует test-only `mockwebserver3` и `kotlinx-coroutines-test`.
+
+## Настройки приложения и обновления
+
+- Из настроек устройства открывается отдельный экран настроек приложения с версией, кодом версии, каналом сборки, авто-проверкой, каналом обновлений и ссылкой на GitHub Releases. Все UI-строки экрана находятся в `app/src/main/res/values/strings_app_settings.xml`.
+- `data/AppSettingsStore.kt` хранит `autoCheck`, канал и время последней проверки в отдельном DataStore `app_settings`; очистка сессии и ответы 401 его не затрагивают. Канал по умолчанию — `dev` для dev-сборки и `stable` иначе; локальная сборка отключает автообновление.
+- `data/GitHubReleaseUpdater.kt` использует отдельный OkHttp-клиент с HTTPS и редиректами, не меняя Dock-клиент. Список запрашивается страницами по 30 релизов; поиск останавливается после пяти кандидатов выбранного канала, конца списка или десяти страниц. Каждая страница списка ограничена 1 МиБ, `version.json` — 64 КиБ, APK — 150 МиБ. Ошибка метаданных показывается только когда не удалось проверить ни один кандидат; валидная версия не новее установленной означает актуальное состояние.
+- Перед установкой проверяются SHA-256, package name, versionCode и подпись установленного приложения. APK читается и записывается в `Dispatchers.IO` с проверкой отмены; при старте очищается содержимое `cacheDir/updates`. При смене канала отменяются проверки и установка, состояние сбрасывается; stable разрешает только stable manifest, dev — оба канала.
+- `UpdateInstallReceiver` передаёт статусы PackageInstaller. Подтверждение, пришедшее в фоне, сохраняется до следующего `onResume`; если финальный статус не пришёл за две минуты, обновление снова доступно для повтора с пояснением.
+- Android-клиент получает релизы из `Liis17/Lognara`: stable тег `android-YYYYMMDD-HHMMSS-<sha12>` без prerelease; dev тег `android-dev-YYYYMMDD-HHMMSS-<sha12>` с prerelease; ни один Android-релиз не назначается latest. Ассеты: `lognara-android.apk`, `version.json`, `SHA256SUMS`. `version.json` содержит `versionCode`, `versionName`, `channel`, `commit`, имя APK и его SHA-256. Код версии вычисляется CI от UTC-времени коммита: `(секунды − 1735689600) / 60`.
+- Установка требует `REQUEST_INSTALL_PACKAGES`. Если Android запрещает установку из источника, приложение открывает системную страницу разрешения для своего пакета; PackageInstaller затем показывает подтверждение пользователю.

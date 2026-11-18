@@ -1,5 +1,5 @@
 <resources>
-    <style name="Theme.Lognara" parent="android:style/Theme.Material.Light.NoActionBar">
+    <style name="Theme.Lognara" parent="android:style/Theme.Material.NoActionBar">
         <item name="android:fontFamily">sans</item>
         <item name="android:windowActionModeOverlay">true</item>
         <item name="android:windowLightStatusBar">false</item>

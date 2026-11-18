@@ -5,22 +5,33 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.lognara.client.BuildConfig
 import com.lognara.client.AppContainer
+import com.lognara.client.R
 import com.lognara.client.data.ApiException
+import com.lognara.client.data.AppSettings
+import com.lognara.client.data.AvailableUpdate
 import com.lognara.client.data.DeviceSession
+import com.lognara.client.data.InstallerEvent
 import com.lognara.client.data.LogEvent
 import com.lognara.client.data.PairError
 import com.lognara.client.data.PairPayloadException
 import com.lognara.client.data.PairResult
 import com.lognara.client.data.PayloadIssue
+import com.lognara.client.data.UpdateChannel
+import com.lognara.client.data.UpdateFailure
 import com.lognara.client.data.buildDeviceName
 import com.lognara.client.data.decodePairPayload
+import com.lognara.client.data.isCurrentUpdateRequest
+import com.lognara.client.data.isManifestChannelAllowed
 import java.io.IOException
+import java.io.File
 import java.net.SocketTimeoutException
 import java.util.concurrent.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.update
 
@@ -41,14 +52,36 @@ data class SettingsUiState(
     val isDisconnecting: Boolean = false,
 )
 
+enum class UpdatePhase { Idle, Checking, UpToDate, Available, Downloading, PermissionRequired, Installing, Installed, Error }
+
+data class AppUpdateUiState(
+    val phase: UpdatePhase = UpdatePhase.Idle,
+    val update: AvailableUpdate? = null,
+    val downloadProgress: Float? = null,
+    val error: String? = null,
+)
+
 enum class SettingsError { Network, Server, Redirect, InvalidResponse }
 enum class LoginNotice { DeviceStillListed }
+
+internal fun installTimeoutState(state: AppUpdateUiState, message: String): AppUpdateUiState =
+    if (state.phase == UpdatePhase.Installing && state.update != null) {
+        state.copy(phase = UpdatePhase.Available, error = message)
+    } else {
+        state
+    }
 
 internal fun isCurrentUnauthorizedSession(requestSession: DeviceSession, currentSession: DeviceSession?): Boolean =
     requestSession == currentSession
 
 class AppViewModel(val container: AppContainer) : ViewModel() {
     private var unauthorizedSignOut: Job? = null
+    private var updateCheckJob: Job? = null
+    private var updateInstallJob: Job? = null
+    private var installResultTimeoutJob: Job? = null
+    private var updateChannelGeneration = 0L
+    private var activeInstallerGeneration: Long? = null
+    private var autoCheckStarted = false
     private val _session = MutableStateFlow<DeviceSession?>(null)
     val session = _session.asStateFlow()
 
@@ -73,9 +106,49 @@ class AppViewModel(val container: AppContainer) : ViewModel() {
     private val _loginNotice = MutableStateFlow<LoginNotice?>(null)
     val loginNotice = _loginNotice.asStateFlow()
 
+    private val _appSettings = MutableStateFlow(
+        AppSettings(channel = UpdateChannel.from(BuildConfig.UPDATE_CHANNEL)),
+    )
+    val appSettings = _appSettings.asStateFlow()
+
+    private val _appUpdate = MutableStateFlow(AppUpdateUiState())
+    val appUpdate = _appUpdate.asStateFlow()
+
+    private val _showUpdatePrompt = MutableStateFlow(false)
+    val showUpdatePrompt = _showUpdatePrompt.asStateFlow()
+
     init {
         container.api.onUnauthorized = ::handleUnauthorized
         viewModelScope.launch { restoreCredentials() }
+        viewModelScope.launch {
+            container.appSettingsStore.settings.collect { settings ->
+                val channel = if (updateChannelGeneration == 0L) settings.channel else _appSettings.value.channel
+                _appSettings.value = settings.copy(channel = channel)
+                if (BuildConfig.UPDATE_CHANNEL.isNotBlank() && settings.autoCheck && !autoCheckStarted) {
+                    autoCheckStarted = true
+                    checkForUpdates(showStartupPrompt = true)
+                }
+            }
+        }
+        viewModelScope.launch {
+            container.updater.installerEvent.filterNotNull().collect { event ->
+                if (activeInstallerGeneration == updateChannelGeneration) {
+                    if (event != InstallerEvent.UserActionRequired) installResultTimeoutJob?.cancel()
+                    _appUpdate.update { state ->
+                        when (event) {
+                            InstallerEvent.UserActionRequired -> state.copy(phase = UpdatePhase.Installing, error = null)
+                            InstallerEvent.Succeeded -> state.copy(phase = UpdatePhase.Installed, error = null)
+                            is InstallerEvent.Failed -> state.copy(
+                                phase = UpdatePhase.Error,
+                                error = container.getString(event.messageResource),
+                            )
+                        }
+                    }
+                    if (event != InstallerEvent.UserActionRequired) activeInstallerGeneration = null
+                }
+                container.updater.clearInstallerEvent(event)
+            }
+        }
     }
 
     private fun handleUnauthorized(requestSession: DeviceSession) {
@@ -115,6 +188,179 @@ class AppViewModel(val container: AppContainer) : ViewModel() {
 
     fun refreshIssues() {
         _issuesRefreshKey.value += 1
+    }
+
+    fun setAutoCheck(enabled: Boolean) {
+        _appSettings.update { it.copy(autoCheck = enabled) }
+        viewModelScope.launch { container.appSettingsStore.setAutoCheck(enabled) }
+    }
+
+    fun setUpdateChannel(channel: UpdateChannel) {
+        val settings = _appSettings.value
+        if (settings.channel == channel) return
+        updateChannelGeneration++
+        activeInstallerGeneration = null
+        updateCheckJob?.cancel()
+        updateCheckJob = null
+        updateInstallJob?.cancel()
+        updateInstallJob = null
+        installResultTimeoutJob?.cancel()
+        installResultTimeoutJob = null
+        _appSettings.update { it.copy(channel = channel) }
+        _appUpdate.value = AppUpdateUiState()
+        _showUpdatePrompt.value = false
+        viewModelScope.launch { container.appSettingsStore.setChannel(channel) }
+        if (BuildConfig.UPDATE_CHANNEL.isNotBlank() && settings.autoCheck) checkForUpdates()
+    }
+
+    fun checkForUpdates(showStartupPrompt: Boolean = false) {
+        if (BuildConfig.UPDATE_CHANNEL.isBlank() || updateCheckJob?.isActive == true) return
+        val channel = _appSettings.value.channel
+        val generation = updateChannelGeneration
+        _appUpdate.value = AppUpdateUiState(phase = UpdatePhase.Checking)
+        updateCheckJob = viewModelScope.launch {
+            try {
+                val available = container.updater.checkForUpdate(channel)
+                if (!isCurrentUpdateRequest(channel, _appSettings.value.channel, generation, updateChannelGeneration)) {
+                    return@launch
+                }
+                if (available == null) {
+                    _appUpdate.value = AppUpdateUiState(phase = UpdatePhase.UpToDate)
+                } else {
+                    _appUpdate.value = AppUpdateUiState(phase = UpdatePhase.Available, update = available)
+                    if (showStartupPrompt) _showUpdatePrompt.value = true
+                }
+            } catch (exception: CancellationException) {
+                throw exception
+            } catch (failure: UpdateFailure) {
+                if (isCurrentUpdateRequest(channel, _appSettings.value.channel, generation, updateChannelGeneration)) {
+                    _appUpdate.value = AppUpdateUiState(
+                        phase = UpdatePhase.Error,
+                        error = container.getString(failure.messageResource, *failure.formatArgs.toTypedArray()),
+                    )
+                }
+            } catch (_: IOException) {
+                if (isCurrentUpdateRequest(channel, _appSettings.value.channel, generation, updateChannelGeneration)) {
+                    _appUpdate.value = AppUpdateUiState(
+                        phase = UpdatePhase.Error,
+                        error = container.getString(R.string.app_update_error_network),
+                    )
+                }
+            } catch (_: Exception) {
+                if (isCurrentUpdateRequest(channel, _appSettings.value.channel, generation, updateChannelGeneration)) {
+                    _appUpdate.value = AppUpdateUiState(
+                        phase = UpdatePhase.Error,
+                        error = container.getString(R.string.app_update_error_retry),
+                    )
+                }
+            } finally {
+                try {
+                    container.appSettingsStore.setLastCheckAt(System.currentTimeMillis())
+                } catch (exception: CancellationException) {
+                    throw exception
+                } catch (_: Exception) {
+                    // A failed settings write must not replace the update result.
+                }
+            }
+        }
+    }
+
+    /** Returns false when Android's unknown-app setting must be opened first. */
+    fun installUpdate(): Boolean {
+        if (updateInstallJob?.isActive == true) return true
+        val update = _appUpdate.value.update ?: return false
+        val channel = _appSettings.value.channel
+        val generation = updateChannelGeneration
+        if (!isManifestChannelAllowed(update.manifest.channel, channel)) {
+            _appUpdate.update {
+                it.copy(
+                    phase = UpdatePhase.Error,
+                    update = null,
+                    error = container.getString(R.string.app_update_error_channel_mismatch),
+                )
+            }
+            return true
+        }
+        if (!container.updater.canRequestPackageInstalls()) {
+            _appUpdate.update {
+                it.copy(
+                    phase = UpdatePhase.PermissionRequired,
+                    error = container.getString(R.string.app_update_error_permission),
+                )
+            }
+            return false
+        }
+
+        installResultTimeoutJob?.cancel()
+        installResultTimeoutJob = null
+        _appUpdate.update { it.copy(phase = UpdatePhase.Downloading, downloadProgress = null, error = null) }
+        updateInstallJob = viewModelScope.launch {
+            try {
+                val apk: File = container.updater.downloadAndVerify(update) { downloaded, total ->
+                    if (isCurrentUpdateRequest(channel, _appSettings.value.channel, generation, updateChannelGeneration)) {
+                        _appUpdate.update { state ->
+                            state.copy(downloadProgress = total?.takeIf { it > 0 }?.let { (downloaded.toFloat() / it).coerceIn(0f, 1f) })
+                        }
+                    }
+                }
+                if (!isCurrentUpdateRequest(channel, _appSettings.value.channel, generation, updateChannelGeneration)) {
+                    return@launch
+                }
+                if (!container.updater.canRequestPackageInstalls()) {
+                    _appUpdate.update {
+                        it.copy(
+                            phase = UpdatePhase.PermissionRequired,
+                            error = container.getString(R.string.app_update_error_permission),
+                            downloadProgress = null,
+                        )
+                    }
+                    return@launch
+                }
+                _appUpdate.update { it.copy(phase = UpdatePhase.Installing, downloadProgress = null, error = null) }
+                activeInstallerGeneration = generation
+                container.updater.install(apk)
+                if (isCurrentUpdateRequest(channel, _appSettings.value.channel, generation, updateChannelGeneration) &&
+                    _appUpdate.value.phase == UpdatePhase.Installing
+                ) {
+                    installResultTimeoutJob = viewModelScope.launch {
+                        delay(INSTALL_RESULT_TIMEOUT_MILLIS)
+                        if (isCurrentUpdateRequest(channel, _appSettings.value.channel, generation, updateChannelGeneration)) {
+                            val message = container.getString(R.string.app_update_install_timeout)
+                            _appUpdate.update { state -> installTimeoutState(state, message) }
+                        }
+                    }
+                }
+            } catch (exception: CancellationException) {
+                throw exception
+            } catch (failure: UpdateFailure) {
+                if (activeInstallerGeneration == generation) activeInstallerGeneration = null
+                if (isCurrentUpdateRequest(channel, _appSettings.value.channel, generation, updateChannelGeneration)) {
+                    _appUpdate.update {
+                        it.copy(
+                            phase = UpdatePhase.Error,
+                            error = container.getString(failure.messageResource, *failure.formatArgs.toTypedArray()),
+                            downloadProgress = null,
+                        )
+                    }
+                }
+            } catch (_: Exception) {
+                if (activeInstallerGeneration == generation) activeInstallerGeneration = null
+                if (isCurrentUpdateRequest(channel, _appSettings.value.channel, generation, updateChannelGeneration)) {
+                    _appUpdate.update {
+                        it.copy(
+                            phase = UpdatePhase.Error,
+                            error = container.getString(R.string.app_update_error_install_retry),
+                            downloadProgress = null,
+                        )
+                    }
+                }
+            }
+        }
+        return true
+    }
+
+    fun dismissUpdatePrompt() {
+        _showUpdatePrompt.value = false
     }
 
     fun connect(payloadText: String) {
@@ -203,5 +449,9 @@ class AppViewModel(val container: AppContainer) : ViewModel() {
             _selectedEvents.value = emptyMap()
             _settings.value = SettingsUiState()
         }
+    }
+
+    private companion object {
+        const val INSTALL_RESULT_TIMEOUT_MILLIS = 2 * 60 * 1000L
     }
 }

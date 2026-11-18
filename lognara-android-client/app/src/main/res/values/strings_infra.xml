@@ -1,0 +1,25 @@
+<resources>
+    <string name="infra_ui_snapshot">Снимок</string>
+    <string name="infra_ui_refresh">Обновить снимок</string>
+    <string name="infra_ui_publication_delay">Задержка публикации</string>
+    <string name="infra_ui_seconds">%1$s с</string>
+    <string name="infra_ui_wal_line">WAL · %1$s из %2$s</string>
+    <string name="infra_ui_sessions">Активных сессий</string>
+    <string name="infra_ui_sse_clients">Клиентов SSE</string>
+    <string name="infra_ui_storage_occupied">%1$s%% занято</string>
+    <string name="infra_ui_storage_value_suffix">из %1$s</string>
+    <string name="infra_ui_retention">Срок хранения</string>
+    <string name="infra_ui_retention_days">%1$s дн</string>
+    <string name="infra_ui_segments">Сегментов</string>
+    <string name="infra_ui_free">Свободно</string>
+    <string name="infra_ui_parquet">Parquet</string>
+    <string name="infra_ui_indexes">Индексы</string>
+    <string name="infra_ui_since">С даты</string>
+    <string name="infra_ui_nodes_summary">%1$d relay · %2$d агент</string>
+    <string name="infra_ui_unassigned_group">Узлы без relay</string>
+    <string name="infra_ui_heartbeat">Heartbeat</string>
+    <string name="infra_ui_last_event">Событие</string>
+    <string name="infra_ui_failures">Сбоев</string>
+    <string name="infra_ui_spool_line">Спул %1$s из %2$s · записей %3$s</string>
+    <string name="infra_ui_spool_threshold">порог %1$d%%</string>
+</resources>

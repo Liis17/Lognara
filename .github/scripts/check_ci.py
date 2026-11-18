@@ -15,6 +15,7 @@ def check(needs, event, base, ref, full=False):
         "rust": tests and json.loads(selected["rust"]) != [],
         "web": tests and selected["web"] == "true",
         "dotnet": (tests or ref == "refs/heads/master") and selected["dotnet"] == "true",
+        "android": tests and selected["android"] == "true",
     }
     return all(needs[job]["result"] == ("success" if required else "skipped")
                for job, required in expected.items())
