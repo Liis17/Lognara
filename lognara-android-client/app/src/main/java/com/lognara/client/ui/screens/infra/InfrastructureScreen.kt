@@ -33,9 +33,9 @@ import com.lognara.client.data.LognaraApi
 import com.lognara.client.data.SpoolUsage
 import com.lognara.client.ui.screens.data.DataLoadState
 import com.lognara.client.ui.screens.data.DataStateContent
+import com.lognara.client.ui.screens.data.formatDataNumber
 import com.lognara.client.ui.screens.data.localTimestamp
 import com.lognara.client.ui.theme.MachineTextStyle
-import java.text.NumberFormat
 import java.time.Duration
 import java.time.Instant
 
@@ -245,7 +245,7 @@ private fun byteValue(value: Long): String {
 }
 
 @Composable
-private fun number(value: Number): String = NumberFormat.getNumberInstance(LocalConfiguration.current.locales[0]).format(value)
+private fun number(value: Number): String = formatDataNumber(value, LocalConfiguration.current.locales[0])
 
 private fun coreStatusLabel(status: String): Int = when (status) {
     "online" -> R.string.infra_status_online

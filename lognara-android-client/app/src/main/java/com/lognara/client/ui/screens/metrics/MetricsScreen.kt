@@ -41,6 +41,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -60,9 +61,9 @@ import com.lognara.client.data.SeriesReply
 import com.lognara.client.ui.screens.data.DataLoadState
 import com.lognara.client.ui.screens.data.DataRange
 import com.lognara.client.ui.screens.data.DataStateContent
+import com.lognara.client.ui.screens.data.formatDataNumber
 import com.lognara.client.ui.screens.data.localTimestamp
 import com.lognara.client.ui.theme.MachineTextStyle
-import java.text.NumberFormat
 import java.util.concurrent.CancellationException
 
 @Composable
@@ -508,7 +509,4 @@ private fun aggregationLabel(value: String): String = stringResource(
 )
 
 @Composable
-private fun number(value: Double): String {
-    val locale = androidx.compose.ui.platform.LocalConfiguration.current.locales[0]
-    return NumberFormat.getNumberInstance(locale).apply { maximumFractionDigits = 3 }.format(value)
-}
+private fun number(value: Double): String = formatDataNumber(value, LocalConfiguration.current.locales[0])
