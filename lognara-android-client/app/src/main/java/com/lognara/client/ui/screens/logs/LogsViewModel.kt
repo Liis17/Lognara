@@ -30,6 +30,7 @@ data class LogPageData(
     val summary: SummaryResponse?,
     val events: List<LogEvent>,
     val nextCursor: String?,
+    val summaryRequest: SummaryRequest? = null,
 )
 
 data class LogsUiState(
@@ -60,6 +61,15 @@ fun buildSummaryRequest(
     text = query.trim().takeIf(String::isNotEmpty)?.let(::TextQuery),
     interval_seconds = intervalSeconds(range),
     search_limit = 50,
+)
+
+fun buildNextPageRequest(summaryRequest: SummaryRequest, cursor: String): SearchRequest = SearchRequest(
+    from = summaryRequest.from,
+    to = summaryRequest.to,
+    filters = summaryRequest.filters,
+    text = summaryRequest.text,
+    limit = summaryRequest.search_limit,
+    cursor = cursor,
 )
 
 private fun levelValue(level: LogLevel): String = when (level) {
@@ -106,21 +116,12 @@ class LogsViewModel(private val api: LognaraApi, private val session: DeviceSess
         val data = (current.result as? DataLoadState.Content)?.value ?: return
         val cursor = data.nextCursor ?: return
         if (current.loadingMore || current.levels.isEmpty()) return
-        val window = timeWindow(current.range)
-        val filters = buildLogFilters(current.levels, current.service)
-        val text = current.query.trim().takeIf(String::isNotEmpty)?.let(::TextQuery)
+        val summaryRequest = data.summaryRequest ?: return
         pagingJob?.cancel()
         _state.value = current.copy(loadingMore = true, pagingError = false)
         pagingJob = viewModelScope.launch {
             try {
-                val request = SearchRequest(
-                    from = window.from,
-                    to = window.to,
-                    filters = filters,
-                    text = text,
-                    limit = 50,
-                    cursor = cursor,
-                )
+                val request = buildNextPageRequest(summaryRequest, cursor)
                 val next = api.authenticatedJson<SearchResponse>(
                     session,
                     "POST",
@@ -171,7 +172,7 @@ class LogsViewModel(private val api: LognaraApi, private val session: DeviceSess
                 )
                 val page = summary.page ?: SearchResponse(emptyList(), null, summary.as_of)
                 _state.value = _state.value.copy(
-                    result = DataLoadState.Content(LogPageData(summary, page.events, page.next_cursor)),
+                    result = DataLoadState.Content(LogPageData(summary, page.events, page.next_cursor, request)),
                 )
             } catch (exception: CancellationException) {
                 throw exception
