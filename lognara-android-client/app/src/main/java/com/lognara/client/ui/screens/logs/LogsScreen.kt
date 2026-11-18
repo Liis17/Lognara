@@ -190,7 +190,7 @@ fun LogsScreen(
                 val data = result.value
                 data.summary?.let { summary ->
                     item(key = "summary") {
-                        SummaryCard(summary = summary, range = state.range)
+                        SummaryCard(summary = summary, range = state.range, modifier = Modifier.padding(horizontal = 16.dp))
                     }
                     item(key = "space-summary") { Spacer(Modifier.height(12.dp)) }
                 }
@@ -226,6 +226,7 @@ fun LogsScreen(
                         EventCardListItem(
                             isFirst = index == 0,
                             isLast = index == data.events.lastIndex,
+                            modifier = Modifier.padding(horizontal = 16.dp),
                         ) {
                             EventListRow(event = event, onClick = { onOpenEvent(event) })
                         }
@@ -316,7 +317,7 @@ private fun LevelFilterPill(level: LogLevel, selected: Boolean, onClick: () -> U
 }
 
 @Composable
-private fun SummaryCard(summary: SummaryResponse, range: DataRange) {
+private fun SummaryCard(summary: SummaryResponse, range: DataRange, modifier: Modifier = Modifier) {
     val locale = LocalLocale.current.platformLocale
     val chartDescription = stringResource(R.string.logs_chart_description, stringResource(range.label))
     val levels = listOf(
@@ -328,7 +329,7 @@ private fun SummaryCard(summary: SummaryResponse, range: DataRange) {
         LogLevel.FATAL,
         LogLevel.UNKNOWN,
     )
-    LognaraCard {
+    LognaraCard(modifier = modifier) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.Bottom,

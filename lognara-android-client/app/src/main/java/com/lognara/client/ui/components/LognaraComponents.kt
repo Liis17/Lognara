@@ -228,7 +228,12 @@ fun LognaraCard(
 
 /** Строка в ленивом списке, оформленная как часть одной карточки. */
 @Composable
-fun EventCardListItem(isFirst: Boolean, isLast: Boolean, content: @Composable () -> Unit) {
+fun EventCardListItem(
+    isFirst: Boolean,
+    isLast: Boolean,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit,
+) {
     val shape = remember(isFirst, isLast) {
         RoundedCornerShape(
             topStart = if (isFirst) 20.dp else 0.dp,
@@ -238,7 +243,7 @@ fun EventCardListItem(isFirst: Boolean, isLast: Boolean, content: @Composable ()
         )
     }
     Column(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .clip(shape)
             .background(LognaraPalette.Surface)

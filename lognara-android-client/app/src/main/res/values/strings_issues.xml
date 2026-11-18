@@ -16,11 +16,12 @@
     <string name="issue_fingerprint_label">Fingerprint</string>
     <string name="issue_copy_fingerprint">Скопировать fingerprint</string>
     <string name="issue_examples_count">%1$d последних</string>
-    <plurals name="issue_events_count">
-        <item quantity="one">%1$d событие</item>
-        <item quantity="few">%1$d события</item>
-        <item quantity="many">%1$d событий</item>
-        <item quantity="other">%1$d события</item>
+    <!-- Число событий показано крупно над подписью, поэтому здесь только слово. -->
+    <plurals name="issue_events_word">
+        <item quantity="one">событие</item>
+        <item quantity="few">события</item>
+        <item quantity="many">событий</item>
+        <item quantity="other">события</item>
     </plurals>
     <plurals name="issue_servers_count">
         <item quantity="one">%1$d сервер</item>

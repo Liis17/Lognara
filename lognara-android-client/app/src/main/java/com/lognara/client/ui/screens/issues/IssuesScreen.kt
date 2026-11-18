@@ -367,7 +367,7 @@ private fun issueCountSummary(issue: Issue): String {
     val resources = LocalContext.current.resources
     val eventQuantity = issue.count.coerceIn(0, Int.MAX_VALUE.toLong()).toInt()
     val serverQuantity = issue.servers.coerceIn(0, Int.MAX_VALUE.toLong()).toInt()
-    val eventText = resources.getQuantityString(R.plurals.issue_events_count, eventQuantity, issue.count)
+    val eventText = resources.getQuantityString(R.plurals.issue_events_word, eventQuantity)
     val serverText = resources.getQuantityString(R.plurals.issue_servers_count, serverQuantity, issue.servers)
     return stringResource(R.string.issue_count_summary, eventText, serverText)
 }
@@ -528,7 +528,7 @@ private fun IssueDetailsContent(
     LazyColumn(
         modifier = modifier.fillMaxWidth().padding(horizontal = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
-        contentPadding = PaddingValues(top = 24.dp, bottom = 24.dp),
+        contentPadding = PaddingValues(top = 4.dp, bottom = 24.dp),
     ) {
         item {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(horizontal = 4.dp)) {

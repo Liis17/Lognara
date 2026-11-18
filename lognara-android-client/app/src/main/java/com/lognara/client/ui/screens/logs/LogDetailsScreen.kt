@@ -73,8 +73,13 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonPrimitive
+import java.util.Locale
+import java.text.NumberFormat
+import kotlinx.serialization.json.doubleOrNull
+import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.JsonElement
 
 private enum class AttributeView { Table, Json }
 private val attributesJson = Json { prettyPrint = true }
@@ -181,7 +186,11 @@ fun EventDetailScreen(event: LogEvent, onBack: () -> Unit, onOpenTrace: (LogEven
             ) {
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(stringResource(R.string.event_field_attributes), fontSize = 16.sp, color = LognaraPalette.Text)
-                    Text(event.backend, style = monoStyle(13), color = LognaraPalette.TextMuted)
+                    Text(
+                        remember(event.attributes) { attributeRootName(event.attributes) } ?: event.backend,
+                        style = monoStyle(13),
+                        color = LognaraPalette.TextMuted,
+                    )
                 }
                 SegmentedSelector(
                     options = AttributeView.entries,
@@ -284,37 +293,65 @@ private fun AttributeTable(attributes: Map<String, kotlinx.serialization.json.Js
         )
         return
     }
-    val groups = attributes.toSortedMap().entries.groupBy { attributeGroup(it.key) }
-    val groupOrder = listOf("Counters", "Gauges", "Атрибуты")
-    val visibleGroups = groupOrder.mapNotNull { name -> groups[name]?.let { name to it } }
+    val defaultGroup = stringResource(R.string.event_field_attributes)
+    val sections = remember(attributes) { attributeSections(attributes) }
     LognaraCard(
         contentPadding = PaddingValues(0.dp),
         verticalArrangement = Arrangement.spacedBy(0.dp),
     ) {
-        visibleGroups.forEachIndexed { groupIndex, (name, entries) ->
+        sections.forEachIndexed { sectionIndex, section ->
             Box(
                 Modifier.fillMaxWidth().background(LognaraPalette.Text.copy(alpha = 0.02f)).padding(horizontal = 14.dp, vertical = 8.dp),
             ) {
-                SectionLabel(name)
+                SectionLabel(section.title ?: defaultGroup)
             }
             RowDivider()
-            entries.forEachIndexed { index, entry ->
-                AttributeRow(key = entry.key, value = attributeText(entry.value))
-                if (index < entries.lastIndex) RowDivider()
+            section.rows.forEachIndexed { index, (key, value) ->
+                AttributeRow(key = key, value = value)
+                if (index < section.rows.lastIndex) RowDivider()
             }
-            if (groupIndex < visibleGroups.lastIndex) RowDivider()
+            if (sectionIndex < sections.lastIndex) RowDivider()
         }
     }
 }
 
-private fun attributeGroup(key: String): String = when {
-    key.startsWith("disk.") || key.startsWith("net.") -> "Counters"
-    key.startsWith("cpu.") || key.startsWith("fs.") -> "Gauges"
-    else -> "Атрибуты"
+internal data class AttributeSection(val title: String?, val rows: List<Pair<String, String>>)
+
+/**
+ * Раскладывает атрибуты события в секции таблицы: простые значения верхнего уровня
+ * попадают в общую секцию (title = null), вложенные объекты разворачиваются
+ * в секции по имени объекта, как `Metrics.Counters` → «Counters».
+ */
+internal fun attributeSections(attributes: Map<String, JsonElement>, locale: Locale = Locale.getDefault()): List<AttributeSection> {
+    val sections = mutableListOf<AttributeSection>()
+    fun walk(title: String?, values: Map<String, JsonElement>) {
+        val rows = values.entries
+            .filter { it.value !is JsonObject }
+            .sortedBy { it.key }
+            .map { it.key to attributeText(it.value, locale) }
+        if (rows.isNotEmpty()) sections += AttributeSection(title, rows)
+        values.entries
+            .filter { it.value is JsonObject }
+            .sortedBy { it.key }
+            .forEach { walk(it.key, it.value.jsonObject) }
+    }
+    walk(null, attributes)
+    return sections
 }
 
-private fun attributeText(value: kotlinx.serialization.json.JsonElement): String =
-    runCatching { value.jsonPrimitive.contentOrNull }.getOrNull() ?: value.toString()
+/** Подпись при заголовке «Атрибуты»: имя единственного вложенного объекта, например `Metrics`. */
+internal fun attributeRootName(attributes: Map<String, JsonElement>): String? =
+    attributes.entries.singleOrNull()?.takeIf { it.value is JsonObject }?.key
+
+private fun attributeText(value: JsonElement, locale: Locale): String {
+    val primitive = value as? JsonPrimitive ?: return value.toString()
+    if (primitive.isString) return primitive.content
+    primitive.longOrNull?.let { return NumberFormat.getIntegerInstance(locale).format(it) }
+    primitive.doubleOrNull?.let {
+        return NumberFormat.getNumberInstance(locale).apply { maximumFractionDigits = 2 }.format(it)
+    }
+    return primitive.content
+}
 
 @Composable
 private fun AttributeRow(key: String, value: String) {
