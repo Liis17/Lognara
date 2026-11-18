@@ -1,0 +1,21 @@
+<resources>
+    <string name="logs_subtitle">%1$s · все серверы</string>
+    <string name="logs_service_hint">service:</string>
+    <string name="logs_service_all">Сервис: все</string>
+    <string name="logs_service_selected">Сервис: %1$s</string>
+    <string name="logs_service_dialog_title">Фильтр сервиса</string>
+    <string name="logs_service_dialog_hint">Название сервиса</string>
+    <string name="logs_service_apply">Применить</string>
+    <string name="logs_service_all_action">Все сервисы</string>
+    <string name="logs_summary_title">Событий за %1$s</string>
+    <string name="logs_newest_first">Новые сверху</string>
+    <string name="logs_today">Сегодня, %1$s</string>
+    <string name="logs_empty">Нет событий за выбранный период.</string>
+    <string name="logs_chart_description">График событий за %1$s по уровням</string>
+    <string name="logs_trace_title">Трасса</string>
+    <string name="event_copy_json">Копировать событие как JSON</string>
+    <string name="event_hidden_fields">Пустые поля скрыты: %1$s.</string>
+    <string name="event_attributes_table">Таблица</string>
+    <string name="event_attributes_json">JSON</string>
+    <string name="event_attributes_empty">Атрибутов нет.</string>
+</resources>
