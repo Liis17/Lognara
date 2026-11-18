@@ -1,25 +1,39 @@
 package com.lognara.client.ui.screens.infra
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.material3.Button
-import androidx.compose.material3.Card
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.lognara.client.R
@@ -31,197 +45,450 @@ import com.lognara.client.data.InfrastructureResponse
 import com.lognara.client.data.InfrastructureStorage
 import com.lognara.client.data.LognaraApi
 import com.lognara.client.data.SpoolUsage
+import com.lognara.client.ui.components.LognaraCard
+import com.lognara.client.ui.components.RowDivider
+import com.lognara.client.ui.components.RoundIconButton
+import com.lognara.client.ui.components.ScreenHeader
+import com.lognara.client.ui.components.SettingsButton
+import com.lognara.client.ui.components.StatValue
+import com.lognara.client.ui.components.StatusPill
+import com.lognara.client.ui.components.UsageBar
+import com.lognara.client.ui.components.monoStyle
 import com.lognara.client.ui.screens.data.DataLoadState
 import com.lognara.client.ui.screens.data.DataStateContent
 import com.lognara.client.ui.screens.data.formatDataNumber
 import com.lognara.client.ui.screens.data.localTimestamp
-import com.lognara.client.ui.theme.MachineTextStyle
+import com.lognara.client.ui.theme.LognaraPalette
+import com.lognara.client.ui.theme.LognaraSemanticColors
 import java.time.Duration
 import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 @Composable
 @OptIn(ExperimentalMaterial3Api::class)
 fun InfrastructureScreen(api: LognaraApi, session: DeviceSession, onSettings: () -> Unit) {
-    androidx.compose.foundation.layout.Column(Modifier.fillMaxSize()) {
-        com.lognara.client.ui.components.ScreenHeader(
-            title = stringResource(R.string.tab_infrastructure),
-            actions = { com.lognara.client.ui.components.SettingsButton(onSettings) },
-        )
-        androidx.compose.foundation.layout.Box(Modifier.weight(1f)) {
     val viewModel: InfrastructureViewModel = viewModel(key = "infrastructure-${session.deviceId}") {
         InfrastructureViewModel(api, session)
     }
     val state by viewModel.state.collectAsStateWithLifecycle()
-
-    PullToRefreshBox(
-        isRefreshing = state is DataLoadState.Loading,
-        onRefresh = viewModel::reload,
-        modifier = Modifier.fillMaxSize(),
-    ) {
-        DataStateContent(
-            state = state,
-            isEmpty = { false },
-            onRetry = viewModel::reload,
-            modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
-        ) { response ->
-            InfrastructureContent(response, viewModel::reload)
-        }
+    val snapshot = when (val current = state) {
+        is DataLoadState.Content -> localTimestamp(current.value.as_of)
+        else -> null
     }
+
+    Column(Modifier.fillMaxSize()) {
+        ScreenHeader(
+            title = stringResource(R.string.tab_infrastructure),
+            subtitleContent = {
+                snapshot?.let {
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text(stringResource(R.string.infra_ui_snapshot), fontSize = 12.sp, color = LognaraPalette.TextMuted)
+                        Text(it, style = monoStyle(12), color = LognaraPalette.TextMuted, maxLines = 1)
+                    }
+                }
+            },
+            actions = {
+                RoundIconButton(
+                    icon = R.drawable.ic_refresh,
+                    contentDescription = stringResource(R.string.infra_ui_refresh),
+                    onClick = viewModel::reload,
+                )
+                SettingsButton(onSettings)
+            },
+        )
+        Box(Modifier.weight(1f)) {
+            PullToRefreshBox(
+                isRefreshing = state is DataLoadState.Loading,
+                onRefresh = viewModel::reload,
+                modifier = Modifier.fillMaxSize(),
+            ) {
+                DataStateContent(
+                    state = state,
+                    isEmpty = { false },
+                    onRetry = viewModel::reload,
+                    modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+                ) { response ->
+                    InfrastructureContent(response)
+                }
+            }
         }
     }
 }
 
 @Composable
-private fun InfrastructureContent(response: InfrastructureResponse, onRefresh: () -> Unit) {
+private fun InfrastructureContent(response: InfrastructureResponse) {
     val groups = groupInfrastructureNodes(response.nodes)
     LazyColumn(
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+        contentPadding = PaddingValues(bottom = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
         modifier = Modifier.fillMaxSize(),
     ) {
-        item {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(stringResource(R.string.infra_updated, localTimestamp(response.as_of)), style = MaterialTheme.typography.labelMedium)
-                Button(onClick = onRefresh) { Text(stringResource(R.string.issue_refresh)) }
+        item(key = "service-cards") {
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                CoreCard(response.core, Modifier.weight(1f))
+                DockCard(response.dock, Modifier.weight(1f))
             }
         }
-        item { CoreCard(response.core) }
-        item { DockCard(response.dock) }
-        item { StorageCard(response.storage) }
-        item { Text(stringResource(R.string.infra_nodes), style = MaterialTheme.typography.titleLarge) }
+        item(key = "storage") { StorageCard(response.storage) }
+        item(key = "nodes-heading") {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(start = 4.dp, end = 4.dp, top = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text(stringResource(R.string.infra_nodes), fontSize = 16.sp, fontWeight = FontWeight.W600, color = LognaraPalette.Text)
+                Text(
+                    stringResource(
+                        R.string.infra_ui_nodes_summary,
+                        response.nodes.count { it.kind == "relay" },
+                        response.nodes.count { it.kind == "agent" },
+                    ),
+                    fontSize = 12.sp,
+                    color = LognaraPalette.TextMuted,
+                    maxLines = 1,
+                )
+            }
+        }
         if (!response.registry) {
-            item { Text(stringResource(R.string.infra_registry_unavailable), color = MaterialTheme.colorScheme.error) }
+            item(key = "registry-unavailable") {
+                Text(
+                    stringResource(R.string.infra_registry_unavailable),
+                    fontSize = 13.sp,
+                    color = LognaraPalette.TextMuted,
+                    modifier = Modifier.padding(horizontal = 4.dp),
+                )
+            }
         } else if (groups.isEmpty()) {
-            item { Text(stringResource(R.string.infra_nodes_empty), color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            item(key = "nodes-empty") {
+                Text(
+                    stringResource(R.string.infra_nodes_empty),
+                    fontSize = 13.sp,
+                    color = LognaraPalette.TextMuted,
+                    modifier = Modifier.padding(horizontal = 4.dp),
+                )
+            }
         } else {
             groups.forEach { group ->
                 item(key = "relay-${group.relayId ?: group.relayName ?: "none"}") {
-                    Text(
-                        text = group.relayName?.let { stringResource(R.string.infra_relay_group, it) }
-                            ?: stringResource(R.string.infra_relay_unassigned),
-                        style = MaterialTheme.typography.titleMedium,
+                    RelayGroupCard(group, response.as_of, response.thresholds.spool_warn_percent)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CoreCard(core: CoreStatus, modifier: Modifier) {
+    val statusColor = coreStatusColor(core.status)
+    LognaraCard(
+        modifier = modifier,
+        contentPadding = PaddingValues(14.dp),
+        shape = RoundedCornerShape(14.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(
+                stringResource(R.string.infra_core),
+                modifier = Modifier.weight(1f),
+                fontSize = 15.sp,
+                fontWeight = FontWeight.W600,
+                color = LognaraPalette.Text,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            StatusPill(stringResource(coreStatusLabel(core.status)), statusColor)
+        }
+        (core.release_version ?: core.version ?: core.git_commit)?.let {
+            Text(it, style = monoStyle(12), color = LognaraPalette.TextMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        core.visibility_lag_ms?.let {
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(stringResource(R.string.infra_ui_publication_delay), fontSize = 12.sp, color = LognaraPalette.TextMuted)
+                Text(
+                    stringResource(R.string.infra_ui_seconds, number(it / 1000.0)),
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.W600,
+                    color = LognaraPalette.Text,
+                )
+            }
+        }
+        val walBytes = core.wal_bytes
+        val walLimitBytes = core.wal_limit_bytes
+        if (walBytes != null && walLimitBytes != null) {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    stringResource(R.string.infra_ui_wal_line, byteValue(walBytes), byteValue(walLimitBytes)),
+                    fontSize = 12.sp,
+                    color = LognaraPalette.TextMuted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (walLimitBytes > 0) {
+                    val fraction = walBytes.toDouble().div(walLimitBytes).toFloat().coerceIn(0f, 1f)
+                    val description = stringResource(R.string.infra_ui_wal_line, byteValue(walBytes), byteValue(walLimitBytes))
+                    UsageBar(
+                        fraction = fraction,
+                        color = LognaraPalette.Accent,
+                        modifier = Modifier.semantics {
+                            contentDescription = description
+                            progressBarRangeInfo = ProgressBarRangeInfo(fraction, 0f..1f)
+                        },
                     )
                 }
-                items(group.nodes, key = { "${it.kind}-${it.id}" }) { node ->
-                    InfrastructureNodeCard(node, response.as_of, response.thresholds.spool_warn_percent)
-                }
             }
-        }
-        item {
-            Text(
-                stringResource(
-                    R.string.infra_thresholds,
-                    response.thresholds.heartbeat_ttl_seconds,
-                    response.thresholds.idle_seconds,
-                    response.thresholds.spool_warn_percent,
-                ),
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall,
-            )
         }
     }
 }
 
 @Composable
-private fun CoreCard(core: CoreStatus) {
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            Text(stringResource(R.string.infra_core), style = MaterialTheme.typography.titleMedium)
-            Text(stringResource(coreStatusLabel(core.status)), color = statusColor(core.status))
-            Text(stringResource(R.string.infra_version, core.release_version ?: core.version ?: core.git_commit ?: "—"))
-            core.visibility_lag_ms?.let {
-                Text(stringResource(R.string.infra_visibility_lag, number(it / 1000.0)))
-            }
+private fun DockCard(dock: DockStatus, modifier: Modifier) {
+    LognaraCard(
+        modifier = modifier,
+        contentPadding = PaddingValues(14.dp),
+        shape = RoundedCornerShape(14.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
             Text(
-                stringResource(
-                    R.string.infra_wal,
-                    core.wal_bytes?.let { byteValue(it) } ?: stringResource(R.string.infra_no_data),
-                    core.wal_limit_bytes?.let { byteValue(it) } ?: stringResource(R.string.infra_no_data),
-                ),
+                stringResource(R.string.infra_dock),
+                modifier = Modifier.weight(1f),
+                fontSize = 15.sp,
+                fontWeight = FontWeight.W600,
+                color = LognaraPalette.Text,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
+            // Успешный снимок пришёл от Dock, поэтому он отвечает на текущий запрос.
+            StatusPill(stringResource(R.string.infra_status_online), LognaraSemanticColors.statusOk)
         }
-    }
-}
-
-@Composable
-private fun DockCard(dock: DockStatus) {
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            Text(stringResource(R.string.infra_dock), style = MaterialTheme.typography.titleMedium)
-            Text(stringResource(R.string.infra_version, dock.release_version ?: dock.version))
-            Text(stringResource(R.string.infra_sse_clients, dock.sse_clients))
-            Text(stringResource(R.string.infra_sessions, dock.sessions?.let { number(it) } ?: stringResource(R.string.infra_no_data)))
+        Text(
+            dock.release_version ?: dock.version,
+            style = monoStyle(12),
+            color = LognaraPalette.TextMuted,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        dock.sessions?.let {
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(stringResource(R.string.infra_ui_sessions), fontSize = 12.sp, color = LognaraPalette.TextMuted)
+                Text(number(it), fontSize = 18.sp, fontWeight = FontWeight.W600, color = LognaraPalette.Text)
+            }
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(stringResource(R.string.infra_ui_sse_clients), fontSize = 12.sp, color = LognaraPalette.TextMuted)
+            Text(number(dock.sse_clients), fontSize = 18.sp, fontWeight = FontWeight.W600, color = LognaraPalette.Text)
         }
     }
 }
 
 @Composable
 private fun StorageCard(storage: InfrastructureStorage?) {
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            Text(stringResource(R.string.infra_storage), style = MaterialTheme.typography.titleMedium)
-            if (storage == null) {
-                Text(stringResource(R.string.infra_storage_unavailable), color = MaterialTheme.colorScheme.onSurfaceVariant)
-            } else {
-                val used = (storage.disk_total_bytes - storage.disk_free_bytes).coerceAtLeast(0)
-                Text(stringResource(R.string.infra_storage_usage, byteValue(used), byteValue(storage.disk_total_bytes)))
-                Text(stringResource(R.string.infra_storage_free, byteValue(storage.disk_free_bytes)))
-                Text(stringResource(R.string.infra_storage_segments, number(storage.segments)))
-                Text(stringResource(R.string.infra_storage_parts, byteValue(storage.parquet_bytes), byteValue(storage.index_bytes)))
-                Text(stringResource(R.string.infra_retention, number(storage.retention_seconds / 86_400.0)))
+    LognaraCard {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(
+                stringResource(R.string.infra_storage),
+                modifier = Modifier.weight(1f),
+                fontSize = 15.sp,
+                fontWeight = FontWeight.W600,
+                color = LognaraPalette.Text,
+            )
+            if (storage != null && storage.disk_total_bytes > 0) {
+                val total = storage.disk_total_bytes
+                val used = (total - storage.disk_free_bytes).coerceAtLeast(0)
                 Text(
-                    storage.oldest_event_at?.let {
-                        stringResource(R.string.infra_oldest_event, localTimestamp(it))
-                    } ?: stringResource(R.string.infra_no_events),
+                    stringResource(R.string.infra_ui_storage_occupied, number(used.toDouble() * 100 / total)),
+                    fontSize = 12.sp,
+                    color = LognaraPalette.TextMuted,
+                    maxLines = 1,
                 )
             }
         }
-    }
-}
-
-@Composable
-private fun InfrastructureNodeCard(node: InfrastructureNode, asOf: String, spoolWarnPercent: Long) {
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(
-                stringResource(nodeKindLabel(node.kind), node.name),
-                style = MaterialTheme.typography.titleSmall,
-            )
-            Text(stringResource(nodeStatusLabel(node.status)), color = statusColor(node.status))
-            node.reason?.let { reason ->
-                val message = if (reason == "spool") {
-                    stringResource(R.string.infra_reason_spool, spoolWarnPercent)
-                } else {
-                    stringResource(nodeReasonLabel(reason))
+        if (storage == null) {
+            Text(stringResource(R.string.infra_storage_unavailable), fontSize = 13.sp, color = LognaraPalette.TextMuted)
+        } else {
+            val total = storage.disk_total_bytes
+            val free = storage.disk_free_bytes
+            if (total > 0) {
+                val used = (total - free).coerceAtLeast(0)
+                val fraction = (used.toDouble() / total).toFloat().coerceIn(0f, 1f)
+                val description = stringResource(R.string.infra_ui_storage_occupied, number(fraction * 100))
+                Row(verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(byteValue(used), fontSize = 26.sp, lineHeight = 33.sp, fontWeight = FontWeight.W600, color = LognaraPalette.Text)
+                    Text(
+                        stringResource(R.string.infra_ui_storage_value_suffix, byteValue(total)),
+                        fontSize = 13.sp,
+                        color = LognaraPalette.TextMuted,
+                    )
                 }
-                Text(message)
+                UsageBar(
+                    fraction = fraction,
+                    color = LognaraPalette.Accent,
+                    modifier = Modifier.semantics {
+                        contentDescription = description
+                        progressBarRangeInfo = ProgressBarRangeInfo(fraction, 0f..1f)
+                    },
+                )
             }
-            Text(stringResource(R.string.infra_heartbeat, ageLabel(node.heartbeat_at, asOf)))
-            Text(stringResource(R.string.infra_last_event, ageLabel(node.last_event_at, asOf)))
-            node.version?.let { version ->
-                Text(stringResource(R.string.infra_version, node.release_version ?: version))
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                StatValue(
+                    stringResource(R.string.infra_ui_retention),
+                    stringResource(R.string.infra_ui_retention_days, number(storage.retention_seconds / 86_400.0)),
+                    modifier = Modifier.weight(1f),
+                )
+                StatValue(stringResource(R.string.infra_ui_segments), number(storage.segments), modifier = Modifier.weight(1f))
+                StatValue(stringResource(R.string.infra_ui_free), byteValue(free), modifier = Modifier.weight(1f))
             }
-            node.spool?.let { Text(spoolLabel(it, spoolWarnPercent)) }
-            node.delivery_failures?.let { Text(stringResource(R.string.infra_delivery_failures, it)) }
-            node.events_per_second?.let { Text(stringResource(R.string.infra_events_rate, number(it))) }
-            node.source?.let { source ->
-                Text(stringResource(R.string.infra_source, source.service, source.server), style = MachineTextStyle)
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                StatValue(stringResource(R.string.infra_ui_parquet), byteValue(storage.parquet_bytes), modifier = Modifier.weight(1f))
+                StatValue(stringResource(R.string.infra_ui_indexes), byteValue(storage.index_bytes), modifier = Modifier.weight(1f))
+                val oldestDate = storage.oldest_event_at?.let(::localDate)
+                if (oldestDate != null) {
+                    StatValue(stringResource(R.string.infra_ui_since), oldestDate, modifier = Modifier.weight(1f))
+                } else {
+                    Spacer(Modifier.weight(1f))
+                }
             }
-            node.relay?.let { Text(stringResource(R.string.infra_relay_name, it), style = MachineTextStyle) }
         }
     }
 }
 
 @Composable
-private fun spoolLabel(spool: SpoolUsage, warn: Long): String {
-    val percent = if (spool.limit_bytes > 0) {
-        (spool.used_bytes.toDouble() * 100 / spool.limit_bytes).toInt().coerceIn(0, 100)
-    } else {
-        null
+private fun RelayGroupCard(group: InfrastructureNodeGroup, asOf: String, spoolWarnPercent: Long) {
+    val relay = group.nodes.firstOrNull { it.kind == "relay" }
+    val standaloneHost = group.nodes.firstOrNull { it.kind == "host" }
+    val statusNode = relay ?: standaloneHost
+    val statusDescription = statusNode?.let { stringResource(nodeStatusLabel(it.status)) }
+        ?: stringResource(R.string.infra_status_unknown)
+    val title = relay?.name ?: group.relayName
+        ?: stringResource(R.string.infra_ui_unassigned_group)
+
+    LognaraCard(
+        contentPadding = PaddingValues(0.dp),
+        verticalArrangement = Arrangement.spacedBy(0.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().background(LognaraPalette.SurfaceRaised).padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Icon(
+                painter = painterResource(R.drawable.ic_node),
+                contentDescription = null,
+                tint = LognaraSemanticColors.statusInfo,
+                modifier = Modifier.size(18.dp),
+            )
+            Text(
+                title,
+                modifier = Modifier.weight(1f),
+                fontSize = 14.sp,
+                fontWeight = FontWeight.W600,
+                color = LognaraPalette.Text,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Box(
+                Modifier
+                    .size(8.dp)
+                    .clip(CircleShape)
+                    .background(statusNode?.let { nodeStatusColor(it.status) } ?: LognaraSemanticColors.statusWarn)
+                    .semantics { contentDescription = statusDescription },
+            )
+        }
+        RowDivider()
+        group.nodes.filter { it.kind != "relay" }.forEachIndexed { index, node ->
+            if (index > 0) RowDivider()
+            InfrastructureNodeContent(node, asOf, spoolWarnPercent)
+        }
     }
-    return if (percent == null) {
-        stringResource(R.string.infra_spool_no_limit, byteValue(spool.used_bytes), number(spool.records))
-    } else {
-        stringResource(R.string.infra_spool, byteValue(spool.used_bytes), byteValue(spool.limit_bytes), percent, warn, number(spool.records))
+}
+
+@Composable
+private fun InfrastructureNodeContent(node: InfrastructureNode, asOf: String, spoolWarnPercent: Long) {
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                node.name,
+                modifier = Modifier.weight(1f),
+                style = monoStyle(13, FontWeight.W500),
+                color = LognaraPalette.Text,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            StatusPill(stringResource(nodeStatusLabel(node.status)), nodeStatusColor(node.status))
+        }
+        node.reason?.let { reason ->
+            val message = if (reason == "spool") {
+                stringResource(R.string.infra_reason_spool, spoolWarnPercent)
+            } else {
+                stringResource(nodeReasonLabel(reason))
+            }
+            Text(message, fontSize = 12.sp, color = LognaraPalette.TextMuted)
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            StatValue(
+                stringResource(R.string.infra_ui_heartbeat),
+                ageLabel(node.heartbeat_at, asOf),
+                modifier = Modifier.weight(1f),
+            )
+            StatValue(
+                stringResource(R.string.infra_ui_last_event),
+                ageLabel(node.last_event_at, asOf),
+                modifier = Modifier.weight(1f),
+            )
+            StatValue(
+                stringResource(R.string.infra_ui_failures),
+                node.delivery_failures?.let { number(it) } ?: stringResource(R.string.infra_no_data),
+                modifier = Modifier.weight(1f),
+            )
+        }
+        node.spool?.let { SpoolUsageContent(it, spoolWarnPercent) }
+        val metadata = listOfNotNull(
+            node.source?.service?.takeIf(String::isNotBlank),
+            node.source?.server?.takeIf(String::isNotBlank),
+            (node.release_version ?: node.version)?.takeIf(String::isNotBlank),
+        ).joinToString(" · ")
+        if (metadata.isNotEmpty()) {
+            Text(metadata, style = monoStyle(12), color = LognaraPalette.TextMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
+@Composable
+private fun SpoolUsageContent(spool: SpoolUsage, warnPercent: Long) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(
+                stringResource(R.string.infra_ui_spool_line, byteValue(spool.used_bytes), byteValue(spool.limit_bytes)),
+                fontSize = 12.sp,
+                color = LognaraPalette.TextMuted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                stringResource(R.string.infra_ui_spool_threshold, warnPercent),
+                fontSize = 12.sp,
+                color = LognaraPalette.TextMuted,
+                maxLines = 1,
+            )
+        }
+        if (spool.limit_bytes > 0) {
+            val fraction = (spool.used_bytes.toDouble() / spool.limit_bytes).toFloat().coerceIn(0f, 1f)
+            val description = stringResource(R.string.infra_ui_spool_line, byteValue(spool.used_bytes), byteValue(spool.limit_bytes))
+            UsageBar(
+                fraction = fraction,
+                color = LognaraPalette.Accent,
+                modifier = Modifier.semantics {
+                    contentDescription = description
+                    progressBarRangeInfo = ProgressBarRangeInfo(fraction, 0f..1f)
+                },
+            )
+        }
     }
 }
 
@@ -253,7 +520,13 @@ private fun byteValue(value: Long): String {
 }
 
 @Composable
-private fun number(value: Number): String = formatDataNumber(value, LocalConfiguration.current.locales[0])
+private fun number(value: Number): String = formatDataNumber(value, Locale.forLanguageTag("ru-RU"))
+
+private fun localDate(value: String): String? = runCatching {
+    DateTimeFormatter.ofPattern("dd.MM", Locale.forLanguageTag("ru-RU"))
+        .withZone(ZoneId.systemDefault())
+        .format(Instant.parse(value))
+}.getOrNull()
 
 private fun coreStatusLabel(status: String): Int = when (status) {
     "online" -> R.string.infra_status_online
@@ -276,15 +549,17 @@ private fun nodeReasonLabel(reason: String): Int = when (reason) {
     else -> R.string.infra_reason_delivery
 }
 
-private fun nodeKindLabel(kind: String): Int = when (kind) {
-    "relay" -> R.string.infra_node_relay
-    "host" -> R.string.infra_node_host
-    else -> R.string.infra_node_agent
+@Composable
+private fun coreStatusColor(status: String): Color = when (status) {
+    "online" -> LognaraSemanticColors.statusOk
+    "not_ready" -> LognaraSemanticColors.statusWarn
+    else -> LognaraSemanticColors.statusErr
 }
 
 @Composable
-private fun statusColor(status: String) = when (status) {
-    "online" -> MaterialTheme.colorScheme.primary
-    "idle", "unknown", "not_ready", "degraded" -> MaterialTheme.colorScheme.tertiary
-    else -> MaterialTheme.colorScheme.error
+private fun nodeStatusColor(status: String): Color = when (status) {
+    "online" -> LognaraSemanticColors.statusOk
+    "idle" -> LognaraSemanticColors.statusInfo
+    "degraded", "unknown", "not_ready" -> LognaraSemanticColors.statusWarn
+    else -> LognaraSemanticColors.statusErr
 }
