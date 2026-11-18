@@ -8,7 +8,7 @@ Parent: [[Index]]
 
 - Kotlin, Jetpack Compose, Material 3; один модуль `app`, пакет `com.lognara.client`, minSdk 35, target/compileSdk 37. Версии в `gradle/libs.versions.toml`, Gradle wrapper 9.4.1 (AGP 9.2.1 требует именно его).
 - Без DI и Room: ручной контейнер в `LognaraApplication.kt`.
-- Сборка требует JDK 21 (JBR Android Studio): `./gradlew lint testDebugUnitTest assembleDebug`. В CI Android-проверок нет.
+- Сборка требует JDK 21 (JBR Android Studio): `./gradlew lint testDebugUnitTest assembleDebug`. Проверки CI описаны в [[Repository/CI#Android]].
 
 ## Вход по QR
 
